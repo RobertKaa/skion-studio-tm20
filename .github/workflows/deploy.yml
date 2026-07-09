@@ -1,8 +1,17 @@
+# Deploys the Vite production build (dist/) to GitHub Pages.
+#
+# REQUIRED GitHub setting (Settings → Pages → Build and deployment):
+#   Source = "GitHub Actions" (NOT "Deploy from a branch").
+# If Pages still serves the repo-root index.html (with /src/main.tsx), branch
+# deploy is active and overrides this workflow's artifact.
+
+
 name: Deploy to GitHub Pages
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,6 +21,9 @@ permissions:
 concurrency:
   group: pages
   cancel-in-progress: true
+
+env:
+  VITE_BASE_PATH: /skion-studio-tm20/
 
 jobs:
   build:
@@ -26,6 +38,13 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+
+      - name: Verify production build
+        run: |
+          test -f dist/index.html
+          test -f dist/.nojekyll
+          grep -q '/skion-studio-tm20/assets/' dist/index.html
+          ! grep -q 'src/main.tsx' dist/index.html
 
       - uses: actions/upload-pages-artifact@v3
         with:
