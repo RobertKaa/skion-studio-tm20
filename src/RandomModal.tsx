@@ -52,6 +52,10 @@ const THEME_ORDER: Theme[] = [
   'rally',
   'retro',
   'sponsor',
+  'factory',
+  'drift',
+  'vintage',
+  'esport',
   'full',
 ];
 

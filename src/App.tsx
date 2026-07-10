@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FabricObject, IText, Line } from 'fabric';
-import { EditorCore, type LayerInfo, type Tool, type Transform } from './editor/EditorCore';
+import {
+  EditorCore,
+  type LayerInfo,
+  type MapCopyMode,
+  type Tool,
+  type Transform,
+} from './editor/EditorCore';
 import { CarPreview, type PaintFamily } from './three/CarPreview';
 import {
+  COPY_COMPATIBLE_TARGETS,
   ILLUM_ROLES,
   MAPS,
   MAP_BY_ID,
@@ -79,6 +86,7 @@ function isNoFill(fill: unknown): boolean {
 
 export default function App() {
   const editorHostRef = useRef<HTMLDivElement>(null);
+  const canvasStageRef = useRef<HTMLDivElement>(null);
   const canvasFrameRef = useRef<HTMLDivElement>(null);
   const brushPreviewRef = useRef<HTMLDivElement>(null);
   const brushPointerRef = useRef<{ x: number; y: number } | null>(null);
@@ -113,10 +121,15 @@ export default function App() {
   const [layers, setLayers] = useState<LayerInfo[]>([]);
   const [selection, setSelection] = useState<SelectionState | null>(null);
   const [historyState, setHistoryState] = useState({ undo: false, redo: false });
+  const [dirtyMaps, setDirtyMaps] = useState<Partial<Record<MapId, boolean>>>({});
   const [skinName, setSkinName] = useState('MonSkin');
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [showRandom, setShowRandom] = useState(false);
+  const [showCopyPanel, setShowCopyPanel] = useState(false);
+  const [copyTargets, setCopyTargets] = useState<MapId[]>([]);
+  const [copyMode, setCopyMode] = useState<MapCopyMode>('replace');
+  const [quickRegionKey, setQuickRegionKey] = useState('');
   const [illumRole, setIllumRole] = useState<IllumRole>('always');
   const [coatIntensity, setCoatIntensity] = useState(1);
   const [neonIntensity, setNeonIntensity] = useState(1.4);
@@ -124,6 +137,12 @@ export default function App() {
   const [edit3D, setEdit3D] = useState(false);
   /** Vue active : éditeur 2D classique ou grande vue d'édition 3D. */
   const [view, setView] = useState<'2d' | '3d'>('2d');
+  /** Panneau droit replié pour maximiser le canvas. */
+  const [sidePanelOpen, setSidePanelOpen] = useState(true);
+  /** Sections repliables de la barre d'outils gauche. */
+  const [traceOpen, setTraceOpen] = useState(false);
+  const [brushOpen, setBrushOpen] = useState(true);
+  const [assistOpen, setAssistOpen] = useState(false);
 
   // ---- Outils de précision ----
   const [symmetry, setSymmetry] = useState(false);
@@ -246,6 +265,8 @@ export default function App() {
     const offHist = ed.on('history', () =>
       setHistoryState({ undo: ed.canUndo(), redo: ed.canRedo() }),
     );
+    const syncDirty = () => setDirtyMaps(ed.getDirtyMaps());
+    const offDirty = ed.on('dirty', syncDirty);
     const syncViewport = () => {
       setZoomPercent(ed.getZoomPercent());
       setOverlayTransform(ed.getViewportCssTransform());
@@ -300,6 +321,7 @@ export default function App() {
 
     pushTextures();
     setLayers(ed.getLayers());
+    syncDirty();
     setReady(true);
 
     return () => {
@@ -307,6 +329,7 @@ export default function App() {
       offLayers();
       offSel();
       offHist();
+      offDirty();
       offViewport();
       offBrush();
       pv.dispose();
@@ -316,6 +339,25 @@ export default function App() {
     };
   }, [readSelection]);
 
+  /** Cadre UV carré : taille = min(largeur, hauteur) réelle du stage (évite les cqw/cqh imprécis). */
+  const syncCanvasFit = useCallback(() => {
+    const stage = canvasStageRef.current;
+    if (!stage) return;
+    const { width, height } = stage.getBoundingClientRect();
+    const pad = 8;
+    const fit = Math.max(0, Math.floor(Math.min(width - pad, height - pad)));
+    if (fit > 0) stage.style.setProperty('--canvas-fit', `${fit}px`);
+  }, []);
+
+  useEffect(() => {
+    const stage = canvasStageRef.current;
+    if (!stage || view !== '2d') return;
+    syncCanvasFit();
+    const ro = new ResizeObserver(() => syncCanvasFit());
+    ro.observe(stage);
+    return () => ro.disconnect();
+  }, [syncCanvasFit, view, sidePanelOpen, showCopyPanel, focusedRegion]);
+
   // Rebranche le rendu 3D sur le bon conteneur (petit aperçu vs grande vue) et
   // s'assure que le renderer se redimensionne au changement de mise en page.
   useEffect(() => {
@@ -324,6 +366,15 @@ export default function App() {
     const host = view === '3d' ? preview3dHostRef.current : previewHostRef.current;
     if (host) pv.mount(host);
   }, [view, ready]);
+
+  // Ré-ancrer l'aperçu 3D compact quand le panneau droit se rouvre.
+  useEffect(() => {
+    const pv = previewRef.current;
+    if (!pv || !ready || view !== '2d' || !sidePanelOpen) return;
+    const host = previewHostRef.current;
+    if (!host) return;
+    requestAnimationFrame(() => pv.mount(host));
+  }, [sidePanelOpen, ready, view]);
 
   // En vue 3D la peinture est toujours active ; en vue 2D elle suit le bouton.
   useEffect(() => {
@@ -372,6 +423,18 @@ export default function App() {
         return;
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
+        if (e.shiftKey) {
+          e.preventDefault();
+          const targets = COPY_COMPATIBLE_TARGETS[activeMapRef.current] ?? [];
+          if (!targets.length) {
+            notify('Aucune map liée compatible pour cette texture.');
+            return;
+          }
+          for (const mapId of targets) void ed.copyRenderedMapToMap(activeMapRef.current, mapId, 'replace');
+          const labels = targets.map((id) => MAP_BY_ID[id].label).join(', ');
+          notify(`Map dupliquée vers les maps liées : ${labels}.`);
+          return;
+        }
         e.preventDefault();
         ed.duplicateSelection();
         return;
@@ -444,9 +507,9 @@ export default function App() {
     }
     if (focusedRegion && nextGroup !== 'skin') {
       setFocusedRegion(null);
-      editorRef.current?.focusRegion(null);
+      editorRef.current?.focusRegion(null, syncCanvasFit);
     } else if (focusedRegion && nextGroup === 'skin') {
-      editorRef.current?.focusRegion(focusedRegion);
+      editorRef.current?.focusRegion(focusedRegion, syncCanvasFit);
     }
     if (centerTarget && !nextIslands.some((i) => i.key === centerTarget)) {
       setCenterTarget('');
@@ -466,7 +529,7 @@ export default function App() {
     setClipIsland(key);
     if (MAP_BY_ID[activeMap].group === 'skin') {
       setFocusedRegion(key);
-      editorRef.current?.focusRegion(key);
+      editorRef.current?.focusRegion(key, syncCanvasFit);
     } else {
       editorRef.current?.setClipIsland(key);
     }
@@ -475,7 +538,7 @@ export default function App() {
   const onFocusRegion = (key: string | null) => {
     setFocusedRegion(key);
     setClipIsland(key);
-    editorRef.current?.focusRegion(key);
+    editorRef.current?.focusRegion(key, syncCanvasFit);
   };
 
   const onToggleGrid = () => {
@@ -677,6 +740,7 @@ export default function App() {
     try {
       const result = await importSkinZip(file);
       const applied: string[] = [];
+      const appliedIds: MapId[] = [];
       const applyErrors: string[] = [];
       for (const { id, image, path } of result.imported) {
         const label = MAP_BY_ID[id]?.fileName ?? path;
@@ -686,12 +750,17 @@ export default function App() {
             applyErrors.push(`${label} : conversion canvas impossible`);
             continue;
           }
-          ed.setBackgroundFromCanvas(id, canvas, { flush: false });
+          await ed.setBackgroundFromCanvas(id, canvas, {
+            flush: false,
+            recordHistory: false,
+          });
           applied.push(label);
+          appliedIds.push(id);
         } catch (err) {
           applyErrors.push(formatImportError(label, err));
         }
       }
+      if (appliedIds.length) ed.commitImportState(appliedIds);
       if (applied.length) ed.flushTexture();
       if (applied.length) setBgColor(ed.getBackgroundColor());
       setSkinName(file.name.replace(/\.zip$/i, ''));
@@ -718,6 +787,45 @@ export default function App() {
       setBusy(null);
     }
   };
+
+  const compatibleTargets = COPY_COMPATIBLE_TARGETS[activeMap] ?? [];
+
+  useEffect(() => {
+    setCopyTargets(compatibleTargets);
+    setCopyMode('replace');
+  }, [activeMap]);
+
+  const onToggleCopyTarget = (target: MapId, checked: boolean) => {
+    setCopyTargets((prev) => {
+      if (checked) {
+        if (prev.includes(target)) return prev;
+        return [...prev, target];
+      }
+      return prev.filter((id) => id !== target);
+    });
+  };
+
+  const runCopyToTargets = async (targets: MapId[], mode: MapCopyMode) => {
+    const ed = editorRef.current;
+    if (!ed) return;
+    if (!targets.length) {
+      notify('Sélectionnez au moins une map de destination.');
+      return;
+    }
+    try {
+      for (const target of targets) {
+        await ed.copyRenderedMapToMap(activeMap, target, mode);
+      }
+      const labels = targets.map((id) => MAP_BY_ID[id].label).join(', ');
+      const modeLabel = mode === 'overlay' ? 'superposition' : 'remplacement';
+      notify(`Copie appliquée (${modeLabel}) vers : ${labels}.`);
+    } catch (err) {
+      notify(`Échec de la copie : ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const onCopySelectedTargets = () => runCopyToTargets(copyTargets, copyMode);
+  const onCopyLinkedMaps = () => runCopyToTargets(compatibleTargets, 'replace');
 
   const onExport = async () => {
     const ed = editorRef.current;
@@ -777,9 +885,16 @@ export default function App() {
   const guideIslands = UV_GUIDE_BY_FAMILY[mapDef.group];
   /** Zones « Remplir une pièce » de la famille active (carrosserie ou détails). */
   const regionSet = REGIONS_BY_FAMILY[mapDef.group];
-  /** Les zones details sont dispersées : le remplissage doit être découpé sur les contours. */
-  const clipFillZones = mapDef.group === 'details';
+  const regionEntries = regionSet ? Object.entries(regionSet) : [];
   const [roughVal, metalVal] = hexToRgb(bgColor);
+
+  useEffect(() => {
+    const firstRegion = regionEntries[0]?.[0] ?? '';
+    setQuickRegionKey((prev) => {
+      if (!firstRegion) return '';
+      return regionEntries.some(([key]) => key === prev) ? prev : firstRegion;
+    });
+  }, [activeMap, regionEntries]);
 
   // --------------------------------------------------------------------- UI
 
@@ -833,6 +948,7 @@ export default function App() {
         <div className="layout-2d" style={{ display: view === '2d' ? 'flex' : 'none' }}>
         {/* ----------------------------------------------------- barre d'outils */}
         <aside className="toolbar">
+          <h3 className="toolbar-title">Outils</h3>
           {TOOLS.map((t) => (
             <button
               key={t.id}
@@ -854,7 +970,8 @@ export default function App() {
           </button>
 
           <div className="tool-sep" />
-
+          <details className="toolbar-section" open={traceOpen} onToggle={(e) => setTraceOpen((e.target as HTMLDetailsElement).open)}>
+            <summary>Tracé</summary>
           <label className="tool-field">
             <span>Remplissage</span>
             <input
@@ -883,10 +1000,11 @@ export default function App() {
               disabled={!fillEnabled}
               onChange={(e) => onFillAlpha(Number(e.target.value))}
             />
-          </label>
+            </label>
+          </details>
 
-          <div className="tool-sep" />
-
+          <details className="toolbar-section" open={brushOpen} onToggle={(e) => setBrushOpen((e.target as HTMLDetailsElement).open)}>
+            <summary>Pinceau &amp; fond</summary>
           <label className="tool-field">
             <span>Contour</span>
             <input
@@ -916,7 +1034,6 @@ export default function App() {
 
           {tool === 'polygon' && (
             <>
-              <div className="tool-sep" />
               <label className="tool-field">
                 <span>{polygonStar ? 'Branches' : 'Côtés'} {polygonSides}</span>
                 <input
@@ -937,8 +1054,6 @@ export default function App() {
               </button>
             </>
           )}
-
-          <div className="tool-sep" />
 
           <label className="tool-field">
             <span>Pinceau</span>
@@ -975,17 +1090,9 @@ export default function App() {
             <span>Fond</span>
             <input type="color" value={bgColor} onChange={(e) => onBgChange(e.target.value)} />
           </label>
+          </details>
 
           <div className="tool-sep" />
-
-          <button
-            className={`tool ${showGuide ? 'active' : ''}`}
-            onClick={() => setShowGuide((v) => !v)}
-            title="Afficher les silhouettes UV précises (capot, flancs, aileron…)"
-          >
-            <span className="tool-icon">▦</span>
-            <span className="tool-label">Guide</span>
-          </button>
           <button
             className={`tool ${symmetry ? 'active' : ''}`}
             onClick={onToggleSymmetry}
@@ -1002,23 +1109,16 @@ export default function App() {
             <span className="tool-icon">▤</span>
             <span className="tool-label">Grille</span>
           </button>
+
+          <details className="toolbar-section" open={assistOpen} onToggle={(e) => setAssistOpen((e.target as HTMLDetailsElement).open)}>
+            <summary>Assistants</summary>
           <button
-            className="tool"
-            disabled={!historyState.undo}
-            onClick={() => editorRef.current?.undo()}
-            title="Annuler (Ctrl+Z)"
+            className={`tool ${showGuide ? 'active' : ''}`}
+            onClick={() => setShowGuide((v) => !v)}
+            title="Afficher les silhouettes UV précises (capot, flancs, aileron…)"
           >
-            <span className="tool-icon">↩</span>
-            <span className="tool-label">Annuler</span>
-          </button>
-          <button
-            className="tool"
-            disabled={!historyState.redo}
-            onClick={() => editorRef.current?.redo()}
-            title="Rétablir (Ctrl+Shift+Z)"
-          >
-            <span className="tool-icon">↪</span>
-            <span className="tool-label">Rétablir</span>
+            <span className="tool-icon">▦</span>
+            <span className="tool-label">Guide</span>
           </button>
           <button
             className="tool danger"
@@ -1033,73 +1133,210 @@ export default function App() {
             <span className="tool-icon">🗑</span>
             <span className="tool-label">Vider</span>
           </button>
+          </details>
         </aside>
 
         {/* ------------------------------------------------------------ éditeur */}
         <main className="editor-pane">
-          <div className="map-tabs">
-            {MAPS.map((m) => (
-              <button
-                key={m.id}
-                className={`map-tab ${activeMap === m.id ? 'active' : ''}`}
-                onClick={() => setActiveMap(m.id)}
-                title={m.description}
-              >
-                {m.label}
-                <span className="map-file">{m.fileName}</span>
-              </button>
-            ))}
-          </div>
-          <p className="map-hint">{mapDef.description}</p>
-          {mapDef.group === 'skin' && guideIslands.length > 0 && (
-            <div className="focus-region-bar">
-              <label className="focus-region-label">
-                Élément à éditer
-                <select
-                  className="focus-region-select"
-                  value={focusedRegion ?? ''}
-                  onChange={(e) => onFocusRegion(e.target.value || null)}
-                  title="Isole une pièce de carrosserie : zoom, rognage du pinceau et surbrillance du repère UV"
+          <div className="editor-chrome">
+            <div className="map-tabs">
+              {MAPS.map((m) => (
+                <button
+                  key={m.id}
+                  className={`map-tab ${activeMap === m.id ? 'active' : ''}${
+                    dirtyMaps[m.id] ? ' map-tab--dirty' : ''
+                  }`}
+                  onClick={() => setActiveMap(m.id)}
+                  title={
+                    dirtyMaps[m.id]
+                      ? `${m.description} · modifiée`
+                      : m.description
+                  }
                 >
-                  <option value="">Vue complète (toutes les zones)</option>
-                  {guideIslands.map((i) => (
-                    <option key={i.key} value={i.key}>
-                      {i.label}
+                  <span className="map-tab-label">
+                    {m.label}
+                    {dirtyMaps[m.id] && (
+                      <span className="map-tab-dot" title="Modifiée" aria-hidden />
+                    )}
+                  </span>
+                </button>
+              ))}
+            </div>
+            {regionSet && (
+              <div className="region-quick">
+                <label className="region-fill-color" title="Couleur utilisée par « Remplir »">
+                  <span>Couleur de remplissage</span>
+                  <input
+                    type="color"
+                    value={fillColor}
+                    onChange={(e) => onFillChange(e.target.value)}
+                  />
+                </label>
+                <select
+                  value={quickRegionKey}
+                  onChange={(e) => {
+                    const key = e.target.value;
+                    setQuickRegionKey(key);
+                    if (mapDef.group === 'skin' && focusedRegion) onFocusRegion(key || null);
+                  }}
+                  title="Pièce UV à remplir ou isoler"
+                >
+                  {regionEntries.map(([key, r]) => (
+                    <option key={key} value={key}>
+                      {r.label}
                     </option>
                   ))}
                 </select>
-              </label>
-              {focusedRegion && (
-                <span className="focus-region-hint muted small">
-                  Édition limitée à <b>{guideIslands.find((i) => i.key === focusedRegion)?.label}</b>
-                  {' · '}
-                  <button type="button" className="linkish" onClick={() => onFocusRegion(null)}>
-                    Tout voir
+                <button
+                  type="button"
+                  onClick={() => {
+                    const region = regionSet[quickRegionKey];
+                    if (!region) return;
+                    editorRef.current?.fillRegion(region, quickRegionKey);
+                  }}
+                  disabled={!quickRegionKey}
+                  title="Remplir la pièce avec la couleur de remplissage (contours UV exacts)"
+                >
+                  Remplir
+                </button>
+                {mapDef.group === 'skin' && (
+                  <button
+                    type="button"
+                    className={focusedRegion === quickRegionKey ? 'active' : ''}
+                    onClick={() =>
+                      onFocusRegion(focusedRegion === quickRegionKey ? null : quickRegionKey || null)
+                    }
+                    disabled={!quickRegionKey}
+                    title="Isoler cette pièce (zoom + rognage pinceau)"
+                  >
+                    {focusedRegion === quickRegionKey ? 'Tout voir' : 'Isoler'}
                   </button>
-                </span>
+                )}
+              </div>
+            )}
+            {compatibleTargets.length > 0 && (
+              <details className="copy-map-inline">
+                <summary>Copier vers…</summary>
+                <div className="copy-map-bar">
+                  <button
+                    type="button"
+                    onClick={() => void onCopyLinkedMaps()}
+                    title="Copie directe vers toutes les maps liées (Ctrl+Maj+D)"
+                  >
+                    Maps liées
+                  </button>
+                  <button
+                    type="button"
+                    className={showCopyPanel ? 'active' : ''}
+                    onClick={() => setShowCopyPanel((v) => !v)}
+                  >
+                    Choisir…
+                  </button>
+                </div>
+              </details>
+            )}
+            <div className="chrome-history">
+              <button
+                type="button"
+                disabled={!historyState.undo}
+                onClick={() => editorRef.current?.undo()}
+                title="Annuler (Ctrl+Z)"
+              >
+                ↩ Annuler
+              </button>
+              <button
+                type="button"
+                disabled={!historyState.redo}
+                onClick={() => editorRef.current?.redo()}
+                title="Rétablir (Ctrl+Y / Ctrl+Maj+Z)"
+              >
+                ↪ Rétablir
+              </button>
+              {selection && (
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={() => editorRef.current?.deleteSelection()}
+                  title="Supprimer l'objet sélectionné (Suppr)"
+                >
+                  Supprimer
+                </button>
               )}
             </div>
-          )}
-          <div className="editor-status">
-            <span>
-              Outil : <b>{TOOLS.find((t) => t.id === tool)?.label ?? tool}</b>
-            </span>
-            <span>
-              Texture : <b>{mapDef.label}</b>
-            </span>
-            {edit3D && <span className="status-3d">● Peinture 3D active</span>}
-            {tool === 'draw' && (
-              <span>
-                Pinceau : <b>{brushSize} px</b>
-                <span className="muted"> · [ / ] · Ctrl+molette</span>
+            <div className="editor-status-compact">
+              <span title={mapDef.description}>
+                {TOOLS.find((t) => t.id === tool)?.label ?? tool}
+                {tool === 'draw' && ` · ${brushSize}px`}
+                {edit3D && ' · 3D'}
               </span>
-            )}
-            <span className="zoom-hint muted">
-              Molette ou − / + = zoom · Ctrl+molette (pinceau) = taille · [ / ] = taille · Espace/Alt/clic milieu = déplacer · Double-clic = réinitialiser
-            </span>
+            </div>
           </div>
+          {showCopyPanel && compatibleTargets.length > 0 && (
+            <section className="copy-map-panel">
+              <h4>Copier les calques de {mapDef.label} vers…</h4>
+              <p className="muted small no-margin">
+                Seuls les calques (formes, texte, images…) sont copiés — le fond de la map
+                destination est conservé.
+              </p>
+              <div className="copy-map-options">
+                {compatibleTargets.map((target) => (
+                  <label key={target} className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={copyTargets.includes(target)}
+                      onChange={(e) => onToggleCopyTarget(target, e.target.checked)}
+                    />
+                    <span>
+                      {MAP_BY_ID[target].label}
+                      <small>{MAP_BY_ID[target].fileName}</small>
+                    </span>
+                  </label>
+                ))}
+              </div>
+              <div className="copy-map-mode">
+                <label className="checkbox-row">
+                  <input
+                    type="radio"
+                    name="copy-mode"
+                    checked={copyMode === 'replace'}
+                    onChange={() => setCopyMode('replace')}
+                  />
+                  <span>Remplacer le contenu destination</span>
+                </label>
+                <label className="checkbox-row">
+                  <input
+                    type="radio"
+                    name="copy-mode"
+                    checked={copyMode === 'overlay'}
+                    onChange={() => setCopyMode('overlay')}
+                  />
+                  <span>Fusionner par superposition</span>
+                </label>
+              </div>
+              <div className="btn-row">
+                <button type="button" className="primary" onClick={() => void onCopySelectedTargets()}>
+                  Appliquer la copie
+                </button>
+                <button type="button" onClick={() => setCopyTargets(compatibleTargets)}>
+                  Tout cocher
+                </button>
+                <button type="button" onClick={() => setCopyTargets([])}>
+                  Tout décocher
+                </button>
+              </div>
+            </section>
+          )}
+          {mapDef.group === 'skin' && focusedRegion && (
+            <p className="focus-region-hint muted small">
+              Édition limitée à{' '}
+              <b>{guideIslands.find((i) => i.key === focusedRegion)?.label}</b>
+            </p>
+          )}
           <div
-            className={`canvas-stage${tool === 'draw' ? ' canvas-stage--draw' : ''}`}
+            ref={canvasStageRef}
+            className={`canvas-stage${tool === 'draw' ? ' canvas-stage--draw' : ''}${
+              focusedRegion ? ' canvas-stage--isolated' : ''
+            }`}
             onMouseMove={onCanvasFrameMove}
             onMouseLeave={onCanvasFrameLeave}
           >
@@ -1142,7 +1379,16 @@ export default function App() {
         </main>
 
         {/* ------------------------------------------------- panneau de droite */}
-        <aside className="side-panel">
+        <aside className={`side-panel${sidePanelOpen ? '' : ' side-panel--collapsed'}`}>
+          <button
+            type="button"
+            className="side-panel-toggle"
+            onClick={() => setSidePanelOpen((v) => !v)}
+            title={sidePanelOpen ? 'Replier le panneau' : 'Déplier le panneau'}
+          >
+            {sidePanelOpen ? '›' : '‹'}
+          </button>
+          <div className={`side-panel-body${sidePanelOpen ? '' : ' side-panel-body--hidden'}`}>
           <div className="preview-box">
             <div className="preview-toolbar">
               <button
@@ -1170,8 +1416,8 @@ export default function App() {
 
           {/* ---- Réglages contextuels de la map active ---- */}
           {mapDef.kind === 'roughmetal' && (
-            <section className="panel map-settings">
-              <h3>Matière · {mapDef.label}</h3>
+            <details className="panel panel-collapsible map-settings">
+              <summary>Matière · {mapDef.label}</summary>
               <div className="prop-grid">
                 <label className="full">
                   Rugosité : {pct(roughVal)}{' '}
@@ -1201,12 +1447,12 @@ export default function App() {
                 Vous pouvez aussi peindre zone par zone : rouge foncé = brillant, rouge vif =
                 mat, vert = métallique.
               </p>
-            </section>
+            </details>
           )}
 
           {mapDef.kind === 'illum' && (
-            <section className="panel map-settings">
-              <h3>Néon / feux · {mapDef.label}</h3>
+            <details className="panel panel-collapsible map-settings">
+              <summary>Néon / feux · {mapDef.label}</summary>
               <div className="prop-grid">
                 <label className="full">
                   Rôle des zones lumineuses
@@ -1247,12 +1493,12 @@ export default function App() {
                 <b> phares</b> (nuit) ou <b>feux de frein</b> (au freinage). Le néon/fluo de la{' '}
                 <i>carrosserie</i> se choisit en jeu via la peinture, ce n'est pas une texture.
               </p>
-            </section>
+            </details>
           )}
 
           {activeMap === 'Skin_CoatR' && (
-            <section className="panel map-settings">
-              <h3>Vernis (clearcoat)</h3>
+            <details className="panel panel-collapsible map-settings">
+              <summary>Vernis (clearcoat)</summary>
               <div className="prop-grid">
                 <label className="full">
                   Intensité du vernis (aperçu) : {pct(Math.round(coatIntensity * 255))}
@@ -1272,44 +1518,12 @@ export default function App() {
                 laissez en <b>noir</b> les zones mates. Le curseur ne règle que l'aperçu ; en jeu
                 c'est la map qui décide.
               </p>
-            </section>
-          )}
-
-          {regionSet && (
-            <section className="panel region-fill">
-              <h3>Remplir une pièce</h3>
-              <p className="muted small">
-                {clipFillZones ? (
-                  <>
-                    Pose un aplat de la couleur de <b>remplissage</b> sur la zone de détail choisie
-                    (aileron, diffuseur, entrées d'air…). Le remplissage est <b>découpé sur les
-                    contours réels</b> de la zone — même dispersée sur l'atlas UV.
-                  </>
-                ) : (
-                  <>
-                    Pose un aplat de la couleur de <b>remplissage</b> sur la pièce choisie (calque
-                    éditable, déplaçable). Idéal pour colorer vite un capot, un flanc, l'aileron…
-                  </>
-                )}
-              </p>
-              <div className="region-grid">
-                {Object.entries(regionSet).map(([key, r]) => (
-                  <button
-                    key={key}
-                    onClick={() =>
-                      editorRef.current?.fillRegion(r, clipFillZones ? key : undefined)
-                    }
-                  >
-                    {r.label}
-                  </button>
-                ))}
-              </div>
-            </section>
+            </details>
           )}
 
           {mapDef.group === 'wheels' && (
-            <section className="panel map-settings">
-              <h3>Côté des roues (jantes)</h3>
+            <details className="panel panel-collapsible map-settings">
+              <summary>Côté des roues (jantes)</summary>
               <p className="muted small">
                 La texture des roues déplie chaque roue en deux parties : le <b>flanc/jante</b>{' '}
                 (le côté visible, disque + rayons) et la <b>bande de roulement du pneu</b>. Pour
@@ -1317,7 +1531,7 @@ export default function App() {
                 et montez le métal sur <code>Wheels_R</code> pour un rendu chromé. Astuce :
                 importez un skin existant pour voir précisément où tombe chaque zone.
               </p>
-            </section>
+            </details>
           )}
 
           {selection && (
@@ -1510,20 +1724,12 @@ export default function App() {
             </section>
           )}
 
-          <section className="panel precision-panel">
-            <h3>Précision</h3>
+          <details className="panel panel-collapsible precision-panel">
+            <summary>Précision</summary>
             <div className="precision-grid">
-              <label className="checkbox-row">
-                <input type="checkbox" checked={symmetry} onChange={onToggleSymmetry} />
-                <span>Symétrie gauche/droite (miroir automatique)</span>
-              </label>
-              <label className="checkbox-row">
-                <input type="checkbox" checked={showGrid} onChange={onToggleGrid} />
-                <span>Grille + magnétisme au déplacement</span>
-              </label>
               {showGrid && (
                 <label className="full">
-                  Divisions de la grille : {gridDiv}
+                  Divisions grille : {gridDiv}
                   <select value={gridDiv} onChange={(e) => onGridDiv(Number(e.target.value))}>
                     {[8, 16, 32, 64].map((d) => (
                       <option key={d} value={d}>
@@ -1570,13 +1776,11 @@ export default function App() {
               )}
             </div>
             <p className="muted small">
-              La symétrie reflète chaque forme, texte, image ou trait sur l'axe vertical
-              central (les deux moitiés restent des calques éditables). « Limiter à la pièce »
-              rogne le dessin aux contours UV. Le calque de référence est verrouillé et
-              semi-transparent pour décalquer un logo. Maintenez <b>Maj</b> pour tracer une
-              ligne droite (pinceau), un carré/cercle (formes) ou des angles à 45° (ligne).
+              « Limiter à la pièce » rogne le dessin aux contours UV. Le calque de référence
+              est verrouillé et semi-transparent pour décalquer un logo. Maintenez <b>Maj</b>{' '}
+              pour tracer une ligne droite ou des angles à 45°.
             </p>
-          </section>
+          </details>
 
           <section className="panel layers-panel">
             <h3>
@@ -1622,14 +1826,21 @@ export default function App() {
                     >
                       {l.locked ? '🔒' : '🔓'}
                     </button>
+                    <button
+                      title="Supprimer le calque"
+                      className="danger"
+                      onClick={() => editorRef.current?.deleteLayer(l.id)}
+                    >
+                      ✕
+                    </button>
                   </span>
                 </li>
               ))}
             </ul>
           </section>
 
-          <section className="panel help-panel">
-            <h3>Installer dans le jeu</h3>
+          <details className="panel panel-collapsible help-panel">
+            <summary>Installer dans le jeu</summary>
             <ol className="small">
               <li>Exporter le skin (.zip)</li>
               <li>
@@ -1638,7 +1849,8 @@ export default function App() {
               </li>
               <li>En jeu : Profil → Garage → « Upload skin »</li>
             </ol>
-          </section>
+          </details>
+          </div>
         </aside>
         </div>
 
@@ -1646,9 +1858,8 @@ export default function App() {
         <div className="layout-3d" style={{ display: view === '3d' ? 'flex' : 'none' }}>
           <aside className="edit3d-panel">
             <h2 className="edit3d-title">🎨 Édition 3D</h2>
-            <p className="muted small">
-              Peignez directement sur la voiture. <b>Clic gauche</b> = peindre ·{' '}
-              <b>clic droit</b> = tourner · <b>molette</b> = zoomer (jusqu'au détail).
+            <p className="muted small no-margin">
+              <b>Clic gauche</b> peindre · <b>clic droit</b> tourner · <b>molette</b> zoomer.
             </p>
 
             <label className="edit3d-field">
@@ -1665,10 +1876,13 @@ export default function App() {
                 ))}
               </select>
             </label>
-            <p className="muted small no-margin">
-              Astuce : peignez la pièce correspondante et cette texture est mise à jour ; la
-              carrosserie utilise « Carrosserie », les détails « Détails », etc.
-            </p>
+            <details className="compact-hint">
+              <summary>Astuce de ciblage des textures</summary>
+              <p className="muted small no-margin">
+                Peignez la pièce correspondante et cette texture est mise à jour ; la carrosserie
+                utilise « Carrosserie », les détails « Détails », etc.
+              </p>
+            </details>
 
             <div className="edit3d-row">
               <label className="edit3d-color">
@@ -1710,7 +1924,6 @@ export default function App() {
 
             {regionSet && (
               <div className="edit3d-regions">
-                <span className="muted small">Remplir une pièce (couleur de remplissage) :</span>
                 <label className="edit3d-color">
                   <span>Remplissage</span>
                   <input
@@ -1719,18 +1932,26 @@ export default function App() {
                     onChange={(e) => onFillChange(e.target.value)}
                   />
                 </label>
-                <div className="region-grid">
+                <select
+                  value={quickRegionKey}
+                  onChange={(e) => setQuickRegionKey(e.target.value)}
+                >
                   {Object.entries(regionSet).map(([key, r]) => (
-                    <button
-                      key={key}
-                      onClick={() =>
-                        editorRef.current?.fillRegion(r, clipFillZones ? key : undefined)
-                      }
-                    >
+                    <option key={key} value={key}>
                       {r.label}
-                    </button>
+                    </option>
                   ))}
-                </div>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const region = regionSet[quickRegionKey];
+                    if (region) editorRef.current?.fillRegion(region, quickRegionKey);
+                  }}
+                  disabled={!quickRegionKey}
+                >
+                  Remplir la pièce
+                </button>
               </div>
             )}
 

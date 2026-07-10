@@ -50,7 +50,14 @@ export interface LayerInfo {
   selected: boolean;
 }
 
-export type CoreEvent = 'layers' | 'selection' | 'texture' | 'history' | 'viewport' | 'brush';
+export type CoreEvent =
+  | 'layers'
+  | 'selection'
+  | 'texture'
+  | 'history'
+  | 'viewport'
+  | 'brush'
+  | 'dirty';
 
 /** Aperçu curseur pinceau en coords viewport (position: fixed). */
 export interface BrushPreviewFrame {
@@ -118,7 +125,11 @@ interface MapState {
   undo: string[];
   redo: string[];
   suspendHistory: boolean;
+  /** Snapshot JSON initial (ou après import / reset) pour détecter les modifications. */
+  baseline: string;
 }
+
+export type MapCopyMode = 'replace' | 'overlay';
 
 export class EditorCore {
   private maps = new Map<MapId, MapState>();
@@ -241,27 +252,39 @@ export class EditorCore {
         undo: [],
         redo: [],
         suspendHistory: false,
+        baseline: '',
       };
       this.maps.set(def.id, state);
       this.wireCanvas(def.id, state);
       this.syncCanvasLayout(def.id);
-      state.undo.push(this.serialize(canvas));
+      const initial = this.serialize(canvas);
+      state.baseline = initial;
+      state.undo.push(initial);
     }
     this.resizeObserver = new ResizeObserver(() => {
       for (const id of this.maps.keys()) this.syncCanvasLayout(id);
       this.emitViewport();
     });
     this.resizeObserver.observe(container);
-    if (this.viewportFrame) this.wireViewport(this.viewportFrame);
+    if (this.viewportFrame) {
+      this.resizeObserver.observe(this.viewportFrame);
+      this.wireViewport(this.viewportFrame);
+    }
     this.setActiveMap('Skin_B');
     this.applyTool();
   }
 
   /** Cadre d'édition pour zoom molette / pan (peut être défini après le montage React). */
   setViewportFrame(el: HTMLElement) {
-    if (this.viewportFrame) this.unwireViewport();
+    if (this.viewportFrame) {
+      this.unwireViewport();
+      this.resizeObserver.unobserve(this.viewportFrame);
+    }
     this.viewportFrame = el;
     this.wireViewport(el);
+    this.resizeObserver.observe(el);
+    for (const id of this.maps.keys()) this.syncCanvasLayout(id);
+    this.emitViewport();
   }
 
   // ------------------------------------------------------------------ events
@@ -325,9 +348,33 @@ export class EditorCore {
       ctx.clearRect(0, 0, res, res);
       ctx.drawImage(snap, 0, 0);
     } catch {
-      // Canvas fabric peut échouer si une image de fond est invalide ; on laisse
-      // textureEl tel quel plutôt que de faire échouer tout l'import.
-      st.textureDirty = true;
+      // Fallback : recomposer fond + calques sans toCanvasElement (fond importé volumineux).
+      try {
+        const ctx = el.getContext('2d');
+        if (!ctx) throw new Error('Contexte texture indisponible');
+        ctx.clearRect(0, 0, res, res);
+        const bg = c.backgroundColor;
+        if (typeof bg === 'string' && bg) {
+          ctx.fillStyle = bg;
+          ctx.fillRect(0, 0, res, res);
+        }
+        const bgImg = c.backgroundImage as FabricImage | undefined;
+        const bgEl = bgImg?.getElement?.();
+        if (bgImg && bgEl && bgEl.width > 0 && bgEl.height > 0) {
+          const sx = bgImg.scaleX ?? 1;
+          const sy = bgImg.scaleY ?? 1;
+          const dw = (bgImg.width ?? bgEl.width) * sx;
+          const dh = (bgImg.height ?? bgEl.height) * sy;
+          ctx.drawImage(bgEl, bgImg.left ?? 0, bgImg.top ?? 0, dw, dh);
+        }
+        for (const obj of c.getObjects()) {
+          if (!obj.visible) continue;
+          obj.render(ctx);
+        }
+        st.textureDirty = false;
+      } catch {
+        st.textureDirty = true;
+      }
     } finally {
       c.setViewportTransform(savedVpt);
     }
@@ -494,6 +541,7 @@ export class EditorCore {
   /**
    * Cadre la vue sur une zone UV (fractions 0..1, origine haut-gauche).
    * `padding` = marge autour de la zone (0..0.5).
+   * Utilise la taille réelle du cadre CSS pour un zoom qui remplit l'espace visible.
    */
   fitViewportToBounds(
     frac: { x: number; y: number; w: number; h: number },
@@ -505,11 +553,12 @@ export class EditorCore {
     if (!rect?.width || !rect.height) return;
     const res = MAP_BY_ID[this.activeMap].workRes;
     const pad = Math.max(0, Math.min(0.45, padding));
-    const rw = Math.max(frac.w * res * (1 + 2 * pad), 8);
-    const rh = Math.max(frac.h * res * (1 + 2 * pad), 8);
+    const regionW = Math.max(frac.w * res * (1 + 2 * pad), 8);
+    const regionH = Math.max(frac.h * res * (1 + 2 * pad), 8);
     const cx = (frac.x + frac.w / 2) * res;
     const cy = (frac.y + frac.h / 2) * res;
-    const zoom = this.clampZoom(Math.min(res / rw, res / rh));
+    // Zoom pour que la zone cible remplisse le cadre carré à l'écran.
+    const zoom = this.clampZoom(Math.min(res / regionW, res / regionH));
     const tx = res / 2 - cx * zoom;
     const ty = res / 2 - cy * zoom;
     c.setViewportTransform([zoom, 0, 0, zoom, tx, ty]);
@@ -544,15 +593,37 @@ export class EditorCore {
   /**
    * Mode focus : rogne le dessin à l'îlot et zoome la vue sur ses contours.
    * `null` = vue complète (clip retiré, zoom réinitialisé).
+   * `onLayoutSettled` est appelé une fois le cadrage UV stabilisé (pour resync CSS).
    */
-  focusRegion(key: string | null) {
+  focusRegion(key: string | null, onLayoutSettled?: () => void) {
     this.setClipIsland(key);
     if (!key) {
       this.resetViewport();
+      onLayoutSettled?.();
       return;
     }
     const bounds = this.islandBounds(key);
-    if (bounds) this.fitViewportToBounds(bounds, 0.1);
+    if (!bounds) {
+      onLayoutSettled?.();
+      return;
+    }
+    // Attendre la mise en page (chrome, hint, --canvas-fit…) avant le cadrage UV.
+    const fit = () => {
+      for (const id of this.maps.keys()) this.syncCanvasLayout(id);
+      this.fitViewportToBounds(bounds, 0.1);
+      this.canvas.calcOffset();
+      this.canvas.requestRenderAll();
+      this.emitViewport();
+      // Recadrage après que le cadre CSS ait sa taille définitive.
+      requestAnimationFrame(() => {
+        this.fitViewportToBounds(bounds, 0.1);
+        this.canvas.calcOffset();
+        this.canvas.requestRenderAll();
+        this.emitViewport();
+        onLayoutSettled?.();
+      });
+    };
+    requestAnimationFrame(() => requestAnimationFrame(fit));
   }
 
   private isPanTrigger(e: MouseEvent): boolean {
@@ -1119,11 +1190,41 @@ export class EditorCore {
     }
   }
 
+  /** Copie une image source dans le buffer texture 3D / export (coords UV brutes). */
+  private blitSourceToTextureEl(id: MapId, source: HTMLCanvasElement | ImageBitmap) {
+    const st = this.maps.get(id);
+    if (!st) return;
+    const res = MAP_BY_ID[id].workRes;
+    const el = st.textureEl;
+    if (el.width !== res || el.height !== res) {
+      el.width = res;
+      el.height = res;
+    }
+    const ctx = el.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, res, res);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(source, 0, 0, source.width, source.height, 0, 0, res, res);
+    st.textureDirty = false;
+  }
+
+  private canvasFromImageSource(source: HTMLCanvasElement | ImageBitmap): HTMLCanvasElement {
+    if (source instanceof HTMLCanvasElement) return source;
+    const c = document.createElement('canvas');
+    c.width = source.width;
+    c.height = source.height;
+    const ctx = c.getContext('2d');
+    if (!ctx) throw new Error('Contexte canvas indisponible');
+    ctx.drawImage(source, 0, 0);
+    return c;
+  }
+
   /** Remplace l'image de fond de la map (import de skin existant). */
-  setBackgroundFromCanvas(
+  async setBackgroundFromCanvas(
     id: MapId,
     source: HTMLCanvasElement | ImageBitmap,
-    opts?: { flush?: boolean },
+    opts?: { flush?: boolean; recordHistory?: boolean },
   ) {
     const st = this.maps.get(id);
     if (!st) throw new Error(`Map inconnue : ${id}`);
@@ -1132,25 +1233,84 @@ export class EditorCore {
     const sw = source.width;
     const sh = source.height;
     if (!sw || !sh) throw new Error(`Image importée vide (0×0) pour ${MAP_BY_ID[id].fileName}`);
-    const img = new FabricImage(source as HTMLCanvasElement, {
-      left: 0,
-      top: 0,
-      originX: 'left',
-      originY: 'top',
-      selectable: false,
-      evented: false,
+
+    const raster = this.canvasFromImageSource(source);
+    this.blitSourceToTextureEl(id, raster);
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      raster.toBlob(
+        (b) => (b ? resolve(b) : reject(new Error('Encodage PNG impossible'))),
+        'image/png',
+      );
     });
-    img.set({
-      width: sw,
-      height: sh,
-      scaleX: res / sw,
-      scaleY: res / sh,
-    });
-    (img as FabricObject & { name?: string }).name = 'Fond importé';
-    c.backgroundImage = img;
-    c.requestRenderAll();
-    this.pushHistory(id);
+    const url = URL.createObjectURL(blob);
+    try {
+      const img = await FabricImage.fromURL(url, { crossOrigin: 'anonymous' });
+      img.set({
+        left: 0,
+        top: 0,
+        originX: 'left',
+        originY: 'top',
+        scaleX: res / sw,
+        scaleY: res / sh,
+        selectable: false,
+        evented: false,
+      });
+      (img as FabricObject & { name?: string }).name = 'Fond importé';
+      if (c.backgroundImage) c.backgroundImage.dispose();
+      c.backgroundImage = img;
+      c.requestRenderAll();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+
+    if (opts?.recordHistory !== false) this.pushHistory(id);
+    else this.markTextureDirty(id);
     if (opts?.flush !== false) this.flushTexture();
+  }
+
+  /** Finalise l'état undo/dirty après un import multi-maps (sans resérialiser en boucle). */
+  commitImportState(ids: MapId[]) {
+    for (const id of ids) this.resetMapBaseline(id);
+  }
+
+  /**
+   * Copie les calques éditables d'une map source vers une map cible (sans le fond).
+   * - replace : remplace les calques de la cible (le fond destination est conservé)
+   * - overlay : ajoute les calques source par-dessus ceux de la cible
+   */
+  async copyRenderedMapToMap(sourceId: MapId, targetId: MapId, mode: MapCopyMode = 'replace') {
+    const srcState = this.maps.get(sourceId);
+    const dstState = this.maps.get(targetId);
+    if (!srcState || !dstState) throw new Error(`Map inconnue (${sourceId} -> ${targetId})`);
+
+    const dstCanvas = dstState.canvas;
+    const srcObjects = [...srcState.canvas.getObjects()];
+
+    dstState.suspendHistory = true;
+    try {
+      if (mode === 'replace') {
+        dstCanvas.discardActiveObject();
+        dstCanvas.remove(...dstCanvas.getObjects());
+      }
+      for (const obj of srcObjects) {
+        const clone = await obj.clone(CUSTOM_PROPS);
+        (clone as FabricObject & { id?: string }).id = nextId();
+        const srcName = (obj as FabricObject & { name?: string }).name;
+        if (srcName) (clone as FabricObject & { name?: string }).name = srcName;
+        dstCanvas.add(clone);
+      }
+      dstCanvas.requestRenderAll();
+    } finally {
+      dstState.suspendHistory = false;
+    }
+
+    this.pushHistory(targetId);
+    this.markTextureDirty(targetId);
+    this.emit('layers');
+    this.emit('selection');
+    if (this.activeMap === targetId) this.emit('history');
+    this.flushTexture();
   }
 
   // ------------------------------------------------------------------- layers
@@ -1248,6 +1408,17 @@ export class EditorCore {
     if (!objs.length) return;
     c.discardActiveObject();
     objs.forEach((o) => c.remove(o));
+    c.requestRenderAll();
+    this.emit('layers');
+    this.emit('selection');
+  }
+
+  deleteLayer(id: string) {
+    const obj = this.findById(id);
+    if (!obj) return;
+    const c = this.canvas;
+    if (c.getActiveObject() === obj) c.discardActiveObject();
+    c.remove(obj);
     c.requestRenderAll();
     this.emit('layers');
     this.emit('selection');
@@ -1390,43 +1561,67 @@ export class EditorCore {
   }
 
   /**
-   * Remplit une zone UV (fractions 0..1) de la map active avec la couleur de
-   * remplissage courante : un rectangle éditable centré sur la zone (léger
-   * retrait pour rester dans l'îlot).
-   *
-   * `clipKey` (optionnel) découpe le rectangle sur les CONTOURS réels de la zone
-   * (UV_GUIDE_ISLANDS). Indispensable pour les zones DÉTAILS, dont les îlots sont
-   * dispersés sur tout l'atlas : le rectangle couvre l'union, le clip ne peint
-   * que les îlots de la zone. Sans `clipKey`, on garde l'ancien comportement
-   * (clip d'îlot courant s'il est actif).
+   * Construit une forme de remplissage (Polygon ou Group) épousant les contours
+   * UV exacts de l'îlot `key`, en coordonnées absolues du canvas.
    */
-  fillRegion(frac: { x: number; y: number; w: number; h: number }, clipKey?: string) {
+  private buildIslandFill(key: string, mapId: MapId): FabricObject | null {
+    const island = UV_GUIDE_ISLANDS.find((i) => i.key === key);
+    if (!island || island.polygons.length === 0) return null;
+    const res = MAP_BY_ID[mapId].workRes;
+    const common = {
+      fill: this.fillColorValue(),
+      stroke: undefined as string | undefined,
+      strokeWidth: 0,
+      strokeUniform: true,
+    };
+    const toPoly = (poly: { x: number; y: number }[]) =>
+      new Polygon(
+        poly.map((p) => ({ x: p.x * res, y: p.y * res })),
+        { ...common, absolutePositioned: true },
+      );
+    if (island.polygons.length === 1) return toPoly(island.polygons[0]);
+    return new Group(island.polygons.map(toPoly), { absolutePositioned: true });
+  }
+
+  /**
+   * Remplit une pièce UV avec la couleur de remplissage courante.
+   * Utilise les polygones exacts de UV_GUIDE_ISLANDS (pas le rectangle englobant).
+   * Repli sur un rectangle inset si l'îlot n'est pas trouvé.
+   *
+   * `regionKey` identifie la pièce (clé SKIN_REGIONS / DETAILS_REGIONS).
+   */
+  fillRegion(
+    frac: { x: number; y: number; w: number; h: number; label?: string },
+    regionKey?: string,
+  ) {
     const c = this.canvas;
     const res = MAP_BY_ID[this.activeMap].workRes;
-    // Pas de retrait quand on découpe sur un contour de zone (le clip fait foi) ;
-    // sinon léger retrait pour rester dans l'îlot rectangulaire.
-    const inset = clipKey ? 0 : 0.08;
-    const rect = new Rect({
-      left: (frac.x + frac.w * inset) * res,
-      top: (frac.y + frac.h * inset) * res,
-      width: Math.max(frac.w * res * (1 - 2 * inset), 4),
-      height: Math.max(frac.h * res * (1 - 2 * inset), 4),
-      fill: this.fillColor,
-      originX: 'left',
-      originY: 'top',
-      strokeUniform: true,
-      rx: clipKey ? 0 : res * 0.008,
-      ry: clipKey ? 0 : res * 0.008,
-    });
-    const effClipKey = clipKey ?? this.clipIslandKey ?? undefined;
-    if (effClipKey) {
-      const clip = this.buildIslandClip(effClipKey, this.activeMap);
-      if (clip) rect.clipPath = clip;
+    const effKey = regionKey ?? this.clipIslandKey ?? undefined;
+    let obj: FabricObject | null = effKey ? this.buildIslandFill(effKey, this.activeMap) : null;
+
+    if (!obj) {
+      const inset = 0.08;
+      obj = new Rect({
+        left: (frac.x + frac.w * inset) * res,
+        top: (frac.y + frac.h * inset) * res,
+        width: Math.max(frac.w * res * (1 - 2 * inset), 4),
+        height: Math.max(frac.h * res * (1 - 2 * inset), 4),
+        fill: this.fillColorValue(),
+        originX: 'left',
+        originY: 'top',
+        strokeUniform: true,
+        rx: res * 0.008,
+        ry: res * 0.008,
+      });
     }
-    c.add(rect);
-    c.setActiveObject(rect);
+
+    (obj as FabricObject & { name?: string }).name = frac.label
+      ? `Remplissage · ${frac.label}`
+      : 'Remplissage pièce';
+    c.add(obj);
+    c.setActiveObject(obj);
     this.setTool('select');
-    if (this.symmetry) void this.createMirror(rect, c, this.activeMap, effClipKey);
+    if (this.symmetry) void this.createMirror(obj, c, this.activeMap, effKey);
     c.requestRenderAll();
     this.emit('layers');
     this.emit('selection');
@@ -1453,21 +1648,38 @@ export class EditorCore {
   }
 
   /**
-   * Construit un clipPath fabric (Polygon ou Group de polygons) épousant l'îlot
-   * UV `key`, positionné en coordonnées absolues du canvas. Si `mirror`, les
-   * points sont reflétés sur l'axe vertical central (x → 1 − x).
+   * Construit un clipPath fabric épousant l'îlot UV `key`, en coordonnées
+   * absolues du canvas. Un Path evenodd (multi-polygones) évite les bugs fabric
+   * avec Group + FabricImage lors de l'isolation de pièce.
    */
   private buildIslandClip(key: string, mapId: MapId, mirror = false): FabricObject | null {
     const island = UV_GUIDE_ISLANDS.find((i) => i.key === key);
     if (!island || island.polygons.length === 0) return null;
     const res = MAP_BY_ID[mapId].workRes;
-    const toPoly = (poly: { x: number; y: number }[]) =>
-      new Polygon(
-        poly.map((p) => ({ x: (mirror ? 1 - p.x : p.x) * res, y: p.y * res })),
+    if (island.polygons.length === 1) {
+      return new Polygon(
+        island.polygons[0].map((p) => ({ x: (mirror ? 1 - p.x : p.x) * res, y: p.y * res })),
         { absolutePositioned: true },
       );
-    if (island.polygons.length === 1) return toPoly(island.polygons[0]);
-    return new Group(island.polygons.map(toPoly), { absolutePositioned: true });
+    }
+    let d = '';
+    for (const poly of island.polygons) {
+      if (poly.length < 2) continue;
+      const pts = poly.map((p) => {
+        const x = (mirror ? 1 - p.x : p.x) * res;
+        const y = p.y * res;
+        return `${x} ${y}`;
+      });
+      d += `M ${pts[0]}`;
+      for (let i = 1; i < pts.length; i++) d += ` L ${pts[i]}`;
+      d += ' Z ';
+    }
+    if (!d.trim()) return null;
+    return new Path(d.trim(), {
+      absolutePositioned: true,
+      fill: 'black',
+      fillRule: 'evenodd',
+    });
   }
 
   /** Applique le clip d'îlot courant à un objet (si un îlot est sélectionné). */
@@ -1663,6 +1875,37 @@ export class EditorCore {
     return JSON.stringify(c.toObject(CUSTOM_PROPS));
   }
 
+  /** True si la map diffère de son état initial (ou post-import / reset). */
+  isDirty(id: MapId = this.activeMap): boolean {
+    const st = this.maps.get(id);
+    if (!st) return false;
+    // Évite de resérialiser des fonds importés (2048² en data URL) à chaque événement dirty.
+    return st.undo.length > 1;
+  }
+
+  /** État dirty de toutes les maps (pour badges onglets). */
+  getDirtyMaps(): Record<MapId, boolean> {
+    const out = {} as Record<MapId, boolean>;
+    for (const id of this.maps.keys()) out[id] = this.isDirty(id);
+    return out;
+  }
+
+  /** Réaligne la baseline sur l'état courant (import, vidage, génération…). */
+  resetMapBaseline(id: MapId) {
+    const st = this.maps.get(id);
+    if (!st) return;
+    const snap = this.serialize(st.canvas);
+    st.baseline = snap;
+    st.undo = [snap];
+    st.redo = [];
+    this.emit('history');
+    this.emit('dirty');
+  }
+
+  resetAllBaselines() {
+    for (const id of this.maps.keys()) this.resetMapBaseline(id);
+  }
+
   private pushHistory(id: MapId) {
     const st = this.maps.get(id)!;
     if (st.suspendHistory) return;
@@ -1673,6 +1916,7 @@ export class EditorCore {
     st.redo = [];
     this.markTextureDirty(id);
     this.emit('history');
+    this.emit('dirty');
   }
 
   canUndo(): boolean {
@@ -1710,6 +1954,7 @@ export class EditorCore {
     this.emit('layers');
     this.emit('selection');
     this.emit('history');
+    this.emit('dirty');
   }
 
   clearMap() {
@@ -1719,7 +1964,8 @@ export class EditorCore {
     c.backgroundImage = undefined;
     c.backgroundColor = MAP_BY_ID[this.activeMap].defaultFill;
     c.requestRenderAll();
-    this.pushHistory(this.activeMap);
+    this.markTextureDirty(this.activeMap);
+    this.resetMapBaseline(this.activeMap);
     this.emit('layers');
     this.emit('selection');
   }

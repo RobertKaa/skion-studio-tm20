@@ -302,16 +302,16 @@ export class CarPreview {
    * Ré-observe le redimensionnement et resynchronise immédiatement la taille.
    */
   mount(container: HTMLElement) {
-    if (this.disposed || container === this.container) {
-      this.resize();
-      return;
+    if (this.disposed) return;
+    if (container !== this.container) {
+      this.container = container;
+      container.appendChild(this.renderer.domElement);
+      if (this.loading) container.appendChild(this.loadingEl);
+      this.resizeObserver.disconnect();
+      this.resizeObserver.observe(container);
     }
-    this.container = container;
-    container.appendChild(this.renderer.domElement);
-    if (this.loading) container.appendChild(this.loadingEl);
-    this.resizeObserver.disconnect();
-    this.resizeObserver.observe(container);
-    this.resize();
+    // Toujours resynchroniser (conteneur ré-affiché après repli du panneau, etc.).
+    requestAnimationFrame(() => this.resize());
   }
 
   private showLoadingError(detail: string) {

@@ -45,6 +45,10 @@ export type Theme =
   | 'rally'
   | 'retro'
   | 'sponsor'
+  | 'factory'
+  | 'drift'
+  | 'vintage'
+  | 'esport'
   | 'full'; // aléatoire complet (bruit)
 
 type CuratedTheme = Exclude<Theme, 'random' | 'full'>;
@@ -124,6 +128,10 @@ export const THEME_LABELS: Record<Theme, string> = {
   rally: 'Rallye / Camo',
   retro: 'Rétro bicolore',
   sponsor: 'Sponsor / flat',
+  factory: 'Usine / officiel',
+  drift: 'Drift show',
+  vintage: 'Vintage classique',
+  esport: 'Esport digital',
   full: 'Aléatoire complet',
 };
 
@@ -135,6 +143,10 @@ export const THEME_DESCRIPTIONS: Record<CuratedTheme, string> = {
   rally: 'Camouflage mat, tons terreux, numéro de rallye.',
   retro: 'Deux tons contrastés, bandes larges, laque brillante.',
   sponsor: 'Aplat sobre satiné avec grand numéro, style usine.',
+  factory: 'Couleurs usine sobres, panneaux discrets, finition satinée.',
+  drift: 'Graphismes audacieux, éclaboussures et bandes, jantes accent.',
+  vintage: 'Tons chauds rétro, bandes classiques, laque satinée.',
+  esport: 'Sombre digital, géométrie vive et néon sur les détails.',
 };
 
 // ---------------------------------------------------------------- PRNG seedé
@@ -481,6 +493,94 @@ const THEMES: Record<CuratedTheme, ThemeSpec> = {
     neon: 'none',
     raceNumber: true,
   },
+  // Usine / officiel : couleurs sobres, panneaux discrets, finition satinée.
+  factory: {
+    pattern: 'geo',
+    finish: 'gloss',
+    coat: 'full',
+    palette: { harmony: 'complementary', sat: [35, 65], light: [44, 58] },
+    materials: {
+      body: 'gloss',
+      stripe: 'gloss',
+      accent: 'satin',
+      number: 'matte',
+      panel: 'satin',
+      trim: 'chrome',
+      deco: 'gloss',
+    },
+    details: 'dark',
+    detailMaterial: 'carbon',
+    wheels: 'dark',
+    wheelMaterial: 'metallic',
+    neon: 'none',
+    raceNumber: true,
+  },
+  // Drift show : graphismes audacieux, éclaboussures, jantes accent.
+  drift: {
+    pattern: 'splatter',
+    finish: 'gloss',
+    coat: 'full',
+    palette: { harmony: 'triadic', sat: [70, 95], light: [32, 52] },
+    materials: {
+      body: 'gloss',
+      stripe: 'gloss',
+      accent: 'gloss',
+      number: 'matte',
+      panel: 'gloss',
+      trim: 'chrome',
+      deco: 'gloss',
+    },
+    details: 'accent',
+    detailMaterial: 'gloss',
+    wheels: 'accent',
+    wheelMaterial: 'chrome',
+    neon: 'none',
+    raceNumber: true,
+  },
+  // Vintage classique : tons chauds, bandes rétro, laque satinée.
+  vintage: {
+    pattern: 'stripes',
+    finish: 'gloss',
+    coat: 'light',
+    palette: { harmony: 'analogous', sat: [28, 55], light: [48, 68] },
+    materials: {
+      body: 'satin',
+      stripe: 'gloss',
+      accent: 'matte',
+      number: 'matte',
+      panel: 'satin',
+      trim: 'chrome',
+      deco: 'satin',
+    },
+    details: 'dark',
+    detailMaterial: 'satin',
+    wheels: 'base',
+    wheelMaterial: 'metallic',
+    neon: 'none',
+    raceNumber: true,
+  },
+  // Esport digital : sombre, géométrie vive, néon sur les détails.
+  esport: {
+    pattern: 'geo',
+    finish: 'gloss',
+    coat: 'light',
+    palette: { harmony: 'triadic', sat: [55, 85], light: [8, 22] },
+    materials: {
+      body: 'satin',
+      stripe: 'gloss',
+      accent: 'gloss',
+      number: 'gloss',
+      panel: 'gloss',
+      trim: 'chrome',
+      deco: 'gloss',
+    },
+    details: 'dark',
+    detailMaterial: 'gloss',
+    wheels: 'accent',
+    wheelMaterial: 'gloss',
+    neon: 'accent',
+    raceNumber: true,
+  },
 };
 
 /** Construit un thème complètement aléatoire (ancien comportement « bruit »). */
@@ -522,6 +622,10 @@ const CURATED_THEMES: CuratedTheme[] = [
   'rally',
   'retro',
   'sponsor',
+  'factory',
+  'drift',
+  'vintage',
+  'esport',
 ];
 
 function resolveTheme(rng: Rng, theme: Theme): { id: Theme; spec: ThemeSpec } {
@@ -674,7 +778,7 @@ function shape(
 
 // ---------------------------------------------------------------- motifs
 
-/** Bandes racing symétriques, le long du capot/toit, du nez, de l'arrière et des flancs. */
+/** Bandes racing : toit + capot + nez/arrière + flancs alignés (mêmes fractions G/D). */
 function makeStripes(rng: Rng, S: number, p: Palette, complexity: number): DesignShape[] {
   const out: DesignShape[] = [];
   const R = SKIN_REGIONS;
@@ -682,6 +786,12 @@ function makeStripes(rng: Rng, S: number, p: Palette, complexity: number): Desig
   const withEdges = complexity > 65;
   const wFrac = rand(rng, 0.16, 0.26);
   const gapFrac = wFrac * 1.5;
+  // Fractions verticales partagées par les flancs (alignement G/D garanti).
+  const flankMainY = 0.44;
+  const flankSecondY = 0.66;
+  const flankEdgeY = 0.9;
+  // Le clip « top » suit le plus grand polygone (capot) : le toit est un îlot séparé.
+  const roofEndFrac = 0.19;
 
   const vStripe = (
     key: string,
@@ -690,19 +800,25 @@ function makeStripes(rng: Rng, S: number, p: Palette, complexity: number): Desig
     wf: number,
     color: string,
     role: ShapeRole,
+    y0 = 0,
+    y1 = 1,
     label = 'Bande',
+    clip = true,
   ) => {
     const box = regionPx(region, S);
     const w = wf * box.w;
     const left = clamp(box.x + cxFrac * box.w - w / 2, box.x, box.x + box.w - w);
+    const top = box.y + y0 * box.h;
+    const height = (y1 - y0) * box.h;
     out.push(
       shape(
         role,
         color,
         label,
-        (fill) => new Rect({ left, top: box.y, width: w, height: box.h, fill, originX: 'left', originY: 'top' }),
-        key,
-        S,
+        (fill) =>
+          new Rect({ left, top, width: w, height, fill, originX: 'left', originY: 'top' }),
+        clip ? key : undefined,
+        clip ? S : undefined,
       ),
     );
   };
@@ -714,6 +830,7 @@ function makeStripes(rng: Rng, S: number, p: Palette, complexity: number): Desig
     color: string,
     role: ShapeRole,
     label = 'Bande latérale',
+    clip = true,
   ) => {
     const box = regionPx(region, S);
     const h = hf * box.h;
@@ -724,33 +841,50 @@ function makeStripes(rng: Rng, S: number, p: Palette, complexity: number): Desig
         color,
         label,
         (fill) => new Rect({ left: box.x, top, width: box.w, height: h, fill, originX: 'left', originY: 'top' }),
-        key,
-        S,
+        clip ? key : undefined,
+        clip ? S : undefined,
       ),
     );
   };
 
-  // Bandes longitudinales centrées (capot/toit, nez, arrière).
+  const addCenterStripes = (key: string, region: UVRegion, y0: number, y1: number, roof = false) => {
+    const lbl = roof ? 'Bande toit' : 'Bande';
+    if (double) {
+      vStripe(key, region, 0.5 - gapFrac / 2, wFrac * 0.55, p.accent1, 'stripe', y0, y1, lbl, !roof);
+      vStripe(key, region, 0.5 + gapFrac / 2, wFrac * 0.55, p.accent1, 'stripe', y0, y1, lbl, !roof);
+    } else {
+      vStripe(key, region, 0.5, wFrac, p.accent1, 'stripe', y0, y1, lbl, !roof);
+    }
+  };
+
+  // Toit : bandes longitudinales (îlot UV séparé, sans clip capot).
+  addCenterStripes('top', R.top, 0, roofEndFrac, true);
+  // Capot : bandes longitudinales centrées (clip capot).
+  addCenterStripes('top', R.top, roofEndFrac, 1);
+  // Nez et arrière.
   for (const [key, region] of [
-    ['top', R.top],
     ['front', R.front],
     ['rear', R.rear],
   ] as const) {
-    if (double) {
-      vStripe(key, region, 0.5 - gapFrac / 2, wFrac * 0.55, p.accent1, 'stripe');
-      vStripe(key, region, 0.5 + gapFrac / 2, wFrac * 0.55, p.accent1, 'stripe');
-    } else {
-      vStripe(key, region, 0.5, wFrac, p.accent1, 'stripe');
-    }
+    addCenterStripes(key, region, 0, 1);
   }
-  // Flancs gauche/droit : mêmes fractions → symétrie garantie.
+  // Flancs : mêmes hauteurs à gauche et à droite.
   for (const [key, region] of [
     ['left', R.left],
     ['right', R.right],
   ] as const) {
-    hStripe(key, region, 0.42, 0.26, p.accent1, 'stripe', 'Bande flanc');
-    if (double) hStripe(key, region, 0.68, 0.12, p.accent2, 'accent', 'Bande flanc');
-    if (withEdges) hStripe(key, region, 0.92, 0.1, p.dark, 'trim', 'Liseré flanc');
+    hStripe(key, region, flankMainY, 0.24, p.accent1, 'stripe', 'Bande flanc');
+    if (double) hStripe(key, region, flankSecondY, 0.11, p.accent2, 'accent', 'Bande flanc');
+    if (withEdges) hStripe(key, region, flankEdgeY, 0.09, p.dark, 'trim', 'Liseré flanc');
+  }
+  // Épaules : prolonge visuellement les bandes flancs.
+  if (double) {
+    for (const [key, region] of [
+      ['shoulderL', R.shoulderL],
+      ['shoulderR', R.shoulderR],
+    ] as const) {
+      hStripe(key, region, 0.55, 0.38, p.accent1, 'stripe', 'Bande épaule');
+    }
   }
   if (withEdges) {
     hStripe('spoiler', R.spoiler, 0.5, 0.5, p.accent2, 'accent', 'Bande aileron');
@@ -870,21 +1004,32 @@ function makeSplatter(rng: Rng, S: number, p: Palette, complexity: number): Desi
   return out;
 }
 
+interface RaceNumberOpts {
+  /** Facteur de taille (1 = défaut). */
+  scale?: number;
+  /** Ancre verticale 0..1 dans l'îlot (1 = bas). */
+  anchorY?: number;
+}
+
 /**
- * Numéro de course : gros texte centré (capot/toit + deux flancs), redimensionné
- * pour tenir DANS l'îlot. `mono` (Skin_R / Skin_CoatR) supprime le contour coloré
- * pour peindre le glyphe d'une seule valeur (matériau / vernis uniforme).
- *
- * Chaque numéro est ORIENTÉ selon la pièce (REGION_ORIENTATION) pour se lire droit
- * / vers l'avant SUR LA VOITURE, même si l'îlot UV est tourné ou en miroir. Le
- * redimensionnement tient compte de la rotation (bbox tournée) et reste éditable.
+ * Numéro de course : texte orienté « voiture » sur le nez (AVANT), en bas.
+ * `mono` (Skin_R / Skin_CoatR) supprime le contour coloré pour peindre le glyphe
+ * d'une seule valeur (matériau / vernis uniforme).
  */
-function makeRaceNumbers(rng: Rng, S: number, p: Palette, value: string): DesignShape[] {
+function makeRaceNumbers(
+  rng: Rng,
+  S: number,
+  p: Palette,
+  value: string,
+  opts: RaceNumberOpts = {},
+): DesignShape[] {
   const num = value.trim() || String(Math.floor(rand(rng, 10, 100)));
   const [, , baseL] = hexToHsl(p.base);
   const textColor = baseL > 55 ? p.dark : p.light;
   const R = SKIN_REGIONS;
   const margin = 0.82;
+  const scale = opts.scale ?? 1;
+  const anchorY = opts.anchorY ?? 0.84;
   const mk = (key: string, region: UVRegion): DesignShape =>
     shape('number', textColor, `Numéro ${num}`, (fill, mono) => {
       const box = regionPx(region, S);
@@ -899,13 +1044,12 @@ function makeRaceNumbers(rng: Rng, S: number, p: Palette, value: string): Design
         stroke: mono ? fill : p.accent1,
         strokeWidth: 0,
       });
-      // bbox tournée : le numéro doit tenir dans l'îlot une fois orienté voiture.
       const rad = (angle * Math.PI) / 180;
       const ca = Math.abs(Math.cos(rad));
       const sa = Math.abs(Math.sin(rad));
       const bw = t.width * ca + t.height * sa;
       const bh = t.width * sa + t.height * ca;
-      const factor = Math.min((box.w * margin) / bw, (box.h * margin) / bh);
+      const factor = Math.min((box.w * margin) / bw, (box.h * margin) / bh) * scale;
       const fontSize = Number.isFinite(factor) && factor > 0 ? 100 * factor : 100;
       t.set({
         fontSize,
@@ -913,12 +1057,12 @@ function makeRaceNumbers(rng: Rng, S: number, p: Palette, value: string): Design
         angle,
         flipX,
         left: box.x + box.w / 2,
-        top: box.y + box.h / 2,
+        top: box.y + box.h * anchorY,
       });
       t.setCoords();
       return t;
-    });
-  return [mk('top', R.top), mk('left', R.left), mk('right', R.right)];
+    }, 'front', S);
+  return [mk('front', R.front)];
 }
 
 /** Néon des détails : quelques fines bandes lumineuses (calques éditables), jamais un aplat plein. */
@@ -1015,7 +1159,15 @@ export function generateSkin(editor: EditorCore, opts: GeneratorOptions): Genera
       break;
   }
   if (opts.raceNumber) {
-    design = design.concat(makeRaceNumbers(rng, S, palette, opts.raceNumberValue));
+    const numOpts: RaceNumberOpts =
+      themeId === 'sponsor'
+        ? { scale: 1.22, anchorY: 0.88 }
+        : themeId === 'rally'
+          ? { scale: 1.08, anchorY: 0.82 }
+          : themeId === 'stealth'
+            ? { scale: 0.92, anchorY: 0.86 }
+            : {};
+    design = design.concat(makeRaceNumbers(rng, S, palette, opts.raceNumberValue, numOpts));
   }
 
   // ---- Skin_B : couleur -----------------------------------------------------

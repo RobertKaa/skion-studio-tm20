@@ -357,3 +357,16 @@ export const REGIONS_BY_FAMILY: Partial<Record<MapDef['group'], Record<string, U
   skin: SKIN_REGIONS,
   details: DETAILS_REGIONS,
 };
+
+/** Cibles de copie pixel-perfect entre maps compatibles (même UV/layout). */
+export const COPY_COMPATIBLE_TARGETS: Record<MapId, MapId[]> = {
+  Skin_B: ['Skin_R', 'Skin_CoatR', 'Skin_DirtMask'],
+  Skin_R: ['Skin_B', 'Skin_CoatR', 'Skin_DirtMask'],
+  Skin_CoatR: ['Skin_B', 'Skin_R', 'Skin_DirtMask'],
+  Skin_DirtMask: ['Skin_B', 'Skin_R', 'Skin_CoatR'],
+  Details_B: ['Details_R', 'Details_I'],
+  Details_R: ['Details_B', 'Details_I'],
+  Details_I: ['Details_B', 'Details_R'],
+  Wheels_B: ['Wheels_R'],
+  Wheels_R: ['Wheels_B'],
+};
