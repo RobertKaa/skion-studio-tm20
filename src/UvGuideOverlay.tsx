@@ -16,31 +16,37 @@ const VB = 1000;
 
 /** Couleur de contour par pièce (clés identiques à SKIN_REGIONS / DETAILS_REGIONS). */
 const COLORS: Record<string, string> = {
-  // carrosserie (Skin_01)
-  top: '#ff5a5a',
-  left: '#3ad884',
-  right: '#e0e02a',
-  archL: '#4aa0ff',
-  archR: '#b45aff',
-  front: '#ff9a28',
-  rear: '#28dcdc',
-  spoiler: '#ff40c8',
-  sillL: '#6ae0c8',
-  sillR: '#e0a86a',
-  shoulderL: '#9a6aff',
-  shoulderR: '#ff8060',
-  rearLow: '#60b0ff',
-  rearSideL: '#c8e040',
-  // détails (Details_01) — une couleur par zone sémantique
-  d_front: '#ff9a28',
-  d_hood: '#ff5a5a',
-  d_cockpit: '#b45aff',
-  d_wing: '#ff40c8',
-  d_rear: '#28dcdc',
-  d_side: '#3ad884',
-  d_floor: '#e0e02a',
+  // carrosserie (Skin_01) — palette désaturée pour rester lisible sans crier
+  top: '#f08a8a',
+  left: '#7fd6a6',
+  right: '#dcd67a',
+  archL: '#86b6f0',
+  archR: '#c39cf0',
+  front: '#f0b878',
+  rear: '#7fd6d6',
+  spoiler: '#f08ad2',
+  sillL: '#9ad9cc',
+  sillR: '#dcbb96',
+  shoulderL: '#b39cf0',
+  shoulderR: '#f0a48f',
+  rearLow: '#94c3f0',
+  rearSideL: '#d0dd8a',
+  // détails — une couleur par face réelle (normale du mesh)
+  d_tail_hi: '#ff5a78',
+  d_tail: '#ff9a55',
+  d_head: '#ffe14a',
+  d_front: '#f0b878',
+  d_hood: '#f08a8a',
+  d_cockpit: '#c39cf0',
+  d_wing: '#f08ad2',
+  d_rear: '#7fd6d6',
+  d_side_l: '#7fd6a6',
+  d_side_r: '#9ddeb8',
+  d_floor: '#dcd67a',
+  d_body: '#8ec5f0',
 };
-const FALLBACK = '#d8dee6';
+const LAMP_KEYS = new Set(['d_tail_hi', 'd_tail', 'd_head']);
+const FALLBACK = '#c9ced8';
 
 interface Props {
   /** Map active de l'éditeur ; sa famille (skin/details/wheels) sélectionne les îlots. */
@@ -51,29 +57,71 @@ interface Props {
   focusedRegion?: string | null;
 }
 
-/** Centre (moyenne des sommets) du plus grand polygone d'un îlot, en unités VB. */
-function labelAnchor(island: UvGuideIsland): { x: number; y: number } | null {
-  let best: { x: number; y: number }[] | null = null;
-  let bestArea = -1;
-  for (const poly of island.polygons) {
-    let a = 0;
-    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-      a += poly[j].x * poly[i].y - poly[i].x * poly[j].y;
-    }
-    const area = Math.abs(a) / 2;
-    if (area > bestArea) { bestArea = area; best = poly; }
+function polyArea(poly: { x: number; y: number }[]): number {
+  let a = 0;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    a += poly[j].x * poly[i].y - poly[i].x * poly[j].y;
   }
-  if (!best || best.length === 0) return null;
+  return Math.abs(a) / 2;
+}
+
+/** Centre (moyenne des sommets) d'un polygone, en unités VB. */
+function polyAnchor(poly: { x: number; y: number }[]): { x: number; y: number } | null {
+  if (poly.length === 0) return null;
   let cx = 0, cy = 0;
-  for (const p of best) { cx += p.x; cy += p.y; }
-  return { x: (cx / best.length) * VB, y: (cy / best.length) * VB };
+  for (const p of poly) { cx += p.x; cy += p.y; }
+  return { x: (cx / poly.length) * VB, y: (cy / poly.length) * VB };
+}
+
+/**
+ * Libellés à dessiner. Sur le néon, chaque îlot de feu/phare assez gros a le
+ * sien, sauf s'il collerait à un libellé déjà posé. Ailleurs, un seul libellé
+ * par zone, sur le plus grand îlot.
+ */
+function labelSpots(
+  islands: UvGuideIsland[],
+  lampsOnly: boolean,
+): { key: string; label: string; x: number; y: number; color: string }[] {
+  const candidates: { key: string; label: string; x: number; y: number; color: string; area: number }[] = [];
+  for (const island of islands) {
+    const color = COLORS[island.key] ?? FALLBACK;
+    const ranked = island.polygons
+      .map((poly) => ({ poly, area: polyArea(poly) }))
+      .sort((a, b) => b.area - a.area);
+    const keep = lampsOnly
+      ? LAMP_KEYS.has(island.key)
+        ? ranked.filter((p) => p.area >= 0.00035)
+        : []
+      : ranked.slice(0, 1);
+    for (const { poly, area } of keep) {
+      const anchor = polyAnchor(poly);
+      if (!anchor) continue;
+      const label = lampsOnly && LAMP_KEYS.has(island.key)
+        ? ({ d_tail_hi: 'FEU HAUT', d_tail: 'FEU', d_head: 'PHARE' } as Record<string, string>)[island.key]
+        : island.label;
+      candidates.push({ key: island.key, label, ...anchor, color, area });
+    }
+  }
+  candidates.sort((a, b) => b.area - a.area);
+  const placed: { x: number; y: number }[] = [];
+  const minDist = lampsOnly ? 180 : 28;
+  const out: { key: string; label: string; x: number; y: number; color: string }[] = [];
+  for (const c of candidates) {
+    if (placed.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < minDist)) continue;
+    placed.push(c);
+    out.push(c);
+  }
+  return out;
 }
 
 export function UvGuideOverlay({ activeMap, visible, focusedRegion = null }: Props) {
   if (!visible) return null;
-  const family = MAP_BY_ID[activeMap].group;
+  const mapDef = MAP_BY_ID[activeMap];
+  const family = mapDef.group;
   const islands = UV_GUIDE_BY_FAMILY[family];
   if (!islands || islands.length === 0) return null;
+  const lampsOnly = mapDef.kind === 'illum';
+  const spots = labelSpots(islands, lampsOnly);
 
   return (
     <svg
@@ -84,38 +132,40 @@ export function UvGuideOverlay({ activeMap, visible, focusedRegion = null }: Pro
     >
       {islands.map((island) => {
         const color = COLORS[island.key] ?? FALLBACK;
-        const anchor = labelAnchor(island);
         const focused = focusedRegion === island.key;
         const dimmed = focusedRegion != null && !focused;
+        const quiet = lampsOnly && !LAMP_KEYS.has(island.key);
+        const lamp = lampsOnly && LAMP_KEYS.has(island.key);
         return (
           <g
             key={island.key}
             className={
-              focused ? 'uv-guide-overlay__group--focused' : dimmed ? 'uv-guide-overlay__group--dimmed' : undefined
+              focused ? 'uv-guide-overlay__group--focused' : dimmed || quiet ? 'uv-guide-overlay__group--dimmed' : undefined
             }
           >
             {island.polygons.map((poly, i) => (
               <polygon
                 key={i}
-                className={`uv-guide-overlay__poly${focused ? ' uv-guide-overlay__poly--focused' : ''}`}
+                className={`uv-guide-overlay__poly${focused ? ' uv-guide-overlay__poly--focused' : ''}${lamp ? ' uv-guide-overlay__poly--lamp' : ''}`}
                 points={poly.map((p) => `${(p.x * VB).toFixed(1)},${(p.y * VB).toFixed(1)}`).join(' ')}
                 stroke={color}
                 fill={color}
               />
             ))}
-            {anchor && (
-              <text
-                className={`uv-guide-overlay__label${focused ? ' uv-guide-overlay__label--focused' : ''}`}
-                x={anchor.x}
-                y={anchor.y}
-                fill={color}
-              >
-                {island.label}
-              </text>
-            )}
           </g>
         );
       })}
+      {spots.map((spot, i) => (
+        <text
+          key={`${spot.key}-${i}`}
+          className={`uv-guide-overlay__label${focusedRegion === spot.key ? ' uv-guide-overlay__label--focused' : ''}${lampsOnly ? ' uv-guide-overlay__label--lamp' : ''}`}
+          x={spot.x}
+          y={spot.y}
+          fill={spot.color}
+        >
+          {spot.label}
+        </text>
+      ))}
     </svg>
   );
 }

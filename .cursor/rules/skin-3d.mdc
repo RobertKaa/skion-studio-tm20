@@ -1,0 +1,41 @@
+---
+description: Modifier un skin 3D Trackmania dans Blender. Ouvrir toujours le blend de référence, ne pas casser le squelette, puis exporter.
+alwaysApply: true
+---
+
+# Skin 3D Trackmania
+
+Le mesh de référence est `templates/stadium-skin.blend`. L'ouvrir dans Blender avant toute modification de forme. Ne pas en créer un autre.
+
+S'il manque (Blender 4, une fois) :
+
+```text
+blender --background --python scripts/blender/skin3d_blender.py -- prepare
+```
+
+Le `.blend` reste sur la machine : il dérive du FBX Nadeo et n'est pas versionné.
+Il est en mètres, Z vers le haut, nez vers −Y, arrière vers +Y (environ 2,1 m de large et 3,8 m de long). Ne pas réimporter le FBX sans appliquer l'échelle et la rotation de l'empty parent.
+
+## À ne pas casser
+
+- Armature `Hips` (roues `FLWheel` / `FRWheel` / `RLWheel` / `RRWheel`, `Exhaust1`, `Exhaust2`).
+- Matériaux `SkinDmg_Skin`, `DetailsDmgNormal_Details`, `DetailsDmgNormal_Wheels`, `GlassDmgCrack_Glass`.
+- Préfixes de mesh `s` `d` `w` `g` et suffixe `_Lod1`.
+- UV de la première couche, nommée `BaseMaterial`, dans les atlas déjà peints par l'app (`Skin_B`, `Details_B`, `Wheels_B`).
+
+Les ajouts (tige, objet) sont des meshes du même fichier, parentés à `Hips`, pesés sur `Body` ou sur l'os de la pièce, avec le préfixe et le matériau du slot. Pas d'objet hors de ce blend.
+
+## Export
+
+```text
+blender --background --python scripts/blender/skin3d_blender.py -- export templates/stadium-skin.blend work/<nom>
+```
+
+Puis, seulement si la forme a changé :
+
+```text
+powershell -File scripts/build-3d-skin.ps1 -ProjectDir work/<nom>
+```
+
+Le peintre importe `work/<nom>/skin3d-project.zip` dans l'app. Il n'a pas besoin de Blender ni de NadeoImporter.
+Le zip à poser dans le jeu est celui exporté par l'app (`<nom>.zip`, avec les DDS). `skin3d-project.zip` n'a pas de textures : le jeu affiche alors des couleurs quelconques. Sans peinture, les DDS par défaut sont gris.

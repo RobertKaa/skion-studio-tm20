@@ -1,0 +1,48 @@
+import assert from 'node:assert/strict';
+import { bakeProjection, materialBitmap, moveProjection, type DecalProjection, type PixelSource, type ProjectionTriangle } from '../src/three/decalProjection';
+
+const source: PixelSource = { width: 2, height: 2, data: new Uint8ClampedArray([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]) };
+const decal: DecalProjection = { source: '', center: [0, 0, 0], normal: [0, 0, 1], tangent: [1, 0, 0], width: 2, height: 2, depth: .4, angle: 0, families: ['skin', 'details'] };
+const left: ProjectionTriangle = { family: 'skin', points: [[-1, -1, 0], [0, -1, 0], [0, 1, 0]], uv: [[0, 0], [.4, 0], [.4, 1]] };
+const right: ProjectionTriangle = { family: 'skin', points: [[0, -1, 0], [1, -1, 0], [0, 1, 0]], uv: [[.6, 0], [1, 0], [.6, 1]] };
+const pixels = (bitmap: PixelSource | undefined) => bitmap?.data.filter((_, i) => i % 4 === 3 && bitmap.data[i] > 0).length ?? 0;
+const result = bakeProjection([left, right], decal, source, 32);
+assert.ok(pixels(result.get('skin')) > 200, 'La projection couvre les deux îlots UV disjoints');
+assert.equal(result.get('skin')?.triangles, 2, 'Les triangles voisins restent dans le même calque');
+assert.equal(result.get('skin')?.data[(16 * 32 + 16) * 4 + 3], 0, 'La séparation UV reste transparente');
+const multi = bakeProjection([left, { ...right, family: 'details' }], decal, source, 32);
+assert.ok(pixels(multi.get('skin')) && pixels(multi.get('details')), 'Les fragments traversent deux familles de textures');
+assert.equal(bakeProjection([{ ...right, family: 'wheels' }], decal, source, 32).size, 0, 'Une famille exclue ne reçoit pas de projection');
+assert.equal(bakeProjection([{ ...left, points: [left.points[2], left.points[1], left.points[0]] }], decal, source, 32).size, 0, 'La face opposée est exclue');
+assert.equal(bakeProjection([{ ...left, points: left.points.map(([x, y]) => [x, y, -.5]) as ProjectionTriangle['points'] }], decal, source, 32).size, 0, 'La profondeur limite la projection');
+const behind = { ...left, family: 'details' as const, points: left.points.map(([x, y]) => [x, y, -.1]) as ProjectionTriangle['points'] };
+assert.equal(bakeProjection([left, behind], decal, source, 32).has('details'), false, 'Une surface masquée ne reçoit pas de logo');
+const steep: ProjectionTriangle = { family: 'skin', points: [[-.01, -1, -1], [.01, -1, 1], [.01, 1, 1]], uv: [[0, 0], [1, 0], [1, 1]] };
+const steepDecal = { ...decal, depth: 3 };
+const flat = { ...steep, points: [[-1, -1, 0], [1, -1, 0], [1, 1, 0]] as ProjectionTriangle['points'] };
+assert.equal(pixels(bakeProjection([steep], steepDecal, source, 32).get('skin')), pixels(bakeProjection([flat], steepDecal, source, 32).get('skin')), 'Une pente très forte reste couverte sans s’occulter elle-même');
+const steepNeighbor: ProjectionTriangle = { family: 'details', points: [[-.01, -1, -1], [.01, 1, 1], [-.01, 1, -1]], uv: [[0, 0], [1, 1], [0, 1]] };
+const steepPair = bakeProjection([steep, steepNeighbor], steepDecal, source, 32);
+assert.equal(pixels(steepPair.get('skin')), pixels(bakeProjection([steep], steepDecal, source, 32).get('skin')), 'Deux triangles voisins inclinés ne créent pas de trous au raccord');
+assert.ok(pixels(steepPair.get('details')) > 400, 'La seconde moitié du relief reçoit le logo');
+const closeBehind = { ...left, family: 'details' as const, points: left.points.map(([x, y]) => [x, y, -.002]) as ProjectionTriangle['points'] };
+assert.equal(bakeProjection([left, closeBehind], decal, source, 32).has('details'), false, 'Une surface réellement masquée reste exclue même à faible écart');
+const transparent = { ...source, data: new Uint8ClampedArray(source.data.length) };
+assert.equal(bakeProjection([left], decal, transparent, 32).size, 0, 'Une source transparente ne peint aucune surface');
+const bitmap = result.get('skin')!;
+const material = materialBitmap(bitmap, { roughness: 8, metalness: 255 });
+for (let i = 0; i < material.length; i += 4) {
+  assert.equal(material[i + 3], bitmap.data[i + 3], 'L’alpha de la matière suit exactement la couleur');
+  assert.equal(material[i], 8); assert.equal(material[i + 1], 255); assert.equal(material[i + 2], 0);
+}
+const moved = moveProjection(decal, { point: [1, 2, 3], normal: [0, 1, 0], tangent: [1, 0, 0] });
+assert.deepEqual(moved.center, [1, 2, 3]); assert.deepEqual(moved.tangent, [1, 0, 0]);
+assert.equal(moved.width, decal.width, 'Le déplacement conserve la taille');
+assert.deepEqual(decal.center, [0, 0, 0], 'Le déplacement ne modifie pas l’état précédent');
+assert.equal(bakeProjection([left], { ...decal, width: NaN }, source, 32).size, 0, 'Les dimensions invalides sont rejetées');
+assert.equal(bakeProjection([left], decal, source, Infinity).size, 0, 'Une résolution non bornée est refusée');
+assert.equal(bakeProjection([left], decal, source, 100_000).size, 0, 'Une allocation excessive est refusée');
+assert.equal(bakeProjection([left], decal, { ...source, data: new Uint8ClampedArray(0) }, 32).size, 0, 'Les sources incomplètes sont refusées');
+const edge = bakeProjection([left], decal, { width: 2, height: 1, data: new Uint8ClampedArray([255, 0, 0, 255, 0, 0, 0, 0]) }, 32).get('skin')!;
+for (let i = 0; i < edge.data.length; i += 4) if (edge.data[i + 3]) assert.equal(edge.data[i], 255, 'Les bords transparents ne créent pas de halo noir');
+console.log('✓ Projection 3D : coutures UV, multi-matières, pentes, raccords, profondeur, occultation exacte, transparence et masque R/G');

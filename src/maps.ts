@@ -1,13 +1,17 @@
 export type MapId =
   | 'Skin_B'
   | 'Skin_R'
+  | 'Skin_I'
   | 'Skin_CoatR'
   | 'Skin_DirtMask'
   | 'Details_B'
   | 'Details_R'
   | 'Details_I'
+  | 'Details_DirtMask'
   | 'Wheels_B'
-  | 'Wheels_R';
+  | 'Wheels_R'
+  | 'Wheels_I'
+  | 'Wheels_DirtMask';
 
 export type BCFormat = 'BC1' | 'BC3' | 'BC4' | 'BC5';
 
@@ -62,7 +66,13 @@ export const MAPS: MapDef[] = [
     exportRes: 1024,
     defaultFill: '#5a3c00',
     description:
-      'Canal rouge = rugosité (0 = miroir brillant, 255 = mat). Canal vert = métal (0 = peinture, 255 = chrome). Réglez les curseurs ou peignez zone par zone.',
+      'Réglez la brillance et l’aspect métallique de la carrosserie. Une faible rugosité donne des reflets nets ; une forte rugosité donne un aspect mat.',
+  },
+  {
+    id: 'Skin_I', label: 'Carrosserie néon / feux', fileName: 'Skin_I.dds',
+    format: 'BC3', kind: 'illum', group: 'skin', workRes: 1024, exportRes: 2048,
+    defaultFill: '#000000',
+    description: 'Lumière de la carrosserie. Ajoutez une image ou peignez sur les pièces ; noir = éteint. Chaque élément possède son propre comportement.',
   },
   {
     id: 'Skin_CoatR',
@@ -88,9 +98,9 @@ export const MAPS: MapDef[] = [
     workRes: 1024,
     // Masque de saleté basse fréquence : 1024 suffit largement (4× moins lourd).
     exportRes: 1024,
-    defaultFill: '#ffffff',
+    defaultFill: '#000000',
     description:
-      'Niveaux de gris : blanc = la saleté peut apparaître, noir = reste propre.',
+      'Masque de saleté de la carrosserie : 0 % (noir) protège la peinture ; 100 % (blanc) autorise la saleté. Les gris dosent son effet, sans changer la couleur du skin.',
   },
   {
     id: 'Details_B',
@@ -115,7 +125,7 @@ export const MAPS: MapDef[] = [
     exportRes: 1024,
     defaultFill: '#8c5a00',
     description:
-      'Rugosité / métal des détails. Canal rouge = rugosité, canal vert = métal (montez le vert pour un aileron chromé / carbone brillant).',
+      'Brillance et aspect métallique de l’aileron, du châssis et des autres détails. Les finitions peuvent être différentes sur chaque élément.',
   },
   {
     id: 'Details_I',
@@ -128,7 +138,12 @@ export const MAPS: MapDef[] = [
     exportRes: 1024,
     defaultFill: '#000000',
     description:
-      'Auto-illumination des détails : peignez en couleur vive les zones qui doivent briller (néon, feux). Noir = éteint. Le rôle (toujours allumé / phares / feux de frein) se choisit ci-dessous.',
+      'Peignez les zones qui émettent de la lumière. Noir = éteint. Chaque calque peut être un néon permanent, un phare de nuit ou un feu de frein. Le compteur a sa propre couleur.',
+  },
+  {
+    id: 'Details_DirtMask', label: 'Détails · masque de saleté', fileName: 'Details_DirtMask.dds',
+    format: 'BC4', kind: 'grayscale', group: 'details', workRes: 1024, exportRes: 1024,
+    defaultFill: '#000000', description: 'Masque de saleté des détails : 0 % protège les pièces ; 100 % autorise la saleté. Peignez les zones séparément pour doser l’effet.',
   },
   {
     id: 'Wheels_B',
@@ -154,13 +169,34 @@ export const MAPS: MapDef[] = [
     exportRes: 1024,
     defaultFill: '#d91a00',
     description:
-      'Rugosité / métal des roues. Montez le canal vert (métal) et baissez le rouge (rugosité) sur la jante pour un rendu chromé/alu.',
+      'Brillance et aspect métallique des roues. Pour une jante en chrome ou en alu, augmentez le métal et réduisez la rugosité. Le pneu peut garder une finition mate.',
+  },
+  {
+    id: 'Wheels_I', label: 'Roues néon / feux', fileName: 'Wheels_I.dds',
+    format: 'BC3', kind: 'illum', group: 'wheels', workRes: 1024, exportRes: 1024,
+    defaultFill: '#000000', description: 'Lumière des roues. Images et dessins restent éditables séparément ; noir = éteint.',
+  },
+  {
+    id: 'Wheels_DirtMask', label: 'Roues · masque de saleté', fileName: 'Wheels_DirtMask.dds',
+    format: 'BC4', kind: 'grayscale', group: 'wheels', workRes: 1024, exportRes: 1024,
+    defaultFill: '#000000', description: 'Masque de saleté des roues : 0 % protège pneus et jantes ; 100 % autorise la saleté. Ce masque modifie uniquement l’apparence.',
   },
 ];
+
+export const DIRT_MASK_IDS: MapId[] = ['Skin_DirtMask', 'Details_DirtMask', 'Wheels_DirtMask'];
+export const isDirtMask = (id: MapId) => DIRT_MASK_IDS.includes(id);
 
 export const MAP_BY_ID: Record<MapId, MapDef> = Object.fromEntries(
   MAPS.map((m) => [m.id, m]),
 ) as Record<MapId, MapDef>;
+
+/** Painting another mesh family must keep the same appearance channel. */
+export function resolvePaintMap(activeMap: MapId, family: MapDef['group']): MapId | null {
+  const current = MAP_BY_ID[activeMap];
+  if (current.group === family) return activeMap;
+  return MAPS.find((map) => map.group === family && map.kind === current.kind &&
+    (current.kind !== 'grayscale' || isDirtMask(map.id) === isDirtMask(activeMap)))?.id ?? null;
+}
 
 /** Résout un nom de fichier (issu d'un zip importé) vers une map connue. */
 export function mapIdFromFileName(fileName: string): MapId | null {
@@ -174,6 +210,8 @@ export function mapIdFromFileName(fileName: string): MapId | null {
     skinb: 'Skin_B',
     skindiffuse: 'Skin_B',
     skinr: 'Skin_R',
+    skini: 'Skin_I',
+    skinillum: 'Skin_I',
     skincoatr: 'Skin_CoatR',
     skindirtmask: 'Skin_DirtMask',
     detailsb: 'Details_B',
@@ -181,9 +219,13 @@ export function mapIdFromFileName(fileName: string): MapId | null {
     detailsr: 'Details_R',
     detailsi: 'Details_I',
     detailsillum: 'Details_I',
+    detailsdirtmask: 'Details_DirtMask',
     wheelsb: 'Wheels_B',
     wheelsdiffuse: 'Wheels_B',
     wheelsr: 'Wheels_R',
+    wheelsi: 'Wheels_I',
+    wheelsillum: 'Wheels_I',
+    wheelsdirtmask: 'Wheels_DirtMask',
   };
   return aliases[stem] ?? null;
 }
@@ -255,16 +297,20 @@ export const REGION_ORIENTATION: Record<string, RegionOrientation> = {
   shoulderR: { angle: 178, flipX: false },
   rearLow: { angle: 179, flipX: true },
   rearSideL: { angle: 63, flipX: true },
-  // --- DÉTAILS (mesh Details_01) : mesuré par scripts/uv-details-gen.ts. Les
-  // zones details sont fragmentées (îlots dispersés) ; l'angle est l'orientation
-  // « voiture » moyenne de la zone (pour un décalque droit sur la voiture).
-  d_front: { angle: 282, flipX: false },
-  d_hood: { angle: 3, flipX: true },
-  d_cockpit: { angle: 218, flipX: false },
-  d_wing: { angle: 260, flipX: true },
-  d_rear: { angle: 257, flipX: true },
-  d_side: { angle: 317, flipX: false },
-  d_floor: { angle: 287, flipX: true },
+  // --- DÉTAILS (mesh Details_01) : mesuré par scripts/uv-details-gen.ts.
+  // Chaque zone regroupe les îlots qui regardent la même face. L'angle est
+  // l'orientation moyenne (décalque droit sur la voiture).
+  d_tail_hi: { angle: 311, flipX: true },
+  d_tail: { angle: 269, flipX: true },
+  d_head: { angle: 83, flipX: false },
+  d_wing: { angle: 262, flipX: true },
+  d_cockpit: { angle: 171, flipX: false },
+  d_hood: { angle: 275, flipX: true },
+  d_front: { angle: 267, flipX: false },
+  d_rear: { angle: 282, flipX: true },
+  d_side_r: { angle: 131, flipX: true },
+  d_floor: { angle: 263, flipX: false },
+  d_body: { angle: 163, flipX: true },
 };
 
 /** Orientation « voiture » d'une pièce (défaut neutre si la clé est inconnue). */
@@ -301,9 +347,12 @@ export const SKIN_REGIONS: Record<string, UVRegion> = {
   // Flancs : îlots distincts (pas de miroir). Vérifié : u≈0.8 → monde +X = GAUCHE.
   left: { x: 0.721, y: 0.384, w: 0.157, h: 0.366, label: 'FLANC GAUCHE' },
   right: { x: 0.122, y: 0.384, w: 0.157, h: 0.366, label: 'FLANC DROIT' },
-  // Ailes / passages de roue (deux disques symétriques).
-  archL: { x: 0.082, y: 0.024, w: 0.199, h: 0.198, label: 'AILE' },
-  archR: { x: 0.7, y: 0.016, w: 0.228, h: 0.228, label: 'AILE' },
+  // Jantes : deux disques (vérifié en 3D avec une texture diagnostique — ils
+  // habillent les roues, pas les ailes). Chaque disque est partagé par les
+  // roues des deux côtés (centroïde monde x≈0). Le disque le plus grand
+  // (archR) correspond aux roues arrière, plus larges sur la CarSport.
+  archL: { x: 0.082, y: 0.024, w: 0.199, h: 0.198, label: 'JANTES AV.' },
+  archR: { x: 0.7, y: 0.016, w: 0.228, h: 0.228, label: 'JANTES AR.' },
   // Nez avant.
   front: { x: 0.387, y: 0.793, w: 0.226, h: 0.202, label: 'AVANT (nez)' },
   // Bloc / bouclier arrière.
@@ -324,32 +373,28 @@ export const SKIN_REGIONS: Record<string, UVRegion> = {
 
 /**
  * Zones UV des DÉTAILS (mesh `Details_01`), mesurées sur le FBX par
- * scripts/uv-details-gen.ts. Contrairement à la carrosserie, la texture des
- * détails est dépliée en une multitude de petits îlots mécaniques DISPERSÉS sur
- * tout l'atlas UV. On les regroupe donc en ZONES SÉMANTIQUES d'après la position
- * 3D (repère monde : +Z avant, +Y haut, +X gauche) :
- *   - d_front   : splitter / éléments avant,
- *   - d_hood    : entrées d'air / capot avant-central,
- *   - d_cockpit : entourage cockpit (arceau, rétros, habitacle),
- *   - d_wing    : aileron / winglets arrière surélevés,
- *   - d_rear    : diffuseur / bloc arrière,
- *   - d_side    : flancs / carénage latéral,
- *   - d_floor   : châssis / dessous.
+ * scripts/uv-details-gen.ts. Les îlots sont classés par la face qu'ils
+ * regardent (normale d'abord) :
+ *   - d_tail_hi / d_tail : petits îlots face arrière (feux, panneau des chiffres),
+ *   - d_head             : petits îlots face avant (phares),
+ *   - les autres         : aileron, cockpit, capot, avant, arrière, flanc, dessous.
  *
- * Le rectangle est la bounding-box UNION des îlots de la zone (elle couvre donc
- * une large part de l'atlas). Pour un remplissage propre, l'éditeur découpe ce
- * rectangle sur les CONTOURS réels de la zone (UV_GUIDE_ISLANDS, famille
- * 'details') — voir EditorCore.fillRegion(frac, clipKey). Les silhouettes
- * exactes servent aussi au guide (overlay) et au « Limiter à la pièce ».
+ * Le rectangle est la bounding-box UNION (souvent large, les îlots sont
+ * dispersés). Le remplissage et le guide utilisent les contours réels
+ * (UV_GUIDE_ISLANDS), pas ce rectangle.
  */
 export const DETAILS_REGIONS: Record<string, UVRegion> = {
-  d_front: { x: 0.002, y: 0.0029, w: 0.9922, h: 0.9941, label: 'AVANT / SPLITTER' },
-  d_hood: { x: 0.1904, y: 0.0068, w: 0.6406, h: 0.9893, label: "ENTRÉES D'AIR / CAPOT" },
-  d_cockpit: { x: 0.0713, y: 0.002, w: 0.9229, h: 0.9951, label: 'ENTOURAGE COCKPIT' },
-  d_wing: { x: 0.0029, y: 0.0244, w: 0.9893, h: 0.707, label: 'AILERON' },
-  d_rear: { x: 0.002, y: 0.0029, w: 0.9922, h: 0.9941, label: 'DIFFUSEUR / ARRIÈRE' },
-  d_side: { x: 0.002, y: 0.0117, w: 0.9805, h: 0.9453, label: 'FLANCS / CARÉNAGE' },
-  d_floor: { x: 0.002, y: 0.0146, w: 0.9453, h: 0.9824, label: 'CHÂSSIS / DESSOUS' },
+  d_tail_hi: { x: 0.0576, y: 0.2451, w: 0.918, h: 0.6211, label: 'FEU ARRIÈRE HAUT' },
+  d_tail: { x: 0.002, y: 0.0215, w: 0.9453, h: 0.9746, label: 'FEU ARRIÈRE' },
+  d_head: { x: 0.002, y: 0.0645, w: 0.9824, h: 0.9316, label: 'PHARE' },
+  d_wing: { x: 0.0244, y: 0.0293, w: 0.9678, h: 0.9678, label: 'AILERON' },
+  d_cockpit: { x: 0.0029, y: 0.002, w: 0.8662, h: 0.8994, label: 'COCKPIT' },
+  d_hood: { x: 0.1357, y: 0.0068, w: 0.7168, h: 0.9893, label: 'CAPOT' },
+  d_front: { x: 0.002, y: 0.0029, w: 0.9922, h: 0.9941, label: 'AVANT' },
+  d_rear: { x: 0.0605, y: 0.0029, w: 0.9336, h: 0.9941, label: 'ARRIÈRE' },
+  d_side_r: { x: 0.5752, y: 0.3633, w: 0.2715, h: 0.4131, label: 'FLANC DROIT' },
+  d_floor: { x: 0.002, y: 0.0244, w: 0.9922, h: 0.9727, label: 'DESSOUS' },
+  d_body: { x: 0.002, y: 0.0039, w: 0.9922, h: 0.9932, label: 'CARÉNAGE' },
 };
 
 /** Ensembles de zones UV par famille de map (pour l'UI « Remplir une pièce »). */
@@ -360,13 +405,17 @@ export const REGIONS_BY_FAMILY: Partial<Record<MapDef['group'], Record<string, U
 
 /** Cibles de copie pixel-perfect entre maps compatibles (même UV/layout). */
 export const COPY_COMPATIBLE_TARGETS: Record<MapId, MapId[]> = {
-  Skin_B: ['Skin_R', 'Skin_CoatR', 'Skin_DirtMask'],
-  Skin_R: ['Skin_B', 'Skin_CoatR', 'Skin_DirtMask'],
-  Skin_CoatR: ['Skin_B', 'Skin_R', 'Skin_DirtMask'],
-  Skin_DirtMask: ['Skin_B', 'Skin_R', 'Skin_CoatR'],
-  Details_B: ['Details_R', 'Details_I'],
-  Details_R: ['Details_B', 'Details_I'],
-  Details_I: ['Details_B', 'Details_R'],
-  Wheels_B: ['Wheels_R'],
-  Wheels_R: ['Wheels_B'],
+  Skin_B: ['Skin_R', 'Skin_I', 'Skin_CoatR', 'Skin_DirtMask'],
+  Skin_R: ['Skin_B', 'Skin_I', 'Skin_CoatR', 'Skin_DirtMask'],
+  Skin_I: ['Skin_B', 'Skin_R', 'Skin_CoatR', 'Skin_DirtMask'],
+  Skin_CoatR: ['Skin_B', 'Skin_R', 'Skin_I', 'Skin_DirtMask'],
+  Skin_DirtMask: ['Skin_B', 'Skin_R', 'Skin_I', 'Skin_CoatR'],
+  Details_B: ['Details_R', 'Details_I', 'Details_DirtMask'],
+  Details_R: ['Details_B', 'Details_I', 'Details_DirtMask'],
+  Details_I: ['Details_B', 'Details_R', 'Details_DirtMask'],
+  Details_DirtMask: ['Details_B', 'Details_R', 'Details_I'],
+  Wheels_B: ['Wheels_R', 'Wheels_I', 'Wheels_DirtMask'],
+  Wheels_R: ['Wheels_B', 'Wheels_I', 'Wheels_DirtMask'],
+  Wheels_I: ['Wheels_B', 'Wheels_R', 'Wheels_DirtMask'],
+  Wheels_DirtMask: ['Wheels_B', 'Wheels_R', 'Wheels_I'],
 };

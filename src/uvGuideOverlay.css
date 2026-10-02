@@ -1,5 +1,7 @@
-/* Overlay de guide UV précis (silhouettes réelles des îlots du mesh Skin).
-   Se superpose au cadre du canvas d'édition ; ne capte aucun clic. */
+/* Overlay de guide UV (silhouettes réelles des îlots du mesh).
+   Se superpose au cadre du canvas d'édition ; ne capte aucun clic.
+   Volontairement discret : traits fins, aplats très légers, libellés petits
+   — le guide aide à se repérer sans concurrencer le dessin. */
 .uv-guide-overlay {
   position: absolute;
   inset: 0;
@@ -7,39 +9,55 @@
   height: 100%;
   pointer-events: none;
   z-index: 3;
+  opacity: 0.85;
 }
 
 .uv-guide-overlay__poly {
-  fill-opacity: 0.08;
-  stroke-width: 2;
+  fill-opacity: 0.04;
+  stroke-width: 1.25;
+  stroke-opacity: 0.8;
   vector-effect: non-scaling-stroke;
   stroke-linejoin: round;
   stroke-linecap: round;
 }
 
 .uv-guide-overlay__label {
-  font: 700 15px/1 system-ui, sans-serif;
-  letter-spacing: 0.06em;
+  font: 600 11px/1 Inter, 'Segoe UI', system-ui, sans-serif;
+  letter-spacing: 0.05em;
   text-anchor: middle;
   dominant-baseline: middle;
   paint-order: stroke;
-  stroke: rgba(0, 0, 0, 0.72);
-  stroke-width: 4;
+  stroke: rgba(0, 0, 0, 0.6);
+  stroke-width: 3;
   stroke-linejoin: round;
+  opacity: 0.9;
 }
 
 .uv-guide-overlay__group--dimmed .uv-guide-overlay__poly {
-  fill-opacity: 0.02;
-  stroke-opacity: 0.22;
+  fill-opacity: 0.015;
+  stroke-opacity: 0.2;
+}
+.uv-guide-overlay__group--dimmed .uv-guide-overlay__label {
+  opacity: 0.3;
 }
 
 .uv-guide-overlay__poly--focused {
-  fill-opacity: 0.18;
-  stroke-width: 3.5;
-  filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.45));
+  fill-opacity: 0.1;
+  stroke-width: 2;
+  stroke-opacity: 1;
+}
+
+.uv-guide-overlay__poly--lamp {
+  fill-opacity: 0.16;
+  stroke-width: 1.75;
+  stroke-opacity: 1;
+}
+
+.uv-guide-overlay__label--lamp {
+  font-size: 10px;
 }
 
 .uv-guide-overlay__label--focused {
-  font-size: 17px;
-  stroke-width: 5;
+  font-size: 13px;
+  opacity: 1;
 }

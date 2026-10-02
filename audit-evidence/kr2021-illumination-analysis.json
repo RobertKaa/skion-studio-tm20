@@ -1,0 +1,72 @@
+{
+  "archive": "KR2021_passion.zip",
+  "entries": [
+    "Wheels_R.dds",
+    "Details_AO.dds",
+    "Details_B.dds",
+    "Details_DirtMask.dds",
+    "Details_I.dds",
+    "Details_N.dds",
+    "Details_R.dds",
+    "Glass_AO.dds",
+    "Glass_B.dds",
+    "Glass_DirtMask.dds",
+    "Glass_I.dds",
+    "Glass_N.dds",
+    "Glass_R.dds",
+    "Icon.dds",
+    "Skin_AO.dds",
+    "Skin_B.dds",
+    "Skin_DirtMask.dds",
+    "Skin_I.dds",
+    "Skin_N.dds",
+    "Skin_R.dds",
+    "Wheels_AO.dds",
+    "Wheels_B.dds",
+    "Wheels_DirtMask.dds",
+    "Wheels_I.dds",
+    "Wheels_N.dds",
+    "optimizer_version.txt"
+  ],
+  "modelFiles": [],
+  "maps": [
+    {
+      "name": "Skin_I.dds",
+      "width": 2048,
+      "height": 2048,
+      "lit": 28942,
+      "alpha": {
+        "0": 1972,
+        "1": 2278,
+        "2": 6577,
+        "3": 18115
+      }
+    },
+    {
+      "name": "Wheels_I.dds",
+      "width": 2048,
+      "height": 2048,
+      "lit": 0,
+      "alpha": {}
+    },
+    {
+      "name": "Details_I.dds",
+      "width": 2048,
+      "height": 2048,
+      "lit": 95097,
+      "alpha": {
+        "97": 9466,
+        "255": 85631
+      }
+    },
+    {
+      "name": "Glass_I.dds",
+      "width": 2048,
+      "height": 2048,
+      "lit": 331703,
+      "alpha": {
+        "97": 331703
+      }
+    }
+  ]
+}

@@ -11,6 +11,11 @@ node_modules
 dist
 dist-ssr
 *.local
+scripts/3d-skin.local.json
+tools/
+templates/*.blend
+templates/*.blend1
+work/
 
 # Editor directories and files
 .vscode/*

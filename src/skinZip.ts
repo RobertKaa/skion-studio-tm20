@@ -6,6 +6,17 @@
 import JSZip from 'jszip';
 import { decodeDDS, encodeDDS, encodeTGA, type RGBAImage } from './dds';
 import { ILLUM_ROLES, MAPS, mapIdFromFileName, type IllumRole, type MapId } from './maps';
+import { UV_GUIDE_ISLANDS } from './uvGuideData';
+import {
+  SKIN3D_MESH_FILE,
+  baseName,
+  isGameZipPassthrough,
+  isMainBodyMeshName,
+  isPreviewGlbName,
+  isSkin3DMetaName,
+  type Skin3DFile,
+  type Skin3DProject,
+} from './skin3d';
 
 /**
  * Rends la totalité du contenu d'un canvas source dans un buffer RGBA de
@@ -42,10 +53,21 @@ function nextAnimationFrame(): Promise<void> {
 
 export interface ExportSources {
   getMapCanvas: (id: MapId) => HTMLCanvasElement;
-  /** Rôle appliqué au canal alpha de Details_I (néon / phares / freins). */
+  /** Rôle appliqué au canal alpha de Details_I, hors feux de vitesse. */
   illumRole?: IllumRole;
+  /** Discrete behaviour of each painted light, encoded in R. */
+  getIllumRoleCanvas?: (id: MapId) => HTMLCanvasElement;
+  /**
+   * Couleur des feux arrière (compteur). Toujours allumés, indépendamment du rôle.
+   * Défaut : blanc.
+   */
+  speedColor?: string;
   /** Capture de l'aperçu 3D pour Icon.tga (facultatif). */
   icon?: HTMLCanvasElement;
+  /** Mesh 3D déjà compilé, joint tel quel au zip. */
+  meshGbx?: Uint8Array;
+  /** Fichiers du projet 3D à recopier (fakeshad, autres GBX). */
+  passthrough?: Skin3DFile[];
   /**
    * Force un rendu synchrone de TOUTES les maps avant la capture des pixels.
    * Indispensable : le buffer texture est synchronisé via `flushTexture` /
@@ -80,23 +102,148 @@ export interface ExportSources {
  *     On évite ainsi de taguer tout le fond en rôle « frein » (alpha 0) et de
  *     laisser une bavure de couleur créer un halo parasite.
  *
- * IMPORTANT (limite de conception) : un SEUL rôle est appliqué à TOUTES les
- * zones allumées d'un même export. On ne peut donc pas mélanger néon toujours
- * allumé + feux de frein réactifs dans le même skin via cette fonction.
+ * Le rôle choisi s'applique aux zones peintes par l'utilisateur. Les deux zones
+ * du compteur sont forcées en alpha 97 : c'est la valeur des skins où la
+ * vitesse reste visible en roulant (l'alpha ~3 ne l'affiche qu'au freinage,
+ * l'alpha 255 n'allume pas ce panneau).
  *
  * Ne mute PAS l'image source (copie), pour rester réutilisable.
  */
-export function applyIllumRole(img: RGBAImage, role: IllumRole): RGBAImage {
+const SPEED_LIT = 20;
+/**
+ * Alpha des deux zones du compteur. Mesuré sur des skins où la vitesse reste
+ * affichée sans freiner (Bronze, Plastic, Kr6) : 97, pas 3 ni 255.
+ */
+const SPEED_ALPHA = 97;
+
+/**
+ * Les deux zones UV du compteur :
+ * la forme juste au-dessus de l'octogone « FEU », et la pastille en bas à droite.
+ * L'octogone « FEU » lui-même n'en fait pas partie.
+ */
+const SPEED_ZONE_BOXES = [
+  { x0: 0.388, y0: 0.021, x1: 0.439, y1: 0.039 },
+  { x0: 0.649, y0: 0.409, x1: 0.708, y1: 0.426 },
+];
+
+function polygonBox(poly: { x: number; y: number }[]) {
+  let x0 = 1;
+  let y0 = 1;
+  let x1 = 0;
+  let y1 = 0;
+  for (const p of poly) {
+    if (p.x < x0) x0 = p.x;
+    if (p.y < y0) y0 = p.y;
+    if (p.x > x1) x1 = p.x;
+    if (p.y > y1) y1 = p.y;
+  }
+  return { x0, y0, x1, y1 };
+}
+
+export function speedLightPolygons(): { x: number; y: number }[][] {
+  const out: { x: number; y: number }[][] = [];
+  for (const island of UV_GUIDE_ISLANDS) {
+    if (island.family !== 'details') continue;
+    for (const poly of island.polygons) {
+      const box = polygonBox(poly);
+      const hit = SPEED_ZONE_BOXES.some(
+        (zone) =>
+          Math.abs(box.x0 - zone.x0) < 0.012 &&
+          Math.abs(box.y0 - zone.y0) < 0.012 &&
+          Math.abs(box.x1 - zone.x1) < 0.012 &&
+          Math.abs(box.y1 - zone.y1) < 0.012,
+      );
+      if (hit) out.push(poly);
+    }
+  }
+  return out;
+}
+
+const rearLightMasks = new Map<string, Uint8Array>();
+
+function fillUvPolygon(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  poly: { x: number; y: number }[],
+) {
+  if (poly.length < 3) return;
+  const pts = poly.map((p) => ({ x: p.x * width, y: p.y * height }));
+  let minY = height;
+  let maxY = 0;
+  for (const p of pts) {
+    minY = Math.min(minY, Math.floor(p.y));
+    maxY = Math.max(maxY, Math.ceil(p.y));
+  }
+  minY = Math.max(0, minY);
+  maxY = Math.min(height - 1, maxY);
+  for (let y = minY; y <= maxY; y++) {
+    const ys = y + 0.5;
+    const xs: number[] = [];
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      const yi = pts[i].y;
+      const yj = pts[j].y;
+      if (yi > ys === yj > ys) continue;
+      xs.push(pts[i].x + ((ys - yi) * (pts[j].x - pts[i].x)) / (yj - yi));
+    }
+    xs.sort((a, b) => a - b);
+    for (let k = 0; k + 1 < xs.length; k += 2) {
+      const x0 = Math.max(0, Math.ceil(xs[k]));
+      const x1 = Math.min(width - 1, Math.floor(xs[k + 1]));
+      for (let x = x0; x <= x1; x++) mask[y * width + x] = 1;
+    }
+  }
+}
+
+function parseHexColor(hex: string): [number, number, number] {
+  const h = hex.trim().replace('#', '');
+  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+  if (full.length === 6) {
+    const r = Number.parseInt(full.slice(0, 2), 16);
+    const g = Number.parseInt(full.slice(2, 4), 16);
+    const b = Number.parseInt(full.slice(4, 6), 16);
+    if ([r, g, b].every((n) => Number.isFinite(n))) return [r, g, b];
+  }
+  return [255, 255, 255];
+}
+
+/** Îlots UV des feux arrière, là où le jeu affiche la vitesse. */
+export function speedLightMask(width: number, height: number): Uint8Array {
+  const key = `${width}x${height}`;
+  const cached = rearLightMasks.get(key);
+  if (cached) return cached;
+  const mask = new Uint8Array(width * height);
+  for (const poly of speedLightPolygons()) fillUvPolygon(mask, width, height, poly);
+  rearLightMasks.set(key, mask);
+  return mask;
+}
+
+export function applyIllumRole(
+  img: RGBAImage,
+  role: IllumRole,
+  rearMask?: Uint8Array,
+  speedColor = '#ffffff',
+  roles?: RGBAImage,
+): RGBAImage {
   const alpha = ILLUM_ROLES.find((r) => r.id === role)?.alpha ?? 255;
+  const speedRgb = parseHexColor(speedColor);
   const src = img.data;
   const out = new Uint8ClampedArray(src.length);
-  for (let i = 0; i < out.length; i += 4) {
-    const lit = Math.max(src[i], src[i + 1], src[i + 2]) > 20;
-    if (lit) {
+  const mask = rearMask && rearMask.length === img.width * img.height ? rearMask : null;
+  for (let p = 0, i = 0; i < out.length; p++, i += 4) {
+    const lit = Math.max(src[i], src[i + 1], src[i + 2]) > SPEED_LIT;
+    const rear = mask?.[p] === 1;
+    if (rear) {
+      out[i] = speedRgb[0];
+      out[i + 1] = speedRgb[1];
+      out[i + 2] = speedRgb[2];
+      // 97 : lumière du compteur, visible en roulant. 3 = seulement au freinage.
+      out[i + 3] = SPEED_ALPHA;
+    } else if (lit) {
       out[i] = src[i];
       out[i + 1] = src[i + 1];
       out[i + 2] = src[i + 2];
-      out[i + 3] = alpha;
+      out[i + 3] = roles && roles.width === img.width && roles.height === img.height ? roles.data[i] : alpha;
     } else {
       out[i] = 0;
       out[i + 1] = 0;
@@ -109,10 +256,21 @@ export function applyIllumRole(img: RGBAImage, role: IllumRole): RGBAImage {
 
 export interface BuildSkinZipOptions {
   skinName: string;
-  /** Rôle du canal alpha pour la map d'illumination (Details_I). */
+  /** Rôle du canal alpha pour la map d'illumination (Details_I), hors vitesse. */
   illumRole?: IllumRole;
+  illumRoles?: RGBAImage;
+  illumRolesByMap?: Partial<Record<MapId, RGBAImage>>;
+  /** Couleur des feux du compteur. Allumés en roulant. Défaut blanc. */
+  speedColor?: string;
   /** Icône déjà encodée en TGA (facultatif). */
   iconTGA?: ArrayBuffer;
+  /**
+   * Mesh compilé (NadeoImporter + skinfix), recopié tel quel.
+   * Absent → zip texture classique, sans changement de forme.
+   */
+  meshGbx?: Uint8Array;
+  /** DDS hors maps (fakeshad) et GBX non-mesh, même règle que SkinMaker. */
+  passthrough?: Skin3DFile[];
 }
 
 /**
@@ -172,9 +330,14 @@ export async function buildSkinZipFromImages(
     let rgba = images[def.id];
     if (!rgba) throw new Error(`Map manquante à l'export : ${def.id}`);
     if (def.kind === 'illum') {
-      // On applique le rôle AVANT le test d'uniformité : une map _I noire (néon
-      // éteint) devient (0,0,0,255) partout → détectée comme plate → rétrécie.
-      rgba = applyIllumRole(rgba, opts.illumRole ?? 'always');
+      // Les feux de vitesse sont toujours écrits, même si le reste du calque est noir.
+      rgba = applyIllumRole(
+        rgba,
+        opts.illumRole ?? 'always',
+        def.id === 'Details_I' ? speedLightMask(rgba.width, rgba.height) : undefined,
+        opts.speedColor ?? '#ffffff',
+        opts.illumRolesByMap?.[def.id] ?? (def.id === 'Details_I' ? opts.illumRoles : undefined),
+      );
     }
     // Map laissée en aplat (non éditée) → export minuscule (voir FLAT_MAP_RES).
     const flat = uniformColor(rgba);
@@ -186,9 +349,21 @@ export async function buildSkinZipFromImages(
   if (opts.iconTGA) {
     zip.file('Icon.tga', opts.iconTGA);
   }
+  if (opts.meshGbx) {
+    zip.file(SKIN3D_MESH_FILE, opts.meshGbx);
+  }
+  for (const extra of opts.passthrough ?? []) {
+    const name = baseName(extra.name);
+    if (!isGameZipPassthrough(name) || zip.file(name)) continue;
+    zip.file(name, extra.data);
+  }
+  const meshNote = opts.meshGbx
+    ? `Ce zip contient ${SKIN3D_MESH_FILE} : le visuel remplace la carrosserie, la hitbox reste celle du jeu.\n`
+    : '';
   zip.file(
     'ReadMe.txt',
     `Skin "${opts.skinName}" généré par TM Skin Studio.\n` +
+      meshNote +
       `Placez ce fichier .zip dans Documents/Trackmania/Skins/Models/CarSport/\n` +
       `puis dans le jeu : Profil > Garage > Upload skin.\n`,
   );
@@ -214,10 +389,26 @@ export async function exportSkinZip(
     images[def.id] = canvasToRGBA(sources.getMapCanvas(def.id), res);
   }
   const iconTGA = sources.icon ? encodeTGA(canvasToRGBA(sources.icon, 256)) : undefined;
+  const illumRolesByMap: Partial<Record<MapId, RGBAImage>> = {};
+  for (const def of MAPS.filter((map) => map.kind === 'illum')) {
+    const roleSource = sources.getIllumRoleCanvas?.(def.id);
+    if (!roleSource) continue;
+    const size = images[def.id].width;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(roleSource, 0, 0, size, size);
+    illumRolesByMap[def.id] = { width: size, height: size, data: ctx.getImageData(0, 0, size, size).data };
+  }
   return buildSkinZipFromImages(images, {
     skinName,
     illumRole: sources.illumRole,
+    illumRolesByMap,
+    speedColor: sources.speedColor,
     iconTGA,
+    meshGbx: sources.meshGbx,
+    passthrough: sources.passthrough,
   });
 }
 
@@ -230,6 +421,8 @@ export interface ImportResult {
   imported: { id: MapId; image: RGBAImage; path: string }[];
   skipped: string[];
   failures: ImportFailure[];
+  /** Présent si le zip contient MainBody.Mesh.gbx. */
+  skin3d: Skin3DProject | null;
 }
 
 const MAX_IMPORT_DIM = 8192;
@@ -295,12 +488,38 @@ async function decodeBitmapEntry(blob: Blob): Promise<RGBAImage | null> {
  */
 export async function importSkinZipFromBuffer(buf: ArrayBuffer): Promise<ImportResult> {
   const zip = await JSZip.loadAsync(buf);
-  const result: ImportResult = { imported: [], skipped: [], failures: [] };
+  const result: ImportResult = { imported: [], skipped: [], failures: [], skin3d: null };
   /** Dernière texture gagnante par map (zip peut contenir des doublons). */
   const byId = new Map<MapId, { id: MapId; image: RGBAImage; path: string }>();
+  let mesh: Uint8Array | null = null;
+  let preview: ArrayBuffer | null = null;
+  let metaName: string | null = null;
+  const passthrough: Skin3DFile[] = [];
 
   for (const [path, entry] of Object.entries(zip.files)) {
     if (entry.dir) continue;
+    const file = baseName(path);
+    if (isMainBodyMeshName(file)) {
+      mesh = new Uint8Array(await entry.async('arraybuffer'));
+      continue;
+    }
+    if (isPreviewGlbName(file)) {
+      preview = await entry.async('arraybuffer');
+      continue;
+    }
+    if (isSkin3DMetaName(file)) {
+      try {
+        const parsed = JSON.parse(await entry.async('string')) as { name?: unknown };
+        if (typeof parsed.name === 'string' && parsed.name.trim()) metaName = parsed.name.trim();
+      } catch {
+        /* métadonnées illisibles : le mesh reste chargeable */
+      }
+      continue;
+    }
+    if (isGameZipPassthrough(file)) {
+      passthrough.push({ name: file, data: new Uint8Array(await entry.async('arraybuffer')) });
+      continue;
+    }
     const id = mapIdFromFileName(path);
     const lower = path.toLowerCase();
     if (!id) {
@@ -345,6 +564,9 @@ export async function importSkinZipFromBuffer(buf: ArrayBuffer): Promise<ImportR
   }
 
   result.imported = [...byId.values()];
+  if (mesh) {
+    result.skin3d = { mesh, preview, passthrough, name: metaName };
+  }
   return result;
 }
 

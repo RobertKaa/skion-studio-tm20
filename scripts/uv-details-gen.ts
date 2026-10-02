@@ -143,39 +143,50 @@ for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
 }
 
 // ------------------------------------------------------- classification par ZONE
-// Regroupe les îlots par sémantique 3D. Repère monde : +Z avant, +Y haut, +X gauche.
+// Chaque îlot est classé SUR SA PROPRE face (normale d'abord, puis position).
+// L'ancien découpage mettait le panneau des feux arrière dans « aileron » dès
+// qu'il était haut et à l'arrière, et collait le libellé sur un autre îlot.
+// Repère monde : +Z avant, +Y haut, +X gauche.
 const frac = (val: number, min: number, s: number) => (val - min) / (s || 1);
 
 interface Zone { key: string; label: string; }
 const ZONES: Zone[] = [
-  { key: 'd_front', label: 'AVANT / SPLITTER' },
-  { key: 'd_hood', label: "ENTRÉES D'AIR / CAPOT" },
-  { key: 'd_cockpit', label: 'ENTOURAGE COCKPIT' },
+  { key: 'd_tail_hi', label: 'FEU ARRIÈRE HAUT' },
+  { key: 'd_tail', label: 'FEU ARRIÈRE' },
+  { key: 'd_head', label: 'PHARE' },
   { key: 'd_wing', label: 'AILERON' },
-  { key: 'd_rear', label: 'DIFFUSEUR / ARRIÈRE' },
-  { key: 'd_side', label: 'FLANCS / CARÉNAGE' },
-  { key: 'd_floor', label: 'CHÂSSIS / DESSOUS' },
+  { key: 'd_cockpit', label: 'COCKPIT' },
+  { key: 'd_hood', label: 'CAPOT' },
+  { key: 'd_front', label: 'AVANT' },
+  { key: 'd_rear', label: 'ARRIÈRE' },
+  { key: 'd_side_l', label: 'FLANC GAUCHE' },
+  { key: 'd_side_r', label: 'FLANC DROIT' },
+  { key: 'd_floor', label: 'DESSOUS' },
+  { key: 'd_body', label: 'CARÉNAGE' },
 ];
 
-function classifyZone(fLong: number, fUp: number, n: THREE.Vector3): string {
-  // Aileron : partie arrière ET surélevée.
-  if (fLong < 0.32 && fUp > 0.55) return 'd_wing';
-  // Diffuseur / bloc arrière.
-  if (fLong < 0.24) return 'd_rear';
-  // Avant : splitter / nez.
+function classifyZone(fLong: number, fUp: number, fWide: number, n: THREE.Vector3, cellFrac: number): string {
+  const faceZ = Math.abs(n.z) > 0.55;
+  const faceX = Math.abs(n.x) > 0.5;
+  // Feux : seulement les PETITS îlots qui regardent l'avant ou l'arrière.
+  // Les grands panneaux arrière (diffuseur, capot) ne sont pas des feux.
+  const lamp = cellFrac < 0.012;
+  if (lamp && faceZ && n.z < 0 && fLong < 0.48) return fUp > 0.55 ? 'd_tail_hi' : 'd_tail';
+  if (lamp && faceZ && n.z > 0 && fLong > 0.5) return 'd_head';
+  if (n.y < -0.4) return 'd_floor';
+  // Aileron : haut, arrière, et tourné vers le haut (pas la face des feux).
+  if (n.y > 0.55 && fLong < 0.4 && fUp > 0.52) return 'd_wing';
+  if (n.y > 0.45 && fUp > 0.48 && fLong >= 0.32 && fLong <= 0.7) return 'd_cockpit';
+  if (faceX) return fWide >= 0.5 ? 'd_side_l' : 'd_side_r';
   if (fLong > 0.72) return 'd_front';
-  // Châssis / dessous : surfaces tournées vers le bas ou très basses.
-  if (n.y < -0.35 || fUp < 0.22) return 'd_floor';
-  // Entourage cockpit : central-haut.
-  if (fUp > 0.52 && fLong < 0.60) return 'd_cockpit';
-  // Entrées d'air / capot : avant-central, plutôt vers le haut.
+  if (fLong < 0.28) return 'd_rear';
   if (fLong >= 0.55) return 'd_hood';
-  // Reste : flancs / carénage latéral.
-  return 'd_side';
+  return 'd_body';
 }
 
-const MIN_CELL_REGION = 0.0002; // îlots comptés dans la bbox de zone (~0.02 %)
-const MIN_CELL_OUTLINE = 0.0009; // îlots tracés en contour (~0.09 %, silhouettes lisibles)
+// Les feux sont de petits îlots : on les trace, on ne les jette plus.
+const MIN_CELL_REGION = 0.00012;
+const MIN_CELL_OUTLINE = 0.00012;
 
 interface ZoneAgg {
   islands: Isl[];        // pour la bbox (petits inclus)
@@ -194,7 +205,8 @@ for (const o of islands.values()) {
   nrm.normalize();
   const fLong = frac(c.z, bb.min.z, size.z);
   const fUp = frac(c.y, bb.min.y, size.y);
-  const key = classifyZone(fLong, fUp, nrm);
+  const fWide = frac(c.x, bb.min.x, size.x);
+  const key = classifyZone(fLong, fUp, fWide, nrm, o.cells / (N * N));
   const agg = zoneAgg.get(key)!;
   agg.islands.push(o);
   agg.verts.push(...o.verts);
@@ -325,7 +337,7 @@ for (const z of ZONES) {
   for (const o of [...outline].sort((a, b) => b.cells - a.cells)) {
     for (const loop of traceIsland(o.id)) {
       if (loop.length < 4) continue;
-      if (polyArea(loop) < 0.0004) continue;
+      if (polyArea(loop) < 0.00008) continue;
       const simp = rdp(loop, EPS);
       if (simp.length >= 3) polys.push(simp);
     }
@@ -456,8 +468,10 @@ console.log('\nécrit: scripts/out/details-regions.json');
 
 // --------------------------------------------------------------- rendu PNG verif
 const COLORS: Record<string, string> = {
+  d_tail_hi: '#ff4d6a', d_tail: '#ff8a4a', d_head: '#ffe14a',
   d_front: '#ff9a28', d_hood: '#ff5a5a', d_cockpit: '#b45aff', d_wing: '#ff40c8',
-  d_rear: '#28dcdc', d_side: '#3ad884', d_floor: '#e0e02a',
+  d_rear: '#28dcdc', d_side_l: '#3ad884', d_side_r: '#7dffb0', d_floor: '#e0e02a',
+  d_body: '#9ad0ff',
 };
 const S = 1024;
 const canvas = createCanvas(S, S);
@@ -489,17 +503,20 @@ for (const r of results) {
     ctx.save(); ctx.globalAlpha = 0.12; ctx.fillStyle = col; ctx.fill(); ctx.restore();
     ctx.stroke();
   }
-  // libellé au centre du plus grand polygone de la zone (comme l'overlay React)
-  const big = r.polygons[0] ?? [[r.region.x + r.region.w / 2, r.region.y + r.region.h / 2]];
-  let mx = 0, my = 0;
-  for (const p of big) { mx += p[0]; my += p[1]; }
-  mx = (mx / big.length) * S; my = (my / big.length) * S;
-  const txt = `${r.label} ${r.angle}°${r.flipX ? ' ⇋' : ''}`;
-  const w = ctx.measureText(txt).width;
-  ctx.fillStyle = 'rgba(0,0,0,0.7)';
-  ctx.fillRect(mx - w / 2 - 6, my - 13, w + 12, 26);
-  ctx.fillStyle = col;
-  ctx.fillText(txt, mx, my);
+  ctx.font = 'bold 13px sans-serif';
+  for (const poly of r.polygons) {
+    if (polyArea(poly) < 0.0012 && r.key !== 'd_tail' && r.key !== 'd_tail_hi' && r.key !== 'd_head') continue;
+    if (polyArea(poly) < 0.0003) continue;
+    let mx = 0, my = 0;
+    for (const p of poly) { mx += p[0]; my += p[1]; }
+    mx = (mx / poly.length) * S; my = (my / poly.length) * S;
+    const txt = r.label;
+    const w = ctx.measureText(txt).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(mx - w / 2 - 4, my - 9, w + 8, 18);
+    ctx.fillStyle = col;
+    ctx.fillText(txt, mx, my);
+  }
 }
 writeFileSync(resolve(outDir, 'details-uv-verify.png'), canvas.toBuffer('image/png'));
 console.log('écrit: scripts/out/details-uv-verify.png');

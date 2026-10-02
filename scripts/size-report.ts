@@ -207,7 +207,12 @@ async function main() {
     let ddsTotal = 0;
     const lines: string[] = [];
     for (const def of MAPS) {
-      const ab = await zip.file(def.fileName)!.async('arraybuffer');
+      const entry = zip.file(def.fileName);
+      if (!entry) {
+        lines.push(`      ${def.id.padEnd(16)} omis  (feux d'origine du jeu)`);
+        continue;
+      }
+      const ab = await entry.async('arraybuffer');
       ddsTotal += ab.byteLength;
       const dv = new DataView(ab);
       const w = dv.getUint32(16, true);

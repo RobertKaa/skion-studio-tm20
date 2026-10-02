@@ -16,6 +16,7 @@ import {
   applyIllumRole,
   buildSkinZipFromImages,
 } from '../src/skinZip';
+import { SKIN3D_MESH_FILE, isGameZipPassthrough } from '../src/skin3d';
 import { decodeDDS, type RGBAImage } from '../src/dds';
 import {
   ILLUM_ROLES,
@@ -234,6 +235,141 @@ async function main() {
     );
   }
 
+  // 6b) Néon entièrement noir : les feux de vitesse sont quand même exportés,
+  //     blancs, alpha 97 (compteur visible sans freiner). Le reste du calque reste éteint.
+  {
+    const blackImages = {} as Record<MapId, RGBAImage>;
+    for (const def of MAPS) {
+      const d = new Uint8ClampedArray(def.exportRes * def.exportRes * 4);
+      if (def.id !== 'Details_I') d.fill(128);
+      blackImages[def.id] = { width: def.exportRes, height: def.exportRes, data: d };
+    }
+    const blobBlack = await buildSkinZipFromImages(blackImages, {
+      skinName: 'NoNeon',
+      illumRole: 'brake',
+      speedColor: '#ffffff',
+    });
+    const zipBlack = await JSZip.loadAsync(Buffer.from(await blobBlack.arrayBuffer()));
+    const rearFile = zipBlack.file('Details_I.dds');
+    check('Details_I noir ⇒ fichier présent (vitesse blanche)', rearFile != null);
+    check('Skin_B toujours présent', zipBlack.file('Skin_B.dds') != null);
+    if (rearFile) {
+      const dec = decodeDDS(await rearFile.async('arraybuffer'))!;
+      const size = MAP_BY_ID.Details_I.exportRes;
+      const at = (u: number, v: number) => {
+        const x = Math.round(u * size);
+        const y = Math.round(v * size);
+        return (y * size + x) * 4;
+      };
+      const rear = at(0.413, 0.03);
+      const pill = at(0.678, 0.417);
+      const off = at(0.75, 0.5);
+      const feuOctagon = at(0.42, 0.1);
+      check(
+        'vitesse par défaut ⇒ blanc, alpha compteur (97)',
+        dec.data[rear] > 180 &&
+          dec.data[rear + 1] > 180 &&
+          dec.data[rear + 2] > 180 &&
+          Math.abs(dec.data[rear + 3] - 97) <= 12,
+        `got ${dec.data[rear]},${dec.data[rear + 1]},${dec.data[rear + 2]},${dec.data[rear + 3]}`,
+      );
+      check(
+        'hors vitesse, calque noir ⇒ éteint',
+        dec.data[off] <= 20 && dec.data[off + 1] <= 20 && dec.data[off + 2] <= 20 && dec.data[off + 3] >= 235,
+        `got ${dec.data[off]},${dec.data[off + 1]},${dec.data[off + 2]},${dec.data[off + 3]}`,
+      );
+      check(
+        'pastille vitesse ⇒ blanc, alpha compteur (97)',
+        dec.data[pill] > 180 &&
+          dec.data[pill + 1] > 180 &&
+          dec.data[pill + 2] > 180 &&
+          Math.abs(dec.data[pill + 3] - 97) <= 12,
+        `got ${dec.data[pill]},${dec.data[pill + 1]},${dec.data[pill + 2]}`,
+      );
+      check(
+        'octogone FEU ⇒ pas rempli',
+        dec.data[feuOctagon] <= 20 && dec.data[feuOctagon + 1] <= 20 && dec.data[feuOctagon + 2] <= 20,
+        `got ${dec.data[feuOctagon]},${dec.data[feuOctagon + 1]},${dec.data[feuOctagon + 2]}`,
+      );
+    }
+  }
+
+  // 6c) Néon peint ailleurs : les îlots des feux arrière prennent la couleur
+  //     de vitesse (blanc par défaut) et prennent l'alpha 97 du compteur.
+  {
+    const painted = {} as Record<MapId, RGBAImage>;
+    for (const def of MAPS) {
+      const d = new Uint8ClampedArray(def.exportRes * def.exportRes * 4);
+      d.fill(def.id === 'Details_I' ? 0 : 128);
+      if (def.id === 'Details_I') d[3] = 255;
+      painted[def.id] = { width: def.exportRes, height: def.exportRes, data: d };
+    }
+    painted.Details_I.data[0] = 255;
+    painted.Details_I.data[1] = 0;
+    painted.Details_I.data[2] = 0;
+    painted.Details_I.data[3] = 255;
+    const blobRear = await buildSkinZipFromImages(painted, { skinName: 'RearLights', illumRole: 'always' });
+    const zipRear = await JSZip.loadAsync(Buffer.from(await blobRear.arrayBuffer()));
+    const decRear = decodeDDS(await zipRear.file('Details_I.dds')!.async('arraybuffer'))!;
+    const size = MAP_BY_ID.Details_I.exportRes;
+    const x = Math.round(0.413 * size);
+    const y = Math.round(0.03 * size);
+    const i = (y * size + x) * 4;
+    check(
+      'feu arrière laissé noir ⇒ émission blanche',
+      decRear.data[i] > 180 && decRear.data[i + 1] > 180 && decRear.data[i + 2] > 180,
+      `got ${decRear.data[i]},${decRear.data[i + 1]},${decRear.data[i + 2]}`,
+    );
+    check(
+      'feu vitesse ⇒ alpha compteur (97)',
+      Math.abs(decRear.data[i + 3] - 97) <= 12,
+      `got ${decRear.data[i + 3]}`,
+    );
+  }
+
+  // 6d) Rôle frein sur une zone peinte : la vitesse garde sa couleur et reste
+  //     allumée, le pixel peint ailleurs prend l'alpha frein.
+  {
+    const mixed = {} as Record<MapId, RGBAImage>;
+    for (const def of MAPS) {
+      const d = new Uint8ClampedArray(def.exportRes * def.exportRes * 4);
+      d.fill(def.id === 'Details_I' ? 0 : 128);
+      if (def.id === 'Details_I') d[3] = 255;
+      mixed[def.id] = { width: def.exportRes, height: def.exportRes, data: d };
+    }
+    const size = MAP_BY_ID.Details_I.exportRes;
+    const gx = Math.round(0.75 * size);
+    const gy = Math.round(0.5 * size);
+    const gi = (gy * size + gx) * 4;
+    mixed.Details_I.data[gi] = 0;
+    mixed.Details_I.data[gi + 1] = 255;
+    mixed.Details_I.data[gi + 2] = 0;
+    mixed.Details_I.data[gi + 3] = 255;
+    const blobMix = await buildSkinZipFromImages(mixed, {
+      skinName: 'BrakeAndSpeed',
+      illumRole: 'brake',
+      speedColor: '#ff3300',
+    });
+    const zipMix = await JSZip.loadAsync(Buffer.from(await blobMix.arrayBuffer()));
+    const decMix = decodeDDS(await zipMix.file('Details_I.dds')!.async('arraybuffer'))!;
+    const rx = Math.round(0.413 * size);
+    const ry = Math.round(0.03 * size);
+    const ri = (ry * size + rx) * 4;
+    check(
+      'vitesse colorée ⇒ rouge, alpha compteur, même si le rôle global est frein',
+      decMix.data[ri] > 180 &&
+        decMix.data[ri + 1] < 120 &&
+        decMix.data[ri + 2] < 80 &&
+        Math.abs(decMix.data[ri + 3] - 97) <= 12,
+      `got ${decMix.data[ri]},${decMix.data[ri + 1]},${decMix.data[ri + 2]},${decMix.data[ri + 3]}`,
+    );
+    check(
+      'zone peinte hors vitesse ⇒ alpha frein',
+      decMix.data[gi + 1] > 160 && decMix.data[gi + 3] < 40,
+      `got ${decMix.data[gi]},${decMix.data[gi + 1]},${decMix.data[gi + 2]},${decMix.data[gi + 3]}`,
+    );
+  }
+
   // 7) Garantie « aucune map oubliée » : une map manquante lève une erreur.
   {
     const partial = { ...images };
@@ -313,6 +449,52 @@ async function main() {
       total2 < 5 * 1024 * 1024,
       `got ${(total2 / 1048576).toFixed(2)} Mo`,
     );
+  }
+
+  // 9) Skin 3D : MainBody.Mesh.gbx recopié tel quel, DDS hors maps aussi.
+  //    Sans mesh, le zip reste un skin texture (pas de GBX).
+  {
+    check('passthrough fakeshad.dds', isGameZipPassthrough('fakeshad.dds'));
+    check('passthrough Shape.gbx', isGameZipPassthrough('Foo.Shape.gbx'));
+    check('Skin_B.dds n’est pas un passthrough', !isGameZipPassthrough('Skin_B.dds'));
+    check('mesh pré-skinfix exclu', !isGameZipPassthrough('Body.Mesh.gbx'));
+    check('preview.glb exclu du zip de jeu', !isGameZipPassthrough('preview.glb'));
+
+    const mesh = new Uint8Array([7, 1, 2, 3, 4, 5, 6, 8, 9]);
+    const shade = new Uint8Array([4, 4, 4, 4]);
+    const blob3d = await buildSkinZipFromImages(images, {
+      skinName: 'MeshSkin',
+      illumRole,
+      meshGbx: mesh,
+      passthrough: [
+        { name: 'fakeshad.dds', data: shade },
+        { name: 'preview.glb', data: new Uint8Array([1]) },
+        { name: 'Skin_B.dds', data: new Uint8Array([2, 2]) },
+      ],
+    });
+    const zip3d = await JSZip.loadAsync(await blob3d.arrayBuffer());
+    const meshEntry = zip3d.file(SKIN3D_MESH_FILE);
+    check('MainBody.Mesh.gbx présent', !!meshEntry);
+    if (meshEntry) {
+      const got = new Uint8Array(await meshEntry.async('arraybuffer'));
+      check(
+        'MainBody.Mesh.gbx identique',
+        got.length === mesh.length && mesh.every((b, i) => b === got[i]),
+      );
+    }
+    const shadeEntry = zip3d.file('fakeshad.dds');
+    check('fakeshad.dds recopié', !!shadeEntry);
+    if (shadeEntry) {
+      const got = new Uint8Array(await shadeEntry.async('arraybuffer'));
+      check('fakeshad.dds identique', got.length === 4 && got[0] === 4);
+    }
+    check('preview.glb absent du zip de jeu', !zip3d.file('preview.glb'));
+    const painted = zip3d.file('Skin_B.dds');
+    check('Skin_B.dds reste l’encodage de l’app', !!painted && (await painted.async('arraybuffer')).byteLength !== 2);
+
+    const plain = await buildSkinZipFromImages(images, { skinName: 'TextureOnly', illumRole });
+    const zipPlain = await JSZip.loadAsync(await plain.arrayBuffer());
+    check('sans mesh : pas de MainBody.Mesh.gbx', !zipPlain.file(SKIN3D_MESH_FILE));
   }
 
   if (failures) {

@@ -14,6 +14,7 @@ import {
   importSkinZipFromBuffer,
 } from '../src/skinZip';
 import { MAPS, MAP_BY_ID, type MapId } from '../src/maps';
+import { SKIN3D_MESH_FILE } from '../src/skin3d';
 
 let failures = 0;
 const check = (name: string, cond: boolean, detail = '') => {
@@ -97,7 +98,7 @@ async function main() {
     const result = await importSkinZipFromBuffer(await blob.arrayBuffer());
     check('format récent : import sans exception', result.imported.length > 0);
     check(
-      'format récent : 9 maps reconnues',
+      `format récent : ${MAPS.length} maps reconnues`,
       result.imported.length === MAPS.length,
       `got ${result.imported.length}`,
     );
@@ -159,6 +160,34 @@ async function main() {
     zip.file('Skins\\Skin_B.dds', encodeDDS(paintPattern(64, 1), 'BC1'));
     const result = await importSkinZipFromBuffer(await zip.generateAsync({ type: 'arraybuffer' }));
     check('chemin backslash : Skin_B reconnu', result.imported.some((x) => x.id === 'Skin_B'));
+    check('zip texture : pas de skin3d', result.skin3d === null);
+  }
+
+  // 7) Projet 3D : mesh recopié, preview et nom conservés, DDS peinte toujours lue.
+  {
+    const mesh = new Uint8Array([9, 8, 7, 6, 5]);
+    const preview = new Uint8Array([1, 2, 3, 4]);
+    const shade = new Uint8Array([3, 3, 3]);
+    const zip = new JSZip();
+    zip.file(SKIN3D_MESH_FILE, mesh);
+    zip.file('preview.glb', preview);
+    zip.file('fakeshad.dds', shade);
+    zip.file('skin3d.json', JSON.stringify({ name: 'Citrouille' }));
+    zip.file('Skin_B.dds', encodeDDS(paintPattern(32, 2), 'BC1'));
+    const result = await importSkinZipFromBuffer(await zip.generateAsync({ type: 'arraybuffer' }));
+    check('projet 3D : mesh présent', !!result.skin3d);
+    check('projet 3D : nom', result.skin3d?.name === 'Citrouille');
+    const gotMesh = result.skin3d?.mesh;
+    check(
+      'projet 3D : octets du mesh',
+      !!gotMesh && gotMesh.length === mesh.length && mesh.every((b, i) => b === gotMesh[i]),
+    );
+    check('projet 3D : preview', (result.skin3d?.preview?.byteLength ?? 0) === 4);
+    check(
+      'projet 3D : fakeshad en passthrough',
+      result.skin3d?.passthrough.some((f) => f.name === 'fakeshad.dds' && f.data[0] === 3) === true,
+    );
+    check('projet 3D : Skin_B toujours importée', result.imported.some((x) => x.id === 'Skin_B'));
   }
 
   if (failures) {
