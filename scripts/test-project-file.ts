@@ -75,12 +75,34 @@ console.log('✓ Projet : archive complète, originaux PNG, projection/matière,
 const legacy = structuredClone(document);
 delete (legacy.editor.maps as Partial<ProjectDocument['editor']['maps']>).Skin_I;
 delete (legacy.editor.maps as Partial<ProjectDocument['editor']['maps']>).Wheels_I;
+delete (legacy.editor.maps as Partial<ProjectDocument['editor']['maps']>).Details_DirtMask;
+delete (legacy.editor.maps as Partial<ProjectDocument['editor']['maps']>).Wheels_DirtMask;
 const oldZip = new JSZip(); oldZip.file('project.json', JSON.stringify(legacy)); oldZip.file('assets/image-0.png', png);
 const upgraded = await readProjectFile(new Blob([await oldZip.generateAsync({ type: 'arraybuffer' })]));
 assert.equal(Object.keys(upgraded.document.editor.maps).length, MAPS.length);
 assert.deepEqual(upgraded.document.editor.maps.Skin_B, document.editor.maps.Skin_B, 'Migration sans altérer les images, calques ou matière du projet existant');
 assert.equal(upgraded.document.editor.maps.Skin_I.background, '#000000');
 assert.deepEqual(upgraded.document.editor.maps.Wheels_I.objects, []);
+assert.equal(upgraded.document.editor.maps.Details_DirtMask.background, '#000000');
+const elevenMaps = structuredClone(document);
+delete (elevenMaps.editor.maps as Partial<ProjectDocument['editor']['maps']>).Details_DirtMask;
+delete (elevenMaps.editor.maps as Partial<ProjectDocument['editor']['maps']>).Wheels_DirtMask;
+elevenMaps.editor.maps.Skin_DirtMask.background = '#777777';
+const elevenZip = new JSZip(); elevenZip.file('project.json', JSON.stringify(elevenMaps)); elevenZip.file('assets/image-0.png', png);
+const upgradedEleven = await readProjectFile(new Blob([await elevenZip.generateAsync({ type: 'arraybuffer' })]));
+assert.equal(Object.keys(upgradedEleven.document.editor.maps).length, MAPS.length);
+assert.deepEqual(upgradedEleven.document.editor.maps.Skin_DirtMask, elevenMaps.editor.maps.Skin_DirtMask, 'Le masque de carrosserie existant reste intact');
+assert.deepEqual(upgradedEleven.document.editor.maps.Skin_B, elevenMaps.editor.maps.Skin_B);
+const dirtSettings = structuredClone(document); dirtSettings.workspace.dirtEnabled = false; dirtSettings.workspace.dirtPreview = .75;
+assert.deepEqual((await readProjectFile(await writeProjectFile({ document: dirtSettings, assets: new Map([['assets/image-0.png', png]]) }))).document.workspace, dirtSettings.workspace);
+for (const value of ['false', 0, null]) {
+  const badDirt = structuredClone(document); (badDirt.workspace as unknown as Record<string, unknown>).dirtEnabled = value;
+  assert.throws(() => validateProjectDocument(badDirt, new Set(['assets/image-0.png'])), /saleté invalide/);
+}
+for (const value of [NaN, Infinity, -.1, 1.1, '1']) {
+  const badDirt = structuredClone(document); (badDirt.workspace as unknown as Record<string, unknown>).dirtPreview = value;
+  assert.throws(() => validateProjectDocument(badDirt, new Set(['assets/image-0.png'])), /saleté invalide/);
+}
 const lightCodes = structuredClone(document);
 lightCodes.editor.maps.Skin_I.objects = [{ type: 'Image', src: 'assets/image-0.png', illumRole: 'brake', illumCodes: { width: 2, height: 2, runs: [2, 0, 1, 3, 1, 97] } }];
 const savedCodes = await readProjectFile(await writeProjectFile({ document: lightCodes, assets: new Map([['assets/image-0.png', png]]) }));

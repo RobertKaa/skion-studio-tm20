@@ -37,6 +37,7 @@ import {
 import type { EditorCore } from './editor/EditorCore';
 import {
   MAP_BY_ID,
+  DIRT_MASK_IDS,
   SKIN_REGIONS,
   getRegionOrientation,
   type IllumRole,
@@ -117,7 +118,7 @@ export const DEFAULT_OPTIONS: GeneratorOptions = {
   raceNumberValue: '',
   finish: 'auto',
   coat: 'auto',
-  dirt: 10,
+  dirt: 0,
   wheels: 'auto',
   details: 'auto',
   neon: 'auto',
@@ -2365,7 +2366,7 @@ export function generateSkin(editor: EditorCore, opts: GeneratorOptions): Genera
 
   // ---- Saleté ---------------------------------------------------------------
   const dirtV = Math.round((opts.dirt / 100) * 255);
-  editor.batch('Skin_DirtMask', { clear: opts.clearExisting }, (c) => {
+  for (const id of DIRT_MASK_IDS) editor.batch(id, { clear: opts.clearExisting }, (c) => {
     c.backgroundColor = rgb(dirtV, dirtV, dirtV);
   });
 

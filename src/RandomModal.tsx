@@ -315,7 +315,7 @@ export default function RandomModal({
                   onChange={(v) => set('coat', v as Coat)}
                 />
                 <label className="gen-field">
-                  <span>Saleté : {opts.dirt}%</span>
+                  <span>Saleté autorisée sur le skin : {opts.dirt}%</span>
                   <input
                     type="range"
                     min={0}

@@ -11,7 +11,8 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { MAP_BY_ID, type IllumRole, type MapId } from '../maps';
+import { MAPS, MAP_BY_ID, isDirtMask, type IllumRole, type MapId } from '../maps';
+import { previewDirtPixels } from '../dirt';
 import { speedLightMask } from '../skinZip';
 import { lightIsOn, roleFromAlpha } from '../illumination';
 import { continuousImageUV, imageIslandAt } from '../editor/imagePlacement';
@@ -91,6 +92,11 @@ export class CarPreview {
   private camera: THREE.PerspectiveCamera;
   private controls: OrbitControls;
   private textures = new Map<MapId, THREE.CanvasTexture>();
+  private baseSources = new Map<MapId, HTMLCanvasElement>();
+  private dirtMasks = new Map<PaintFamily, HTMLCanvasElement>();
+  private dirtCanvases = new Map<MapId, HTMLCanvasElement>();
+  private dirtAmount = 0;
+  private dirtEnabled = true;
   /** Canvas intermédiaires pour repacker R (rugosité) / G (métal) par matériau. */
   private rmPacks = new Map<MapId, { canvas: HTMLCanvasElement; texture: THREE.CanvasTexture }>();
   private skinMat: THREE.MeshPhysicalMaterial;
@@ -513,6 +519,16 @@ export class CarPreview {
 
   /** Branche/rafraîchit un canvas source comme texture d'une map. */
   setMapCanvas(id: MapId, source: HTMLCanvasElement, roles?: HTMLCanvasElement) {
+    if (isDirtMask(id)) {
+      this.dirtMasks.set(MAP_BY_ID[id].group, source);
+      this.syncDirtPreview(MAP_BY_ID[id].group);
+      return;
+    }
+    if (MAP_BY_ID[id].kind === 'basecolor') {
+      this.baseSources.set(id, source);
+      this.syncDirtPreview(MAP_BY_ID[id].group);
+      return;
+    }
     // Les maps _R sont repackées séparément (canaux R/G → G/B).
     if (id === 'Skin_R' || id === 'Details_R' || id === 'Wheels_R') {
       this.updateRoughnessPack(id, source);
@@ -526,6 +542,40 @@ export class CarPreview {
       return;
     }
 
+    this.attachMapCanvas(id, source);
+  }
+
+  /** Preview never modifies the editor canvases used by export. */
+  setDirtPreview(amount: number, enabled = true) {
+    this.dirtAmount = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0;
+    this.dirtEnabled = enabled;
+    for (const family of ['skin', 'details', 'wheels'] as const) this.syncDirtPreview(family);
+  }
+
+  private syncDirtPreview(family: PaintFamily) {
+    const id = MAPS.find((map) => map.group === family && map.kind === 'basecolor')!.id;
+    const source = this.baseSources.get(id);
+    if (!source?.width || !source.height) return;
+    const mask = this.dirtMasks.get(family);
+    if (!this.dirtEnabled || !this.dirtAmount || !mask?.width || !mask.height) {
+      this.attachMapCanvas(id, source);
+      return;
+    }
+    const canvas = this.dirtCanvases.get(id) ?? document.createElement('canvas');
+    this.dirtCanvases.set(id, canvas);
+    canvas.width = source.width; canvas.height = source.height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const maskCtx = mask.getContext('2d', { willReadFrequently: true });
+    if (!ctx || !maskCtx) return;
+    ctx.drawImage(source, 0, 0);
+    const base = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const dirt = maskCtx.getImageData(0, 0, mask.width, mask.height);
+    base.data.set(previewDirtPixels(base, dirt, this.dirtAmount));
+    ctx.putImageData(base, 0, 0);
+    this.attachMapCanvas(id, canvas);
+  }
+
+  private attachMapCanvas(id: MapId, source: HTMLCanvasElement) {
     let tex = this.textures.get(id);
     if (!tex || tex.image !== source) {
       tex?.dispose();

@@ -16,6 +16,7 @@ import {
   MAP_BY_ID,
   REGIONS_BY_FAMILY,
   resolvePaintMap,
+  isDirtMask,
   type IllumRole,
   type MapDef,
   type MapId,
@@ -85,10 +86,12 @@ const CHANNEL_LABELS: Record<MapId, string> = {
   Details_B: 'Couleur',
   Details_R: 'Matière',
   Details_I: 'Néon / feux',
+  Details_DirtMask: 'Saleté',
   Skin_I: 'Néon / feux',
   Wheels_I: 'Néon / feux',
   Wheels_B: 'Couleur',
   Wheels_R: 'Matière',
+  Wheels_DirtMask: 'Saleté',
 };
 
 const LAYER_ICONS: Record<string, IconName> = {
@@ -235,7 +238,9 @@ export default function App() {
   const [coatIntensity, setCoatIntensity] = useState(1);
   const [neonIntensity, setNeonIntensity] = useState(1.4);
   const [braking, setBraking] = useState(false);
-  const projectMetadata = JSON.stringify([skinName, coatIntensity, neonIntensity, !!skin3d]);
+  const [dirtEnabled, setDirtEnabled] = useState(true);
+  const [dirtPreview, setDirtPreview] = useState(0);
+  const projectMetadata = JSON.stringify([skinName, coatIntensity, neonIntensity, !!skin3d, dirtEnabled]);
   const projectModified = savedMetadata === null || projectMetadata !== savedMetadata || projectContent.length !== savedContent.length || projectContent.some((snapshot, index) => snapshot !== savedContent[index]);
   /** Vue : éditeur 2D, 2D + 3D côte à côte, ou 3D plein cadre. */
   const [view, setView] = useState<View>('3d');
@@ -855,7 +860,7 @@ export default function App() {
 
   const setFamily = (family: Family) => {
     if (MAP_BY_ID[activeMap].group === family) return;
-    setActiveMap(lastMapByFamily.current[family]);
+    setActiveMap(isDirtMask(activeMap) ? resolvePaintMap(activeMap, family)! : lastMapByFamily.current[family]);
   };
 
   const onToggleSymmetry = () => {
@@ -1115,6 +1120,10 @@ export default function App() {
     previewRef.current?.setBraking(v);
   };
 
+  useEffect(() => {
+    previewRef.current?.setDirtPreview(dirtPreview, dirtEnabled);
+  }, [dirtPreview, dirtEnabled, ready]);
+
   const onIllumRole = (role: IllumRole) => {
     setIllumRole(role);
     editorRef.current?.setIllumBackgroundRole(role);
@@ -1214,6 +1223,8 @@ export default function App() {
         }
       }
       if (applied.length || result.skin3d) {
+        setDirtEnabled(true); setDirtPreview(0);
+        previewRef.current?.setDirtPreview(0, true);
         setProjectId(null); setSavedAt(null); setSavedMetadata(null); rememberProject(null);
         const parts: string[] = [];
         if (applied.length) parts.push(`${applied.length} texture(s) importée(s)`);
@@ -1258,7 +1269,7 @@ export default function App() {
       if (skin3d.preview) assets.set('assets/preview.glb', new Uint8Array(skin3d.preview));
       skin3d.passthrough.forEach((entry, index) => assets.set(`assets/extra-${index}.bin`, entry.data));
     }
-    const workspace: ProjectWorkspace = { activeMap: ed.activeMap, view, camera: pv.getViewState(), coatIntensity, neonIntensity, night, braking };
+    const workspace: ProjectWorkspace = { activeMap: ed.activeMap, view, camera: pv.getViewState(), coatIntensity, neonIntensity, night, braking, dirtEnabled, dirtPreview };
     return { document: { format: 'tm-skin-studio', version: 1, name: skinName.trim().slice(0, 120) || 'Sans titre',
       editor: { maps: content.maps, speedColor: content.speedColor, illumRole: content.illumRole }, workspace, model }, assets };
   };
@@ -1276,7 +1287,7 @@ export default function App() {
     setSkinName(name);
     setProjectId(id); setSavedAt(now);
     const content = editorRef.current!.getProjectContentState(); setProjectContent(content); setSavedContent(content);
-    setSavedMetadata(JSON.stringify([name, coatIntensity, neonIntensity, !!skin3d])); rememberProject(id);
+    setSavedMetadata(JSON.stringify([name, coatIntensity, neonIntensity, !!skin3d, dirtEnabled])); rememberProject(id);
     return id;
   };
 
@@ -1314,12 +1325,14 @@ export default function App() {
       setSkin3d(hydrated.model); setSkinName(saved?.name ?? document.name); setView(workspace.view); setExplore3D(true);
       setCoatIntensity(workspace.coatIntensity); setNeonIntensity(workspace.neonIntensity); setNight(workspace.night); setBraking(workspace.braking);
       pv.setCoatIntensity(workspace.coatIntensity); pv.setEmissiveIntensity(workspace.neonIntensity); pv.setNight(workspace.night); pv.setBraking(workspace.braking);
+      setDirtEnabled(workspace.dirtEnabled ?? true); setDirtPreview(workspace.dirtPreview ?? 0);
+      pv.setDirtPreview(workspace.dirtPreview ?? 0, workspace.dirtEnabled ?? true);
       pv.setIllumRole(document.editor.illumRole);
       setIllumRole(ed.getIllumBackgroundRole(ed.activeMap)); setSpeedColor(document.editor.speedColor);
       pv.restoreViewState(workspace.camera); setBgColor(ed.getBackgroundColor()); setLayers(ed.getLayers()); readSelection();
       setProjectId(saved?.id ?? null); setSavedAt(saved?.updatedAt ?? null);
       const content = ed.getProjectContentState(); setProjectContent(content); setSavedContent(content);
-      setSavedMetadata(saved ? JSON.stringify([saved.name, workspace.coatIntensity, workspace.neonIntensity, !!hydrated.model]) : null);
+      setSavedMetadata(saved ? JSON.stringify([saved.name, workspace.coatIntensity, workspace.neonIntensity, !!hydrated.model, workspace.dirtEnabled ?? true]) : null);
       rememberProject(saved?.id ?? null); setLibraryOpen(false);
       notify(saved ? 'Projet rouvert : chaque calque reste modifiable.' : 'Fichier projet ouvert. Enregistrez-le pour l’ajouter à Mes projets.');
     } catch (error) {
@@ -1389,6 +1402,7 @@ export default function App() {
       setBusy('Encodage DDS + création du zip…');
       ed.flushTexture();
       const blob = await exportSkinZip(skinName, {
+        dirtEnabled,
         getMapCanvas: (id) => ed.getCanvasElement(id),
         illumRole,
         getIllumRoleCanvas: (id) => ed.getIllumRoleCanvas(id),
@@ -1756,6 +1770,16 @@ export default function App() {
     </Section>
   );
 
+  const renderDirtControls = () => (
+    <Section title="Saleté du skin">
+      <Toggle label="Protéger tout le skin" checked={!dirtEnabled} onChange={(protectedSkin) => setDirtEnabled(!protectedSkin)} />
+      <p className="hint">Cette protection désactive la saleté sur la carrosserie, les détails et les roues à l’export. Vos masques et calques restent enregistrés et réutilisables.</p>
+      <SliderField label="Saleté sur la voiture (aperçu)" value={dirtPreview} min={0} max={1} step={.05} format={(value) => `${Math.round(value * 100)} %`} onChange={setDirtPreview} />
+      <p className="hint">Aperçu simplifié pour vérifier les zones protégées. Ce curseur ne change pas l’export ; le jeu applique sa propre saleté en roulant.</p>
+      {!dirtEnabled && <p className="hint light-limit">Protection active : le skin reste propre, même avec un masque blanc. Désactivez-la pour tester vos masques.</p>}
+    </Section>
+  );
+
   const renderSelectionProps = () => {
     if (!selection) return null;
     const isText = selection.type === 'i-text' || selection.type === 'text';
@@ -1769,6 +1793,7 @@ export default function App() {
     };
     return (
       <>
+        {isDirtMask(activeMap) && renderDirtControls()}
         {selection.type === 'image' && <Section title="Image sur la voiture">
           <div className="image-actions">
             <div className="image-actions-icon"><Icon name="image" size={24} /></div>
@@ -1861,9 +1886,9 @@ export default function App() {
             </Row>
           ) : mapDef.kind === 'roughmetal' ? <p className="hint">Cette image contient ses propres pixels de matière. Pour créer une finition réglable, ajoutez une forme sur la pièce depuis Texture.</p> : null}
           <SliderField
-            label="Opacité"
+            label={isDirtMask(activeMap) ? 'Opacité du masque' : 'Opacité'}
             value={selection.opacity}
-            min={0.05}
+            min={isDirtMask(activeMap) ? 0 : 0.05}
             max={1}
             step={0.05}
             format={(v) => `${Math.round(v * 100)} %`}
@@ -2012,6 +2037,7 @@ export default function App() {
 
   const renderTextureProps = () => (
     <>
+      {isDirtMask(activeMap) && renderDirtControls()}
       <Section title={`${FAMILY_LABELS[family]} · ${CHANNEL_LABELS[activeMap]}`}>
         <p className="hint">{mapDef.description}</p>
         {mapDef.kind === 'roughmetal' ? (
@@ -2028,7 +2054,16 @@ export default function App() {
             <p className="hint">Applique le fond choisi aux formes de cette carte, en conservant les calques. Les images et références gardent leurs propres valeurs. Annulable avec Ctrl+Z.</p>
           </>
         ) : mapDef.kind === 'grayscale' ? (
-          <SliderField label={`${scalarLabel} · fond`} value={decodeSurfaceMaterial(bgColor).roughness} min={0} max={255} format={pct} onChange={(v) => onBgChange(encodeScalarMap(v))} onCommit={endHistoryGesture} />
+          <>
+            <SliderField label={`${scalarLabel} · fond`} value={decodeSurfaceMaterial(bgColor).roughness} min={0} max={255} format={pct} onChange={(v) => onBgChange(encodeScalarMap(v))} onCommit={endHistoryGesture} />
+            {isDirtMask(activeMap) && <>
+              <div className="material-presets" role="group" aria-label="Dosage du fond de saleté">
+                {[{ value: 0, label: 'Propre' }, { value: 64, label: 'Légère' }, { value: 128, label: 'Modérée' }, { value: 255, label: 'Maximum' }].map((preset) =>
+                  <button type="button" className={`material-preset${decodeSurfaceMaterial(bgColor).roughness === preset.value ? ' is-active' : ''}`} key={preset.value} onClick={() => { endHistoryGesture(); onBgChange(encodeScalarMap(preset.value)); endHistoryGesture(); }}>{preset.label}</button>)}
+              </div>
+              <p className="hint">Le fond agit sur les zones sans calque. Les images importées et dessins au-dessus gardent leurs valeurs. Pour rester propre partout, activez la protection du skin.</p>
+            </>}
+          </>
         ) : (
           <Row label="Couleur de fond">
             <Swatch value={bgColor} onChange={onBgChange} title="Couleur de fond" showHex />
@@ -2616,7 +2651,7 @@ export default function App() {
       <input ref={refInputRef} type="file" accept="image/*" hidden onChange={onRefChosen} />
       <input ref={zipInputRef} type="file" accept=".zip" hidden onChange={onZipChosen} />
 
-      {libraryOpen && <ProjectLibrary currentId={projectId} needsSave={projectModified && (dirtyCount > 0 || !!projectId || skinName !== 'MonSkin' || !!editorRef.current?.hasProjectContent() || !!skin3d || coatIntensity !== 1 || neonIntensity !== 1.4)}
+      {libraryOpen && <ProjectLibrary currentId={projectId} needsSave={projectModified && (dirtyCount > 0 || !!projectId || skinName !== 'MonSkin' || !!editorRef.current?.hasProjectContent() || !!skin3d || coatIntensity !== 1 || neonIntensity !== 1.4 || !dirtEnabled)}
         onClose={() => setLibraryOpen(false)} onSave={saveProject} onOpen={openSavedProject} onImport={importProjectFile} onDownloadCurrent={downloadCurrentProject}
         onRenameCurrent={(id, name) => { if (id === projectId) { const next = name.trim().slice(0, 120) || 'Sans titre'; setSkinName(next); setSavedAt(Date.now()); setSavedMetadata((before) => { if (!before) return null; const metadata = JSON.parse(before); metadata[0] = next; return JSON.stringify(metadata); }); } }}
         onDeleteCurrent={(id) => { if (id === projectId) { setProjectId(null); setSavedAt(null); setSavedMetadata(null); } }} />}

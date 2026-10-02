@@ -5,7 +5,7 @@
 
 import JSZip from 'jszip';
 import { decodeDDS, encodeDDS, encodeTGA, type RGBAImage } from './dds';
-import { ILLUM_ROLES, MAPS, mapIdFromFileName, type IllumRole, type MapId } from './maps';
+import { ILLUM_ROLES, MAPS, isDirtMask, mapIdFromFileName, type IllumRole, type MapId } from './maps';
 import { UV_GUIDE_ISLANDS } from './uvGuideData';
 import {
   SKIN3D_MESH_FILE,
@@ -52,6 +52,8 @@ function nextAnimationFrame(): Promise<void> {
 }
 
 export interface ExportSources {
+  /** False exports black dirt masks, while leaving editable masks untouched. */
+  dirtEnabled?: boolean;
   getMapCanvas: (id: MapId) => HTMLCanvasElement;
   /** Rôle appliqué au canal alpha de Details_I, hors feux de vitesse. */
   illumRole?: IllumRole;
@@ -255,6 +257,7 @@ export function applyIllumRole(
 }
 
 export interface BuildSkinZipOptions {
+  dirtEnabled?: boolean;
   skinName: string;
   /** Rôle du canal alpha pour la map d'illumination (Details_I), hors vitesse. */
   illumRole?: IllumRole;
@@ -329,6 +332,7 @@ export async function buildSkinZipFromImages(
   for (const def of MAPS) {
     let rgba = images[def.id];
     if (!rgba) throw new Error(`Map manquante à l'export : ${def.id}`);
+    if (isDirtMask(def.id) && opts.dirtEnabled === false) rgba = solidImage(4, [0, 0, 0, 255]);
     if (def.kind === 'illum') {
       // Les feux de vitesse sont toujours écrits, même si le reste du calque est noir.
       rgba = applyIllumRole(
@@ -403,6 +407,7 @@ export async function exportSkinZip(
   }
   return buildSkinZipFromImages(images, {
     skinName,
+    dirtEnabled: sources.dirtEnabled,
     illumRole: sources.illumRole,
     illumRolesByMap,
     speedColor: sources.speedColor,
