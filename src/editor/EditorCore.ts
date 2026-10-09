@@ -19,17 +19,26 @@ import {
   Rect,
   Shadow,
   StaticCanvas,
+  config,
+  util,
   type TMat2D,
 } from 'fabric';
-import { MAPS, MAP_BY_ID, getRegionOrientation, SKIN_REGIONS, type IllumRole, type MapId } from '../maps';
+import { COPY_COMPATIBLE_TARGETS, MAPS, MAP_BY_ID, getRegionOrientation, SKIN_REGIONS, type IllumRole, type MapId } from '../maps';
 import { decodeIllumCodes, encodeIllumCodes, importLightPixels, imageLightBitmap, roleAlpha, roleFromAlpha, type IllumCodes, type ImageLight } from '../illumination';
 import { speedLightPolygons } from '../skinZip';
-import { UV_GUIDE_ISLANDS } from '../uvGuideData';
+import { UV_GUIDE_ISLANDS, type UvGuideIsland } from '../uvGuideData';
+import { paintIslandsForModel, uvElementAt, uvElementIsland, uvRegionAt, uvRegionBounds, type BlenderPart } from '../blenderParts';
 import { applyObjectPaint, applyObjectStyle, readObjectPaint } from './objectPaint';
 import { imageIslandAt, imageIslandClearance } from './imagePlacement';
 import { materialBitmap, moveProjection, type DecalFamily, type DecalProjection, type PixelSource, type ProjectionBitmap, type SurfaceAnchor, type Vec3 } from '../three/decalProjection';
 import { decodeSurfaceMaterial, type SurfaceMaterial } from '../material';
 import type { ProjectMaps } from '../projectFile';
+import { TEXTURE_RESOLUTION, upgradeMapResolution, upgradeResolutionSnapshot } from './resolution';
+import { AdaptivePreview } from './adaptivePreview';
+
+// Keep full-atlas groups/clips at native precision. Fabric's default cache budget
+// would downsample a 2048² object to roughly 1448² before rendering the texture.
+config.perfLimitSizeTotal = 2 * TEXTURE_RESOLUTION ** 2;
 
 /** Géométrie éditable d'un objet, exposée au panneau numérique. */
 export interface Transform {
@@ -42,6 +51,7 @@ export interface Transform {
 
 export type Tool =
   | 'select'
+  | 'region'
   | 'draw'
   | 'rect'
   | 'ellipse'
@@ -58,6 +68,14 @@ export interface LayerInfo {
   locked: boolean;
   selected: boolean;
   linked: boolean;
+}
+
+export interface ElementCopyContext {
+  mapId: MapId;
+  layerId: string;
+  name: string;
+  clientX: number;
+  clientY: number;
 }
 
 export type CoreEvent =
@@ -94,13 +112,13 @@ const DEFAULT_VPT: TMat2D = [1, 0, 0, 1, 0, 0];
  * `mirrorOf` lie deux calques en miroir (symétrie) : l'un suit l'autre tant
  * que le mode symétrie est actif.
  */
-const CUSTOM_PROPS = ['id', 'name', 'selectable', 'evented', 'visible', 'mirrorOf', 'referenceOnly', 'illumRole', 'illumCodes', 'decal', 'linkedImageId', 'linkedImageKind', 'imageMaterial', 'imageMaterialEnabled', 'imageOrder', 'imageLight', 'imageLightEnabled'];
+const CUSTOM_PROPS = ['id', 'name', 'selectable', 'evented', 'visible', 'mirrorOf', 'referenceOnly', 'illumRole', 'illumCodes', 'decal', 'linkedImageId', 'linkedImageKind', 'imageMaterial', 'imageMaterialEnabled', 'imageOrder', 'imageLight', 'imageLightEnabled', 'blenderPart', 'partColor'];
 
 /** Calque verrouillé des feux arrière : seule sa couleur se règle. */
 const SPEED_LIGHT_NAME = 'Vitesse';
 
 /** Objet fabric enrichi des propriétés personnalisées de l'éditeur. */
-type EditorObject = FabricObject & { id?: string; name?: string; mirrorOf?: string; referenceOnly?: boolean; illumRole?: IllumRole; illumCodes?: IllumCodes;
+type EditorObject = FabricObject & { id?: string; name?: string; mirrorOf?: string; referenceOnly?: boolean; illumRole?: IllumRole; illumCodes?: IllumCodes; blenderPart?: string; partColor?: string;
   decal?: DecalProjection; linkedImageId?: string; linkedImageKind?: 'color' | 'material' | 'light'; imageMaterial?: SurfaceMaterial; imageMaterialEnabled?: boolean; imageOrder?: number; imageLight?: ImageLight; imageLightEnabled?: boolean };
 
 type LightCanvas = Canvas & { illumRole?: IllumRole };
@@ -146,7 +164,7 @@ function brushPathData(pts: { x: number; y: number }[]): string {
 interface MapState {
   canvas: Canvas;
   el: HTMLCanvasElement;
-  /** Buffer export / 3D : rendu sans viewportTransform (coords texture brutes). */
+  /** Native buffer for export and settled preview, without viewportTransform. */
   textureEl: HTMLCanvasElement;
   textureDirty: boolean;
   undo: string[];
@@ -197,6 +215,22 @@ export class EditorCore {
   polygonStar = false;
   /** Callback appelé par la pipette avec la couleur (hex) prélevée sur le canvas. */
   pickHandler: ((hex: string) => void) | null = null;
+  regionPickHandler: ((island: UvGuideIsland | null, element?: number) => void) | null = null;
+  elementContextMenuHandler: ((context: ElementCopyContext | null) => void) | null = null;
+  regionPrecision: 'element' | 'piece' = 'element';
+  private blenderParts: BlenderPart[] = [];
+
+  setBlenderParts(parts: BlenderPart[] = []) { this.blenderParts = parts; }
+
+  getGuideIslands(family = MAP_BY_ID[this.activeMap].group): UvGuideIsland[] {
+    return paintIslandsForModel(this.blenderParts, family);
+  }
+
+  private findIsland(key: string): UvGuideIsland | undefined {
+    const element = /^(.*):element:(\d+)$/.exec(key);
+    if (element) { const island = this.findIsland(element[1]); return island ? uvElementIsland(island, Number(element[2])) ?? undefined : undefined; }
+    return this.blenderParts.find((i) => i.key === key) ?? UV_GUIDE_ISLANDS.find((i) => i.key === key);
+  }
   /** Lissage du pinceau libre (0 = aucun, 1 = max) — contrôle le decimate fabric. */
   brushSmoothing = 0.35;
 
@@ -232,6 +266,11 @@ export class EditorCore {
   private projectionBakes = new Map<string, { key: string; bitmaps: Map<DecalFamily, ProjectionBitmap> }>();
   private refreshingLinkedImages = false;
   private textureRaf = 0;
+  private previewUpdates = new Set<MapId>(MAPS.map((map) => map.id));
+  private previewDirty = new Set<MapId>(MAPS.map((map) => map.id));
+  private previewCanvases = new Map<MapId, HTMLCanvasElement>();
+  private previewRoles = new Map<MapId, HTMLCanvasElement>();
+  private adaptivePreview?: AdaptivePreview;
   private resizeObserver: ResizeObserver;
   /**
    * URLs `blob:` des images ajoutées (logos, fonds importés, références).
@@ -257,6 +296,7 @@ export class EditorCore {
   private panning = false;
   private panLast = { x: 0, y: 0 };
   private spaceHeld = false;
+  private navigationMode = false;
   private shiftHeld = false;
   /** Ctrl maintenu (taille pinceau à la molette en mode dessin). */
   private ctrlHeld = false;
@@ -344,6 +384,10 @@ export class EditorCore {
       this.ensureSpeedLight(illum);
       this.resetMapBaseline('Details_I');
     }
+    this.adaptivePreview = new AdaptivePreview((maps) => {
+      for (const id of maps) { this.previewDirty.add(id); this.previewUpdates.add(id); }
+      this.emitTexture();
+    });
   }
 
   /** Cadre d'édition pour zoom molette / pan (peut être défini après le montage React). */
@@ -380,20 +424,30 @@ export class EditorCore {
     });
   }
 
-  /** Rafraîchit l'aperçu 3D immédiatement (import, génération…). */
-  flushTexture() {
+  /** Publish changed maps immediately. Full-resolution buffers are rendered on demand. */
+  flushTexture(forceAll = false) {
     if (this.textureRaf) {
       window.cancelAnimationFrame(this.textureRaf);
       this.textureRaf = 0;
     }
-    for (const id of this.maps.keys()) this.markTextureDirty(id);
-    for (const id of this.maps.keys()) this.syncTextureCanvas(id);
+    if (forceAll) for (const id of this.maps.keys()) this.markTextureDirty(id);
     this.emit('texture');
   }
+
+  takePreviewUpdates(): ReadonlySet<MapId> {
+    const updates = new Set(this.previewUpdates);
+    this.previewUpdates.clear();
+    return updates;
+  }
+
+  setFluidPreview(enabled: boolean) { this.adaptivePreview?.setEnabled(enabled); }
 
   /** Marque le buffer texture d'une map comme obsolète (changement de contenu, pas de pan/zoom). */
   private markTextureDirty(id: MapId) {
     this.maps.get(id)!.textureDirty = true;
+    this.previewDirty?.add(id);
+    this.previewUpdates?.add(id);
+    this.adaptivePreview?.edited(id);
   }
 
   /**
@@ -404,9 +458,13 @@ export class EditorCore {
     const st = this.maps.get(id);
     if (!st?.textureDirty) return;
     st.textureDirty = false;
+    if (!this.renderTextureCanvas(id, st.textureEl, MAP_BY_ID[id].workRes, this.illumRoles)) st.textureDirty = true;
+  }
+
+  private renderTextureCanvas(id: MapId, el: HTMLCanvasElement, res: number, roles: Map<MapId, HTMLCanvasElement>): boolean {
+    const st = this.maps.get(id)!;
     const c = st.canvas;
-    const el = st.textureEl;
-    const res = MAP_BY_ID[id].workRes;
+    const scale = res / MAP_BY_ID[id].workRes;
     if (el.width !== res || el.height !== res) {
       el.width = res;
       el.height = res;
@@ -417,39 +475,45 @@ export class EditorCore {
       // A tracing guide belongs to the editor, never to the car's paint data.
       for (const { object } of references) object.set('visible', false);
       c.setViewportTransform([...DEFAULT_VPT]);
-      const snap = c.toCanvasElement(1);
+      const snap = c.toCanvasElement(scale);
       const ctx = el.getContext('2d');
-      if (!ctx) return;
+      if (!ctx) return false;
       ctx.clearRect(0, 0, res, res);
       ctx.drawImage(snap, 0, 0);
-      if (MAP_BY_ID[id].kind === 'illum') this.syncIllumRoles(id, c, res);
+      if (MAP_BY_ID[id].kind === 'illum') this.syncIllumRoles(id, c, res, roles);
+      return true;
     } catch {
       // Fallback : recomposer fond + calques sans toCanvasElement (fond importé volumineux).
       try {
         const ctx = el.getContext('2d');
         if (!ctx) throw new Error('Contexte texture indisponible');
         ctx.clearRect(0, 0, res, res);
-        const bg = c.backgroundColor;
-        if (typeof bg === 'string' && bg) {
-          ctx.fillStyle = bg;
-          ctx.fillRect(0, 0, res, res);
-        }
-        const bgImg = c.backgroundImage as FabricImage | undefined;
-        const bgEl = bgImg?.getElement?.();
-        if (bgImg && bgEl && bgEl.width > 0 && bgEl.height > 0) {
-          const sx = bgImg.scaleX ?? 1;
-          const sy = bgImg.scaleY ?? 1;
-          const dw = (bgImg.width ?? bgEl.width) * sx;
-          const dh = (bgImg.height ?? bgEl.height) * sy;
-          ctx.drawImage(bgEl, bgImg.left ?? 0, bgImg.top ?? 0, dw, dh);
-        }
-        for (const obj of c.getObjects()) {
-          if (!obj.visible) continue;
-          obj.render(ctx);
-        }
-        st.textureDirty = false;
+        ctx.save();
+        try {
+          ctx.scale(scale, scale);
+          const bg = c.backgroundColor;
+          if (typeof bg === 'string' && bg) {
+            ctx.fillStyle = bg;
+            ctx.fillRect(0, 0, c.width, c.height);
+          }
+          const bgImg = c.backgroundImage as FabricImage | undefined;
+          const bgEl = bgImg?.getElement?.();
+          if (bgImg && bgEl && bgEl.width > 0 && bgEl.height > 0) {
+            const sx = bgImg.scaleX ?? 1;
+            const sy = bgImg.scaleY ?? 1;
+            const dw = (bgImg.width ?? bgEl.width) * sx;
+            const dh = (bgImg.height ?? bgEl.height) * sy;
+            ctx.drawImage(bgEl, bgImg.left ?? 0, bgImg.top ?? 0, dw, dh);
+          }
+          for (const obj of c.getObjects()) {
+            if (!obj.visible) continue;
+            obj.render(ctx);
+          }
+        } finally { ctx.restore(); }
+        if (MAP_BY_ID[id].kind === 'illum') this.syncIllumRoles(id, c, res, roles);
+        return true;
       } catch {
-        st.textureDirty = true;
+        return false;
       }
     } finally {
       for (const { object, visible } of references) object.set('visible', visible);
@@ -458,9 +522,10 @@ export class EditorCore {
   }
 
   /** Discrete roles follow the top visible layer; opacity remains colour brightness. */
-  private syncIllumRoles(id: MapId, c: Canvas, res: number) {
-    const canvas = this.illumRoles.get(id) ?? document.createElement('canvas');
-    this.illumRoles.set(id, canvas);
+  private syncIllumRoles(id: MapId, c: Canvas, res: number, roles = this.illumRoles) {
+    const scale = res / MAP_BY_ID[id].workRes;
+    const canvas = roles.get(id) ?? document.createElement('canvas');
+    roles.set(id, canvas);
     canvas.width = res; canvas.height = res;
     const ctx = canvas.getContext('2d')!;
     const image = ctx.createImageData(res, res);
@@ -475,12 +540,12 @@ export class EditorCore {
         const bounds = object.getBoundingRect();
         const shadow = object.shadow;
         const padding = shadow ? shadow.blur * 2 + Math.abs(shadow.offsetX) + Math.abs(shadow.offsetY) + 2 : 2;
-        const x = Math.max(0, Math.floor(bounds.left - padding)); const y = Math.max(0, Math.floor(bounds.top - padding));
-        const width = Math.min(res, Math.ceil(bounds.left + bounds.width + padding)) - x;
-        const height = Math.min(res, Math.ceil(bounds.top + bounds.height + padding)) - y;
+        const x = Math.max(0, Math.floor((bounds.left - padding) * scale)); const y = Math.max(0, Math.floor((bounds.top - padding) * scale));
+        const width = Math.min(res, Math.ceil((bounds.left + bounds.width + padding) * scale)) - x;
+        const height = Math.min(res, Math.ceil((bounds.top + bounds.height + padding) * scale)) - y;
         if (width <= 0 || height <= 0) continue;
         const mask = document.createElement('canvas'); mask.width = width; mask.height = height;
-        const maskContext = mask.getContext('2d')!; maskContext.translate(-x, -y); object.render(maskContext);
+        const maskContext = mask.getContext('2d')!; maskContext.translate(-x, -y); maskContext.scale(scale, scale); object.render(maskContext);
         const coverage = maskContext.getImageData(0, 0, width, height).data;
         const code = roleAlpha((object as EditorObject).illumRole ?? backgroundRole);
         const original = (object as EditorObject).illumCodes;
@@ -499,7 +564,7 @@ export class EditorCore {
             skewX: object.skewX, skewY: object.skewY, originX: object.originX, originY: object.originY, cropX: object.cropX, cropY: object.cropY,
             clipPath: object.clipPath, objectCaching: false });
           const raster = document.createElement('canvas'); raster.width = width; raster.height = height;
-          const context = raster.getContext('2d')!; context.translate(-x, -y); context.imageSmoothingEnabled = false; roleImage.render(context);
+          const context = raster.getContext('2d')!; context.translate(-x, -y); context.scale(scale, scale); context.imageSmoothingEnabled = false; roleImage.render(context);
           originalPixels = context.getImageData(0, 0, width, height).data;
           // Keep the shared clipping object owned by its editable image.
           roleImage.clipPath = undefined; roleImage.dispose();
@@ -756,7 +821,7 @@ export class EditorCore {
 
   /** Bounding box union d'un îlot guide (polygones UV 0..1). */
   private islandBounds(key: string): { x: number; y: number; w: number; h: number } | null {
-    const island = UV_GUIDE_ISLANDS.find((i) => i.key === key);
+    const island = this.findIsland(key);
     if (island && island.polygons.length > 0) {
       let x0 = 1;
       let y0 = 1;
@@ -813,7 +878,7 @@ export class EditorCore {
   }
 
   private isPanTrigger(e: MouseEvent): boolean {
-    return e.button === 1 || (e.button === 0 && (this.spaceHeld || e.altKey));
+    return e.button === 1 || (e.button === 0 && (this.navigationMode || this.spaceHeld || e.altKey));
   }
 
   private isPanning(): boolean {
@@ -1000,9 +1065,25 @@ export class EditorCore {
 
   private wireCanvas(id: MapId, state: MapState) {
     const c = state.canvas;
+    c.on('contextmenu', ({ e }) => {
+      if (id !== this.activeMap || this.isPanning() || !(e instanceof MouseEvent)) return;
+      // Search the actual element, even while a drawing tool disables selection.
+      // Ignore the active selection's bounding box and the non-editable guides.
+      // Context-menu events have no cached scene point. Convert the CSS-scaled
+      // viewport point first, so pan offsets stay in native atlas coordinates.
+      const point = c.getViewportPoint(e).transform(util.invertTransform(c.viewportTransform));
+      const { container: object } = c.searchPossibleTargets(
+        c.getObjects().filter((o) => !isReference(o) && !this.isSpeedLight(o)),
+        point,
+      );
+      const layer = object as EditorObject | undefined;
+      this.elementContextMenuHandler?.(layer?.id ? {
+        mapId: id, layerId: layer.id, name: layer.name || this.defaultName(layer),
+        clientX: e.clientX, clientY: e.clientY,
+      } : null);
+    });
     c.on('after:render', () => {
-      if (!state.textureDirty) return;
-      this.syncTextureCanvas(id);
+      if (!this.previewUpdates?.has(id)) return;
       this.emitTexture();
     });
     const record = () => {
@@ -1047,25 +1128,30 @@ export class EditorCore {
         });
       }
       this.syncMirrorOf(t, c, id);
+      this.markTextureDirty(id);
       if ((t as EditorObject | undefined)?.imageMaterialEnabled || (t as EditorObject | undefined)?.imageLight) this.refreshLinkedImages();
       this.emit('selection');
     });
     c.on('object:scaling', (e) => {
       this.syncMirrorOf(e.target as FabricObject | undefined, c, id);
+      this.markTextureDirty(id);
       if ((e.target as EditorObject)?.imageMaterialEnabled || (e.target as EditorObject)?.imageLight) this.refreshLinkedImages();
       this.emit('selection');
     });
     c.on('object:rotating', (e) => {
       this.syncMirrorOf(e.target as FabricObject | undefined, c, id);
+      this.markTextureDirty(id);
       if ((e.target as EditorObject)?.imageMaterialEnabled || (e.target as EditorObject)?.imageLight) this.refreshLinkedImages();
       this.emit('selection');
     });
     c.on('object:skewing', (e) => {
       this.syncMirrorOf(e.target as FabricObject | undefined, c, id);
+      this.markTextureDirty(id);
     });
     // Texte édité inline : le miroir lié reflète le nouveau contenu.
     c.on('text:changed', (e) => {
       const t = e.target as IText | undefined;
+      this.markTextureDirty(id);
       if (!t || !this.symmetry) return;
       const partner = this.mirrorPartner(t, c) as IText | undefined;
       if (partner && partner.text !== t.text) {
@@ -1093,6 +1179,15 @@ export class EditorCore {
     });
 
     c.on('mouse:down', (opt) => {
+      if (this.navigationMode || this.isPanning()) return;
+      if ('button' in opt.e && opt.e.button !== 0) return;
+      if (this.tool === 'region') {
+        if (this.isPanning()) return;
+        const p = c.getScenePoint(opt.e); const res = MAP_BY_ID[id].workRes;
+        if (this.regionPrecision === 'element') { const hit = uvElementAt(this.getGuideIslands(), p.x / res, p.y / res); this.regionPickHandler?.(hit?.island ?? null, hit?.index); }
+        else this.regionPickHandler?.(uvRegionAt(this.getGuideIslands(), p.x / res, p.y / res) ?? null);
+        return;
+      }
       if (this.tool === 'eyedropper') {
         const p = c.getScenePoint(opt.e);
         const hex = this.pickColorAt(p.x, p.y);
@@ -1217,7 +1312,8 @@ export class EditorCore {
       }
     });
 
-    c.on('mouse:up', () => {
+    c.on('mouse:up', (opt) => {
+      if ('button' in opt.e && opt.e.button !== 0) return;
       if (!this.drawing) return;
       const { obj, startX, startY } = this.drawing;
       this.drawing = null;
@@ -1268,6 +1364,27 @@ export class EditorCore {
     return this.maps.get(id)!.textureEl;
   }
 
+  /** Low-resolution previews are disposable; the editable scene stays at native precision. */
+  getPreviewCanvasElement(id: MapId): HTMLCanvasElement {
+    const res = this.adaptivePreview?.resolution(id) ?? TEXTURE_RESOLUTION;
+    if (res === MAP_BY_ID[id].workRes) {
+      this.previewDirty.delete(id);
+      return this.getCanvasElement(id);
+    }
+    const canvas = this.previewCanvases.get(id) ?? document.createElement('canvas');
+    this.previewCanvases.set(id, canvas);
+    if (this.previewDirty.has(id) || canvas.width !== res || canvas.height !== res) {
+      this.previewDirty.delete(id);
+      if (!this.renderTextureCanvas(id, canvas, res, this.previewRoles)) this.previewDirty.add(id);
+    }
+    return canvas;
+  }
+
+  getPreviewIllumRoleCanvas(id: MapId): HTMLCanvasElement {
+    const canvas = this.getPreviewCanvasElement(id);
+    return canvas.width === MAP_BY_ID[id].workRes ? this.getIllumRoleCanvas(id) : this.previewRoles.get(id)!;
+  }
+
   setActiveMap(id: MapId) {
     this.endImageDrag();
     this.saveViewport(this.activeMap);
@@ -1294,22 +1411,31 @@ export class EditorCore {
     this.emit('selection');
   }
 
+  /** Navigation 2D au bouton gauche, sans déplacer les objets ni peindre. */
+  setNavigation(enabled: boolean) {
+    this.navigationMode = enabled;
+    this.viewportFrame?.classList.toggle('canvas-frame--navigate', enabled);
+    this.applyTool();
+  }
+
   private applyTool() {
     if (this.isPanning()) return;
     for (const [, st] of this.maps) {
       const c = st.canvas;
-      c.isDrawingMode = this.tool === 'draw';
-      c.selection = this.tool === 'select';
+      c.isDrawingMode = !this.navigationMode && this.tool === 'draw';
+      c.selection = !this.navigationMode && this.tool === 'select';
       c.defaultCursor =
-        this.tool === 'select'
-          ? 'default'
-          : this.tool === 'draw'
-            ? 'none'
-            : this.spaceHeld
-              ? 'grab'
-              : 'crosshair';
+        this.navigationMode
+          ? 'grab'
+          : this.tool === 'select'
+            ? 'default'
+            : this.tool === 'draw'
+              ? 'none'
+              : this.spaceHeld
+                ? 'grab'
+                : 'crosshair';
       c.hoverCursor = c.defaultCursor;
-      c.skipTargetFind = this.tool !== 'select';
+      c.skipTargetFind = this.navigationMode || this.tool !== 'select';
       if (c.freeDrawingBrush) {
         const b = this.pencilBrush(c);
         b.color = this.brushColor;
@@ -1409,7 +1535,7 @@ export class EditorCore {
     const wasSuspended = st.suspendHistory;
     st.suspendHistory = true;
     try {
-      for (const object of c.getObjects()) applyObjectPaint(object, color);
+      for (const object of c.getObjects()) if (!this.paintPart(object, color)) applyObjectPaint(object, color);
       c.backgroundColor = color;
       c.requestRenderAll();
     } finally {
@@ -1997,7 +2123,7 @@ export class EditorCore {
   async setBackgroundFromCanvas(
     id: MapId,
     source: HTMLCanvasElement | ImageBitmap,
-    opts?: { flush?: boolean; recordHistory?: boolean; illumination?: PixelSource },
+    opts?: { flush?: boolean; recordHistory?: boolean; illumination?: PixelSource; parts?: UvGuideIsland[] },
   ) {
     const st = this.maps.get(id);
     if (!st) throw new Error(`Map inconnue : ${id}`);
@@ -2022,9 +2148,12 @@ export class EditorCore {
       importedCodes = imported.codes;
     } else fitCtx.drawImage(raster, 0, 0, sw, sh, 0, 0, res, res);
 
-    const patches = MAP_BY_ID[id].kind === 'illum' ? this.splitLitPatches(fitted, importedCodes) : null;
+    const partImages = opts?.parts?.length ? await this.splitPartImages(id, fitted, opts.parts, importedCodes) : null;
+    const patches = !partImages && MAP_BY_ID[id].kind === 'illum' ? this.splitLitPatches(fitted, importedCodes) : null;
     const images: FabricImage[] = [];
-    if (patches && patches.length === 0) {
+    if (partImages) {
+      images.push(...partImages);
+    } else if (patches && patches.length === 0) {
       // Néon entièrement noir : rien à sélectionner.
     } else if (patches && patches.length > 0) {
       for (let i = 0; i < patches.length; i++) {
@@ -2060,23 +2189,102 @@ export class EditorCore {
 
     const stale = c.getObjects().filter((o) => {
       const name = (o as EditorObject).name ?? '';
-      return name === 'Texture importée' || name.startsWith('Néon importé') || name === 'Fond importé';
+      return !!(o as EditorObject).blenderPart || name === 'Texture importée' || name.startsWith('Néon importé') || name.startsWith('Fond importé');
     });
-    if (stale.length) c.remove(...stale);
-    if (c.backgroundImage) {
-      c.backgroundImage.dispose();
-      c.backgroundImage = undefined;
-    }
-    for (const img of images) {
-      c.add(img);
-      c.sendObjectToBack(img);
-    }
+    const wasSuspended = st.suspendHistory;
+    st.suspendHistory = true;
+    try {
+      if (stale.length) c.remove(...stale);
+      if (c.backgroundImage) {
+        c.backgroundImage.dispose();
+        c.backgroundImage = undefined;
+      }
+      for (const img of [...images].reverse()) {
+        c.add(img);
+        c.sendObjectToBack(img);
+      }
+    } finally { st.suspendHistory = wasSuspended; }
     c.requestRenderAll();
 
     if (opts?.recordHistory !== false) this.pushHistory(id);
     else this.markTextureDirty(id);
     if (id === this.activeMap) this.emit('layers');
     if (opts?.flush !== false) this.flushTexture();
+  }
+
+  /** Pixel ownership is binary: recomposition retains every source RGBA pixel exactly. */
+  private async splitPartImages(id: MapId, source: HTMLCanvasElement, islands: UvGuideIsland[], codes?: Uint8Array) {
+    const size = source.width; const family = MAP_BY_ID[id].group;
+    const parts = islands.filter((i) => i.family === family).sort((a, b) => {
+      const aa = uvRegionBounds(a), bb = uvRegionBounds(b); return aa.w * aa.h - bb.w * bb.h;
+    });
+    const pixels = source.getContext('2d')!.getImageData(0, 0, size, size).data;
+    const owned = new Uint8Array(size * size); const images: FabricImage[] = [];
+    for (const part of parts) {
+      const bounds = uvRegionBounds(part); const x = Math.max(0, Math.floor(bounds.x * size)), y = Math.max(0, Math.floor(bounds.y * size));
+      const width = Math.min(size - x, Math.ceil((bounds.x + bounds.w) * size) - x), height = Math.min(size - y, Math.ceil((bounds.y + bounds.h) * size) - y);
+      if (width <= 0 || height <= 0) continue;
+      const crop = document.createElement('canvas'); crop.width = width; crop.height = height;
+      const ctx = crop.getContext('2d', { willReadFrequently: true })!; ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      for (const polygon of part.polygons) { ctx.moveTo(polygon[0].x * size - x, polygon[0].y * size - y); for (const p of polygon.slice(1)) ctx.lineTo(p.x * size - x, p.y * size - y); ctx.closePath(); }
+      if (part.fillRule === 'evenodd') ctx.fill('evenodd');
+      else { ctx.clearRect(0, 0, width, height); for (const polygon of part.polygons) { ctx.beginPath(); ctx.moveTo(polygon[0].x * size - x, polygon[0].y * size - y); for (const p of polygon.slice(1)) ctx.lineTo(p.x * size - x, p.y * size - y); ctx.closePath(); ctx.fill(); } }
+      const output = ctx.getImageData(0, 0, width, height); const alpha = codes ? new Uint8Array(width * height) : undefined;
+      let count = 0, lit = 0; const histogram = new Map<string, number>(); const roles = new Map<IllumRole, number>();
+      for (let row = 0; row < height; row++) for (let col = 0; col < width; col++) {
+        const to = row * width + col, from = (row + y) * size + col + x;
+        if (!output.data[to * 4 + 3] || owned[from]) { output.data.fill(0, to * 4, to * 4 + 4); continue; }
+        owned[from] = 1; count++; output.data.set(pixels.subarray(from * 4, from * 4 + 4), to * 4);
+        const color = `#${[pixels[from * 4], pixels[from * 4 + 1], pixels[from * 4 + 2]].map(toHex2).join('')}`;
+        histogram.set(color, (histogram.get(color) ?? 0) + 1);
+        if (alpha && codes) { alpha[to] = codes[from]; if (Math.max(...pixels.subarray(from * 4, from * 4 + 3)) > 0) { lit++; const role = roleFromAlpha(codes[from]); roles.set(role, (roles.get(role) ?? 0) + 1); } }
+      }
+      if (!count) continue;
+      // Entirely dark light parts still exist as editable elements (ready to illuminate).
+      ctx.putImageData(output, 0, 0);
+      const image = await this.addImportedImage(crop, part.label, { left: x, top: y, scaleX: 1, scaleY: 1 }) as FabricImage & EditorObject;
+      image.blenderPart = part.key;
+      image.partColor = [...histogram].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '#000000';
+      if (alpha) { image.illumCodes = encodeIllumCodes(width, height, alpha); image.illumRole = lit ? [...roles].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'always' : 'always'; }
+      images.push(image);
+    }
+    const remaining = document.createElement('canvas'); remaining.width = remaining.height = size;
+    const ctx = remaining.getContext('2d')!; const output = ctx.createImageData(size, size); let count = 0;
+    for (let i = 0; i < owned.length; i++) if (!owned[i]) { output.data.set(pixels.subarray(i * 4, i * 4 + 4), i * 4); count++; }
+    if (count) {
+      ctx.putImageData(output, 0, 0);
+      const image = await this.addImportedImage(remaining, 'Fond importé · hors pièces', { left: 0, top: 0, scaleX: 1, scaleY: 1 }) as FabricImage & EditorObject;
+      if (codes) image.illumCodes = encodeIllumCodes(size, size, codes);
+      images.unshift(image);
+    }
+    return images;
+  }
+
+  /** Upgrade an old flattened import without changing user drawings above it. */
+  async separateImportedParts() {
+    let count = 0;
+    for (const [id, state] of this.maps) {
+      const source = state.canvas.getObjects().find((o) => o instanceof FabricImage && (o as EditorObject).name === 'Texture importée') as FabricImage | undefined;
+      if (!source) continue;
+      const res = MAP_BY_ID[id].workRes;
+      const fitted = Math.abs(source.width * source.scaleX - res) < .001 && Math.abs(source.height * source.scaleY - res) < .001;
+      if (source.angle || source.left || source.top || (source.scaleX !== 1 || source.scaleY !== 1) && !fitted) continue;
+      const raster = document.createElement('canvas'); raster.width = source.width; raster.height = source.height;
+      raster.getContext('2d')!.drawImage(source.getElement(), 0, 0);
+      const original = source as FabricImage & EditorObject;
+      const codes = MAP_BY_ID[id].kind === 'illum'
+        ? original.illumCodes ? decodeIllumCodes(original.illumCodes) : new Uint8Array(source.width * source.height).fill(roleAlpha(original.illumRole ?? this.illumToolRole))
+        : undefined;
+      const images = await this.splitPartImages(id, raster, paintIslandsForModel(this.blenderParts, MAP_BY_ID[id].group), codes);
+      images.forEach((image) => image.set({ left: image.left * source.scaleX, top: image.top * source.scaleY, scaleX: source.scaleX, scaleY: source.scaleY,
+        opacity: source.opacity, visible: source.visible, selectable: source.selectable, evented: source.evented }));
+      const index = state.canvas.getObjects().indexOf(source); const wasSuspended = state.suspendHistory; state.suspendHistory = true;
+      try { state.canvas.remove(source); images.forEach((image, i) => { state.canvas.add(image); state.canvas.moveObjectTo(image, index + i); }); }
+      finally { state.suspendHistory = wasSuspended; }
+      count += images.length; this.pushHistory(id);
+    }
+    this.emit('layers'); this.emit('selection'); this.flushTexture(); return count;
   }
 
   /** Finalise l'état undo/dirty après un import multi-maps (sans resérialiser en boucle). */
@@ -2130,6 +2338,43 @@ export class EditorCore {
   }
 
   // ------------------------------------------------------------------- layers
+
+  /** Copy one editable element above the destination layers, without replacing them. */
+  async copyLayerToMap(sourceId: MapId, layerId: string, targetId: MapId): Promise<string> {
+    if (!COPY_COMPATIBLE_TARGETS[sourceId]?.includes(targetId)) {
+      throw new Error('Choisissez un autre canal de la même surface.');
+    }
+    const source = this.maps.get(sourceId);
+    const destination = this.maps.get(targetId);
+    const object = source?.canvas.getObjects().find((o) => (o as EditorObject).id === layerId);
+    if (!source || !destination || !object || isReference(object) || this.isSpeedLight(object)) {
+      throw new Error('Cet élément n’est plus disponible pour la copie.');
+    }
+    const copy = await object.clone(CUSTOM_PROPS) as EditorObject;
+    if (object.group instanceof ActiveSelection) util.applyTransformToObject(copy, object.calcTransformMatrix());
+    if (this.maps.get(sourceId) !== source || this.maps.get(targetId) !== destination || !source.canvas.getObjects().includes(object)) {
+      throw new Error('La texture a changé pendant la copie. Réessayez.');
+    }
+    copy.id = nextId();
+    copy.name = `${(object as EditorObject).name || this.defaultName(object)} · copie`;
+    // The new element is independent of UV-piece, symmetry and 3D-image owners.
+    copy.mirrorOf = undefined; copy.blenderPart = undefined; copy.partColor = undefined;
+    copy.decal = undefined; copy.linkedImageId = undefined; copy.linkedImageKind = undefined;
+    copy.imageMaterial = undefined; copy.imageMaterialEnabled = false; copy.imageOrder = undefined;
+    copy.imageLight = undefined; copy.imageLightEnabled = undefined; copy.illumCodes = undefined;
+    copy.illumRole = MAP_BY_ID[targetId].kind === 'illum' ? this.illumToolRole : undefined;
+    copy.set({ selectable: true, evented: true });
+    const suspended = destination.suspendHistory;
+    destination.suspendHistory = true;
+    try { destination.canvas.add(copy); }
+    finally { destination.suspendHistory = suspended; }
+    this.pushHistory(targetId);
+    this.markTextureDirty(targetId);
+    destination.canvas.requestRenderAll();
+    this.emit('layers');
+    this.flushTexture();
+    return copy.id;
+  }
 
   getLayers(): LayerInfo[] {
     const c = this.canvas;
@@ -2335,7 +2580,36 @@ export class EditorCore {
 
   getSelectionPaint() {
     const object = this.getSelection();
+    if (object instanceof FabricImage && (object as EditorObject).blenderPart) return { color: (object as EditorObject).partColor ?? '#000000', mixed: false, editable: true };
     return object ? readObjectPaint(object) : null;
+  }
+
+  /** A uniform finish replaces this part's pixels; alpha/geometry and undo survive. */
+  private paintPart(object: FabricObject, color: string): boolean {
+    if (!(object instanceof FabricImage) || !(object as EditorObject).blenderPart || !/^#[\da-f]{6}$/i.test(color)) return false;
+    const source = object.getElement(); const bitmap = document.createElement('canvas');
+    bitmap.width = object.width; bitmap.height = object.height;
+    const ctx = bitmap.getContext('2d')!; ctx.drawImage(source, 0, 0);
+    ctx.globalCompositeOperation = 'source-in'; ctx.fillStyle = color; ctx.fillRect(0, 0, bitmap.width, bitmap.height);
+    object.setElement(bitmap); (object as EditorObject).partColor = color; object.dirty = true;
+    return true;
+  }
+
+  getSelectionPartKey() { return (this.getSelection() as EditorObject | null)?.blenderPart ?? null; }
+
+  selectPartChannel(id: MapId, key: string) {
+    this.setActiveMap(id);
+    let object = this.canvas.getObjects().find((o) => (o as EditorObject).blenderPart === key);
+    if (!object) {
+      const island = this.findIsland(key); if (!island) return false;
+      const before = [this.fillColor, this.fillAlpha, this.fillEnabled] as const;
+      this.fillColor = this.getBackgroundColor(); this.fillAlpha = 1; this.fillEnabled = true;
+      try { object = this.buildIslandFill(key, id) ?? undefined; } finally { [this.fillColor, this.fillAlpha, this.fillEnabled] = before; }
+      if (!object) return false;
+      (object as EditorObject).blenderPart = key; (object as EditorObject).name = island.label;
+      this.canvas.add(object);
+    }
+    this.canvas.setActiveObject(object); this.canvas.requestRenderAll(); this.emit('selection'); return true;
   }
 
   setSelectionMaterial(color: string, coalesce = 'surface-material') {
@@ -2348,7 +2622,8 @@ export class EditorCore {
         if (partner) targets.add(partner);
       }
     }
-    for (const object of targets) applyObjectPaint(object, color);
+    for (const object of targets) if (!this.paintPart(object, color)) applyObjectPaint(object, color);
+    this.refreshLinkedImages();
     this.canvas.requestRenderAll();
     this.pushHistory(this.activeMap, coalesce);
     this.emit('selection');
@@ -2371,6 +2646,7 @@ export class EditorCore {
       }
     }
     for (const o of targets) {
+      if (typeof props.fill === 'string') this.paintPart(o, props.fill);
       applyObjectStyle(o, props);
     }
     this.refreshLinkedImages();
@@ -2499,7 +2775,7 @@ export class EditorCore {
    * UV exacts de l'îlot `key`, en coordonnées absolues du canvas.
    */
   private buildIslandFill(key: string, mapId: MapId): FabricObject | null {
-    const island = UV_GUIDE_ISLANDS.find((i) => i.key === key);
+    const island = this.findIsland(key);
     if (!island || island.polygons.length === 0) return null;
     const res = MAP_BY_ID[mapId].workRes;
     const common = {
@@ -2508,6 +2784,10 @@ export class EditorCore {
       strokeWidth: 0,
       strokeUniform: true,
     };
+    if (island.fillRule === 'evenodd') {
+      const d = island.polygons.map((poly) => `M ${poly.map((p) => `${p.x * res} ${p.y * res}`).join(' L ')} Z`).join(' ');
+      return new Path(d, { ...common, fillRule: 'evenodd' });
+    }
     const toPoly = (poly: { x: number; y: number }[]) =>
       new Polygon(
         poly.map((p) => ({ x: p.x * res, y: p.y * res })),
@@ -2653,7 +2933,7 @@ export class EditorCore {
    * avec Group + FabricImage lors de l'isolation de pièce.
    */
   private buildIslandClip(key: string, mapId: MapId, mirror = false): FabricObject | null {
-    const island = UV_GUIDE_ISLANDS.find((i) => i.key === key);
+    const island = this.findIsland(key);
     if (!island || island.polygons.length === 0) return null;
     const res = MAP_BY_ID[mapId].workRes;
     if (island.polygons.length === 1) {
@@ -2937,6 +3217,7 @@ export class EditorCore {
 
   private serialize(c: Canvas): string {
     const data = c.toObject(CUSTOM_PROPS);
+    data.workRes = c.width;
     if ((c as LightCanvas).illumRole) data.illumRole = (c as LightCanvas).illumRole;
     data.objects = data.objects.filter((object: { linkedImageId?: string }) => !object.linkedImageId);
     return JSON.stringify(data);
@@ -2995,7 +3276,7 @@ export class EditorCore {
       for (const def of MAPS) {
         const canvas = new StaticCanvas(document.createElement('canvas'), { width: def.workRes, height: def.workRes, renderOnAddRemove: false });
         staged.set(def.id, canvas);
-        await canvas.loadFromJSON(maps[def.id]);
+        await canvas.loadFromJSON(upgradeMapResolution(maps[def.id]));
         for (const object of canvas.getObjects()) {
           const image = object as FabricImage & EditorObject;
           if (!(image instanceof FabricImage) || !image.decal || sources.has(image.decal.source)) continue;
@@ -3022,7 +3303,7 @@ export class EditorCore {
           if (MAP_BY_ID[id].kind === 'illum') (canvas as LightCanvas).illumRole = (maps[id].illumRole as IllumRole | undefined) ?? 'always';
           if (id === 'Details_I') { (canvas as LightCanvas).illumRole = globals.illumRole; this.ensureSpeedLight(state); }
           for (const object of canvas.getObjects()) object.setCoords();
-          state.textureDirty = true;
+          this.markTextureDirty(id);
         } finally { state.suspendHistory = false; }
       }
       this.refreshLinkedImages(); this.resetAllBaselines();
@@ -3163,7 +3444,8 @@ export class EditorCore {
 
   /** Revient à l'état du point de reprise (contenu + historique) sur chaque map modifiée depuis. */
   async restoreCheckpoint(cp: HistoryCheckpoint) {
-    for (const [id, saved] of cp.maps) {
+    for (const [id, original] of cp.maps) {
+      const saved = { snap: upgradeResolutionSnapshot(original.snap), undo: original.undo.map(upgradeResolutionSnapshot), redo: original.redo.map(upgradeResolutionSnapshot) };
       const st = this.maps.get(id);
       if (!st || !this.checkpointChanged(st, saved)) continue;
       await this.restore(st, saved.snap);
@@ -3207,9 +3489,9 @@ export class EditorCore {
     st.suspendHistory = true;
     st.coalesceKey = null;
     try {
-      const json = JSON.parse(snap);
+      const json = upgradeMapResolution(JSON.parse(snap));
       await c.loadFromJSON(json);
-      if (['always', 'head', 'brake'].includes(json.illumRole)) (c as LightCanvas).illumRole = json.illumRole;
+      if (typeof json.illumRole === 'string' && ['always', 'head', 'brake'].includes(json.illumRole)) (c as LightCanvas).illumRole = json.illumRole as IllumRole;
       for (const o of c.getObjects()) o.setCoords();
       for (const { image } of this.imageOwners()) {
         if (!image.decal || this.projectionSources.has(image.decal.source)) continue;
@@ -3225,7 +3507,8 @@ export class EditorCore {
       // incohérent : on garde ce qui a pu être rechargé et on trace l'erreur.
       console.error('[EditorCore] Restauration de l’historique incomplète :', err);
     } finally {
-      st.textureDirty = true;
+      const id = this.mapIdOf(st);
+      if (id) this.markTextureDirty(id);
       st.suspendHistory = false;
     }
     if (selectedIds.length > 0) {
@@ -3277,6 +3560,7 @@ export class EditorCore {
   }
 
   dispose() {
+    this.adaptivePreview?.dispose();
     this.unwireViewport();
     this.resizeObserver.disconnect();
     if (this.textureRaf) window.cancelAnimationFrame(this.textureRaf);

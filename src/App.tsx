@@ -1,14 +1,19 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { FabricObject, IText, Line } from 'fabric';
 import {
   EditorCore,
+  type ElementCopyContext,
   type HistoryCheckpoint,
   type LayerInfo,
   type MapCopyMode,
   type Tool,
   type Transform,
 } from './editor/EditorCore';
-import { CarPreview, type PaintFamily } from './three/CarPreview';
+import { CarPreview, type PaintFamily, type PreviewViewState } from './three/CarPreview';
+import { EnvironmentControls } from './ui/EnvironmentControls';
+import { VehiclePoseControls } from './ui/VehiclePoseControls';
+import { REST_VEHICLE_POSE, poseIsActive, type VehiclePose } from './three/vehiclePose';
+import { previewLighting, resolvePreviewEnvironment, type PreviewEnvironment } from './previewEnvironment';
 import {
   COPY_COMPATIBLE_TARGETS,
   ILLUM_ROLES,
@@ -24,22 +29,27 @@ import {
 } from './maps';
 import { exportSkinZip, formatImportError, importSkinZip, rgbaToCanvas } from './skinZip';
 import type { Skin3DProject } from './skin3d';
+import { replaceSkin3DGeometry } from './skin3d';
+import { loadSkinImportPreview } from './skinImportPreview';
 import RandomModal from './RandomModal';
 import UvGuideOverlay from './UvGuideOverlay';
-import { UV_GUIDE_BY_FAMILY } from './uvGuideData';
+import { blenderPartsFromGlb, paintIslandsForModel, uvElementIsland, uvRegionBounds } from './blenderParts';
 import { generateSkin, type GenerationSummary, type GeneratorOptions } from './generator';
-import { loadRandomPrefs, saveRandomPrefs } from './randomPrefs';
+import { loadRandomPrefs, saveRandomPrefs, sanitizeRandomOptions } from './randomPrefs';
 import { decodeSurfaceMaterial, encodeScalarMap, encodeSurfaceMaterial, SURFACE_PRESETS } from './material';
 import { Icon, type IconName } from './ui/Icon';
 import { IconButton, Row, Section, SliderField, Swatch, Toggle } from './ui/controls';
 import { ConfirmDialog } from './ui/ConfirmDialog';
+import { ElementCopyMenu } from './ui/ElementCopyMenu';
 import { imageIslandAt } from './editor/imagePlacement';
 import type { DecalProjection } from './three/decalProjection';
 import type { SurfaceMaterial } from './material';
 import ProjectLibrary from './ProjectLibrary';
+import DownloadDialog from './DownloadDialog';
 import './projectLibrary.css';
 import { hydrateProject, projectError, projectLayerCount, readProjectFile, writeProjectFile, type ProjectBundle, type ProjectWorkspace } from './projectFile';
 import { getProject, lastProjectId, putProject, rememberProject, type LocalProject } from './projectStore';
+import { createBaseSkinProject } from './baseSkin';
 
 // ----------------------------------------------------------------- constantes
 
@@ -48,6 +58,7 @@ const GRID_DIVS = [4, 8, 16, 32, 64, 128];
 
 const TOOLS: { id: Tool; label: string; icon: IconName; key: string; hint: string }[] = [
   { id: 'select', label: 'Sélection', icon: 'select', key: 'V', hint: 'Déplacer, redimensionner, pivoter' },
+  { id: 'region', label: 'Zone UV', icon: 'guide', key: 'U', hint: 'Cliquer sur une forme du guide, puis remplir la sélection' },
   { id: 'draw', label: 'Pinceau', icon: 'brush', key: 'B', hint: 'Dessin libre · [ ] ou Ctrl+molette pour la taille' },
   { id: 'rect', label: 'Rectangle', icon: 'square', key: 'R', hint: 'Glisser pour tracer' },
   { id: 'ellipse', label: 'Ellipse', icon: 'circle', key: 'E', hint: 'Glisser pour tracer' },
@@ -69,6 +80,12 @@ const FONTS = [
 
 type Family = MapDef['group'];
 type View = '2d' | 'split' | '3d';
+type Activity = 'navigate' | 'decorate' | 'paint';
+const ACTIVITIES: { id: Activity; label: string; icon: IconName }[] = [
+  { id: 'navigate', label: 'Naviguer', icon: 'rotate' },
+  { id: 'decorate', label: 'Décorer', icon: 'select' },
+  { id: 'paint', label: 'Peindre', icon: 'brush' },
+];
 type ImagePlacement = { file: File; mode: 'projection' | 'uv'; material: boolean; channel: 'basecolor' | 'illum' } | { mapId: MapId; layerId: string };
 
 const FAMILY_LABELS: Record<Family, string> = {
@@ -110,6 +127,7 @@ const LAYER_ICONS: Record<string, IconName> = {
 const pct = (v: number) => `${Math.round((v / 255) * 100)} %`;
 
 interface SelectionState {
+  partKey: string | null;
   type: string;
   name: string;
   paintColor: string;
@@ -155,6 +173,7 @@ const SELECTION_TYPE_LABELS: Record<string, string> = {
 
 export default function App() {
   const editorHostRef = useRef<HTMLDivElement>(null);
+  const inspectorBodyRef = useRef<HTMLDivElement>(null);
   const canvasStageRef = useRef<HTMLDivElement>(null);
   const canvasFrameRef = useRef<HTMLDivElement>(null);
   const brushPreviewRef = useRef<HTMLDivElement>(null);
@@ -203,6 +222,9 @@ export default function App() {
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const libraryOpenRef = useRef(false); libraryOpenRef.current = libraryOpen;
+  const [downloadsOpen, setDownloadsOpen] = useState(false);
+  const downloadsOpenRef = useRef(false); downloadsOpenRef.current = downloadsOpen;
+  const closeDownloads = useCallback(() => setDownloadsOpen(false), []);
   const busyRef = useRef(false);
   const projectRestoringRef = useRef(false);
   const [projectContent, setProjectContent] = useState<string[]>([]);
@@ -213,41 +235,66 @@ export default function App() {
   const startupProjectRef = useRef(false);
   /** Mesh compilé importé (preview.glb + MainBody.Mesh.gbx). Null = voiture officielle. */
   const [skin3d, setSkin3d] = useState<Skin3DProject | null>(null);
+  const [vehicleRigReady, setVehicleRigReady] = useState(false);
+  const [vehiclePose, setVehiclePose] = useState<VehiclePose>({ ...REST_VEHICLE_POSE });
+  const skin3dRef = useRef<Skin3DProject | null>(null);
+  skin3dRef.current = skin3d;
   const [busy, setBusy] = useState<string | null>(null);
   busyRef.current = !!busy;
   const [toast, setToast] = useState<string | null>(null);
   const [showRandom, setShowRandom] = useState(false);
   /** Dernière configuration du générateur (mémorisée entre ouvertures et rechargements). */
   const [randomOpts, setRandomOpts] = useState<GeneratorOptions>(() => loadRandomPrefs());
+  useEffect(() => { setRandomOpts((previous) => sanitizeRandomOptions(previous)); }, []);
   const [generating, setGenerating] = useState(false);
   /** Hôte de l'aperçu 3D dans la modale de génération (prioritaire sur `view`). */
   const randomPreviewHostRef = useRef<HTMLDivElement>(null);
+  const mountRandomPreview = useCallback((host: HTMLDivElement) => {
+    previewRef.current?.mount(host);
+  }, []);
   /** État de l'éditeur à l'ouverture de la modale, pour « Annuler » / « Conserver ». */
   const randomCheckpointRef = useRef<HistoryCheckpoint | null>(null);
+  const randomSceneRef = useRef<{ camera: PreviewViewState; environment: PreviewEnvironment; braking: boolean } | null>(null);
   const showRandomRef = useRef(false);
   showRandomRef.current = showRandom;
   const [copyOpen, setCopyOpen] = useState(false);
   const [copyTargets, setCopyTargets] = useState<MapId[]>([]);
   const [copyMode, setCopyMode] = useState<MapCopyMode>('replace');
+  const [elementCopyContext, setElementCopyContext] = useState<ElementCopyContext | null>(null);
+  const closeElementCopyMenu = useCallback(() => setElementCopyContext(null), []);
   const [clearRequested, setClearRequested] = useState<MapId | null>(null);
+  const [resetRequested, setResetRequested] = useState(false);
+  const confirmDialogOpenRef = useRef(false); confirmDialogOpenRef.current = !!clearRequested || resetRequested;
   const [quickRegionKey, setQuickRegionKey] = useState('');
+  const [regionPrecision, setRegionPrecision] = useState<'element' | 'piece'>('element');
+  const [regionElement, setRegionElement] = useState<number | null>(null);
+  const projectNameRef = useRef(skinName); projectNameRef.current = skinName;
   const [illumRole, setIllumRole] = useState<IllumRole>('always');
   const [newLightRole, setNewLightRole] = useState<IllumRole>('always');
-  const [night, setNight] = useState(false);
+  const [previewEnvironment, setPreviewEnvironment] = useState<PreviewEnvironment>({ venue: 'studio', mood: 'day' });
+  const night = previewLighting(previewEnvironment).headlights;
   const [speedColor, setSpeedColor] = useState('#ffffff');
   const [coatIntensity, setCoatIntensity] = useState(1);
   const [neonIntensity, setNeonIntensity] = useState(1.4);
   const [braking, setBraking] = useState(false);
   const [dirtEnabled, setDirtEnabled] = useState(true);
   const [dirtPreview, setDirtPreview] = useState(0);
-  const projectMetadata = JSON.stringify([skinName, coatIntensity, neonIntensity, !!skin3d, dirtEnabled]);
+  const [fluidEditing, setFluidEditing] = useState(() => {
+    try { return localStorage.getItem('skion-studio:fluid-editing') !== 'off'; } catch { return true; }
+  });
+  const fluidEditingRef = useRef(fluidEditing); fluidEditingRef.current = fluidEditing;
+  const savedSessionRef = useRef({ projectId, savedAt, savedMetadata, savedContent, coatIntensity, neonIntensity, dirtEnabled, dirtPreview });
+  savedSessionRef.current = { projectId, savedAt, savedMetadata, savedContent, coatIntensity, neonIntensity, dirtEnabled, dirtPreview };
+  const projectMetadata = JSON.stringify([skinName, coatIntensity, neonIntensity, !!skin3d, dirtEnabled, previewEnvironment.venue, previewEnvironment.mood, braking]);
   const projectModified = savedMetadata === null || projectMetadata !== savedMetadata || projectContent.length !== savedContent.length || projectContent.some((snapshot, index) => snapshot !== savedContent[index]);
   /** Vue : éditeur 2D, 2D + 3D côte à côte, ou 3D plein cadre. */
   const [view, setView] = useState<View>('3d');
+  const editorViewRef = useRef(view); editorViewRef.current = view;
   const chooseToolRef = useRef<(tool: Tool) => void>(() => {});
   const currentPaintRef = useRef({ brush: brushColor, fill: fillColor, stroke: strokeColor });
   currentPaintRef.current = { brush: brushColor, fill: fillColor, stroke: strokeColor };
-  const [explore3D, setExplore3D] = useState(false);
+  const [navigating, setNavigating] = useState(true);
+  const [drawingToolsOpen, setDrawingToolsOpen] = useState(false);
   const [imagePlacement, setImagePlacement] = useState<ImagePlacement | null>(null);
   const [placingImage, setPlacingImage] = useState(false);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -255,7 +302,7 @@ export default function App() {
   const placingImageRef = useRef(false);
   imagePlacementRef.current = imagePlacement;
   /** Onglet de l'inspecteur (panneau droit). */
-  const [inspectorTab, setInspectorTab] = useState<'texture' | 'props' | 'layers'>('props');
+  const [inspectorTab, setInspectorTab] = useState<'texture' | 'props' | 'layers'>('texture');
   /** Dernier canal visité par famille, pour y revenir en changeant de famille. */
   const lastMapByFamily = useRef<Record<Family, MapId>>({
     skin: 'Skin_B',
@@ -340,13 +387,14 @@ export default function App() {
     const dash = (obj as FabricObject & { strokeDashArray?: number[] | null })
       .strokeDashArray;
     setSelection({
+      partKey: ed.getSelectionPartKey(),
       type: obj.type,
       name: (obj as FabricObject & { name?: string }).name ?? '',
       paintColor: paint?.color ?? '#000000',
       paintMixed: paint?.mixed ?? false,
       paintEditable: paint?.editable ?? false,
       lightRole: ed.getSelectionIllumRole(),
-      fill: obj.type === 'group' ? paint?.color ?? '#000000' : typeof obj.fill === 'string' ? obj.fill : '#000000',
+      fill: obj.type === 'group' || ed.getSelectionPartKey() ? paint?.color ?? '#000000' : typeof obj.fill === 'string' ? obj.fill : '#000000',
       noFill: isNoFill(obj.type === 'group' ? paint?.color : obj.fill),
       opacity: obj.opacity ?? 1,
       stroke: typeof obj.stroke === 'string' ? obj.stroke : '#ffffff',
@@ -371,13 +419,20 @@ export default function App() {
     const ed = new EditorCore(host, frame);
     const pv = new CarPreview(previewHost);
     editorRef.current = ed;
+    ed.elementContextMenuHandler = setElementCopyContext;
     previewRef.current = pv;
+    ed.setFluidPreview(fluidEditingRef.current);
     ed.projectionBaker = (decal, source) => pv.projectImage(decal, source);
-    pv.onModelReady = () => ed.rebuildProjectionsForModel();
+    pv.onModelReady = () => {
+      ed.rebuildProjectionsForModel();
+      setVehicleRigReady(pv.hasVehicleRig()); setVehiclePose({ ...REST_VEHICLE_POSE });
+    };
 
-    const pushTextures = () => {
+    const pushTextures = (all = false) => {
+      const updates = ed.takePreviewUpdates();
       for (const def of MAPS) {
-        pv.setMapCanvas(def.id, ed.getCanvasElement(def.id), def.kind === 'illum' ? ed.getIllumRoleCanvas(def.id) : undefined);
+        if (!all && !updates.has(def.id)) continue;
+        pv.setMapCanvas(def.id, ed.getPreviewCanvasElement(def.id), def.kind === 'illum' ? ed.getPreviewIllumRoleCanvas(def.id) : undefined);
       }
     };
     const offTexture = ed.on('texture', pushTextures);
@@ -423,6 +478,7 @@ export default function App() {
       const material = decodeSurfaceMaterial(hex);
       notify(kind === 'roughmetal' ? `Matière prélevée : rugosité ${pct(material.roughness)}, métal ${pct(material.metalness)}.` : kind === 'grayscale' ? `Valeur prélevée : ${pct(material.roughness)}.` : `Couleur prélevée : ${hex.toUpperCase()}`);
     };
+    ed.regionPickHandler = (island, element) => { setQuickRegionKey(island?.key ?? ''); setRegionElement(element ?? null); setInspectorTab('texture'); requestAnimationFrame(() => { if (inspectorBodyRef.current) inspectorBodyRef.current.scrollTop = 0; }); };
     const offSpeed = ed.on('speed-color', () => setSpeedColor(ed.getSpeedLightColor()));
     const offHist = ed.on('history', () => {
       if (!projectRestoringRef.current) setProjectContent(ed.getProjectContentState());
@@ -495,7 +551,6 @@ export default function App() {
         const paint = toolPaintByKindRef.current[nextKind];
         setBrushColor(paint.brush); setFillColor(paint.fill); setLastFill(paint.fill); setStrokeColor(paint.stroke);
         ed.fillColor = paint.fill; ed.strokeColor = paint.stroke; ed.setBrush(paint.brush, brushSizeRef.current);
-        if (currentKind === 'illum') { setNight(false); pv.setNight(false); }
       }
       if (ed.activeMap !== id) ed.setActiveMap(id);
       activeMapRef.current = id;
@@ -578,27 +633,45 @@ export default function App() {
       },
     });
 
-    pushTextures();
+    pushTextures(true);
     setLayers(ed.getLayers());
     syncDirty();
     setReady(true);
 
     // Le développement ne doit pas effacer les essais dans la page ouverte à chaque mise à jour.
-    const recovery = import.meta.hot?.data.editorRecovery as { checkpoint: HistoryCheckpoint; mapId: MapId; selectionId?: string; urls?: string[]; view?: ReturnType<CarPreview['getViewState']> } | undefined;
+    const recovery = import.meta.hot?.data.editorRecovery as { checkpoint: HistoryCheckpoint; mapId: MapId; selectionId?: string; urls?: string[]; view?: ReturnType<CarPreview['getViewState']>; environment?: PreviewEnvironment; braking?: boolean; model?: Skin3DProject | null; name?: string; editorView?: View; session?: typeof savedSessionRef.current; precision?: 'element' | 'piece' } | undefined;
     if (recovery) {
       projectRestoringRef.current = true;
       delete import.meta.hot!.data.editorRecovery;
       if (recovery.view) pv.restoreViewState(recovery.view);
+      if (recovery.environment) { setPreviewEnvironment(recovery.environment); pv.setEnvironment(recovery.environment); }
+      if (recovery.braking !== undefined) { setBraking(recovery.braking); pv.setBraking(recovery.braking); }
+      const model = recovery.model !== undefined ? recovery.model : skin3dRef.current;
+      setSkin3d(model ?? null);
+      if (recovery.name) setSkinName(recovery.name);
+      if (recovery.editorView) setView(recovery.editorView);
+      if (recovery.precision) { ed.regionPrecision = recovery.precision; setRegionPrecision(recovery.precision); }
+      if (recovery.session) {
+        const session = recovery.session;
+        setProjectId(session.projectId); setSavedAt(session.savedAt); setSavedMetadata(session.savedMetadata); setSavedContent(session.savedContent);
+        setCoatIntensity(session.coatIntensity); setNeonIntensity(session.neonIntensity); setDirtEnabled(session.dirtEnabled); setDirtPreview(session.dirtPreview);
+        pv.setCoatIntensity(session.coatIntensity); pv.setEmissiveIntensity(session.neonIntensity); pv.setDirtPreview(session.dirtPreview, session.dirtEnabled);
+      }
+      if (model?.preview && !model.parts) { try { model.parts = blenderPartsFromGlb(model.preview); } catch { /* old preview remains usable */ } }
+      ed.setBlenderParts(model?.parts);
+      if (model?.preview) void pv.loadCustomPreview(model.preview).catch((error) => console.error('[CarPreview] Restauration du modèle custom :', error));
       ed.adoptObjectUrls(recovery.urls ?? []);
       void ed.restoreCheckpoint(recovery.checkpoint).then(() => {
+        if (editorRef.current !== ed) return;
         ed.setActiveMap(recovery.mapId);
         if (recovery.selectionId) ed.selectLayer(recovery.selectionId);
-        pushTextures(); readSelection(); setLayers(ed.getLayers());
+        setProjectContent(ed.getProjectContentState());
+        pushTextures(true); readSelection(); setLayers(ed.getLayers());
       }).finally(() => { projectRestoringRef.current = false; });
     } else readSelection();
 
     return () => {
-      if (import.meta.hot) import.meta.hot.data.editorRecovery = { checkpoint: ed.createCheckpoint(), mapId: ed.activeMap, selectionId: (ed.getSelection() as (FabricObject & { id?: string }) | null)?.id, urls: ed.takeObjectUrls(), view: pv.getViewState() };
+      if (import.meta.hot) import.meta.hot.data.editorRecovery = { checkpoint: ed.createCheckpoint(), mapId: ed.activeMap, selectionId: (ed.getSelection() as (FabricObject & { id?: string }) | null)?.id, urls: ed.takeObjectUrls(), view: pv.getViewState(), environment: pv.getEnvironment(), braking: pv.getBraking(), model: skin3dRef.current, name: projectNameRef.current, editorView: editorViewRef.current, session: savedSessionRef.current, precision: ed.regionPrecision };
       offTexture();
       offLayers();
       offSel();
@@ -613,6 +686,18 @@ export default function App() {
       previewRef.current = null;
     };
   }, [readSelection]);
+
+  useEffect(() => {
+    editorRef.current?.setFluidPreview(fluidEditing);
+    try { localStorage.setItem('skion-studio:fluid-editing', fluidEditing ? 'on' : 'off'); } catch { /* Optional preference. */ }
+  }, [fluidEditing]);
+
+  useEffect(() => {
+    const pv = previewRef.current;
+    if (!pv || !ready) return;
+    const current = pv.getEnvironment();
+    if (current.venue !== previewEnvironment.venue || current.mood !== previewEnvironment.mood) pv.setEnvironment(previewEnvironment);
+  }, [ready, previewEnvironment]);
 
   /** Cadre UV carré : taille = min(largeur, hauteur) réelle du stage. */
   const syncCanvasFit = useCallback(() => {
@@ -647,8 +732,13 @@ export default function App() {
   }, [view, ready, showRandom]);
 
   useEffect(() => {
-    previewRef.current?.setInteraction(showRandom || view === '2d' ? 'navigate' : imagePlacement ? 'place' : explore3D ? 'navigate' : tool === 'draw' ? 'paint' : tool === 'select' ? 'image' : 'navigate');
-  }, [view, tool, ready, showRandom, imagePlacement, explore3D]);
+    previewRef.current?.setVehiclePose(vehiclePose);
+    previewRef.current?.setInteraction(showRandom || view === '2d' ? 'navigate' : imagePlacement ? 'place' : navigating ? 'navigate' : tool === 'draw' ? 'paint' : tool === 'select' ? 'image' : 'navigate');
+  }, [view, tool, ready, showRandom, imagePlacement, navigating, vehiclePose]);
+
+  useEffect(() => {
+    editorRef.current?.setNavigation(navigating);
+  }, [navigating, ready]);
 
   useEffect(() => {
     if (!imagePlacement || !('file' in imagePlacement)) { setImagePreview(null); return; }
@@ -696,15 +786,17 @@ export default function App() {
     return () => window.removeEventListener('mousedown', onDown);
   }, [copyOpen]);
 
+  useEffect(() => { closeElementCopyMenu(); }, [activeMap, view, tool, navigating, libraryOpen, downloadsOpen, showRandom, busy, closeElementCopyMenu]);
+
   // --------------------------------------------------------------- shortcuts
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const ed = editorRef.current;
       if (!ed) return;
-      // Modale de génération ouverte : ses propres raccourcis (Échap) priment,
-      // et Ctrl+Z/Suppr ne doivent pas toucher l'éditeur derrière.
-      if (showRandomRef.current || libraryOpenRef.current || busyRef.current || imagePlacementRef.current || placingImageRef.current) return;
+      // Les modales gèrent leurs raccourcis : Ctrl+Z/Suppr ne doivent pas toucher l’éditeur derrière.
+      if (showRandomRef.current || libraryOpenRef.current || downloadsOpenRef.current || confirmDialogOpenRef.current || busyRef.current || imagePlacementRef.current || placingImageRef.current) return;
+      if ((e.target as HTMLElement).closest('.element-copy-menu')) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault(); void saveProjectRef.current(); return;
       }
@@ -791,6 +883,7 @@ export default function App() {
       }
       const toolKeys: Record<string, Tool> = {
         v: 'select',
+        u: 'region',
         b: 'draw',
         r: 'rect',
         e: 'ellipse',
@@ -815,10 +908,6 @@ export default function App() {
     if (!placingImageRef.current) setImagePlacement(null);
     const currentKind = MAP_BY_ID[activeMap].kind;
     const nextKind = MAP_BY_ID[id].kind;
-    if (currentKind === 'illum' && nextKind !== 'illum' && night) {
-      setNight(false);
-      previewRef.current?.setNight(false);
-    }
     if (currentKind !== nextKind) {
       toolPaintByKindRef.current[currentKind] = { brush: brushColor, fill: fillColor, stroke: strokeColor };
       const paint = toolPaintByKindRef.current[nextKind];
@@ -839,7 +928,7 @@ export default function App() {
     lastMapByFamily.current[MAP_BY_ID[id].group] = id;
     setBgColor(editorRef.current?.getBackgroundColor() ?? '#000000');
     const nextGroup = MAP_BY_ID[id].group;
-    const nextIslands = UV_GUIDE_BY_FAMILY[nextGroup];
+    const nextIslands = paintIslandsForModel(skin3d?.parts, nextGroup);
     if (clipIsland && !nextIslands.some((i) => i.key === clipIsland)) {
       setClipIsland(null);
       editorRef.current?.setClipIsland(null);
@@ -939,16 +1028,30 @@ export default function App() {
   };
 
   const setTool = (t: Tool) => {
+    setVehiclePose({ ...REST_VEHICLE_POSE });
     if (placingImageRef.current) return;
+    if (t === 'region') { setView('2d'); setShowGuide(true); setInspectorTab('texture'); }
+    if (t === 'region') requestAnimationFrame(() => { if (inspectorBodyRef.current) inspectorBodyRef.current.scrollTop = 0; });
     if (!placingImageRef.current) setImagePlacement(null);
-    setExplore3D(false);
+    setNavigating(false);
+    editorRef.current?.setNavigation(false);
+    if (t !== 'select' && t !== 'draw' && t !== 'eyedropper' && t !== 'region') setDrawingToolsOpen(true);
     // Les outils de formes/texte utilisent la texture ; on la rend visible au choix de l'outil.
-    if (view === '3d' && t !== 'select' && t !== 'draw') setView('split');
+    if (view === '3d' && t !== 'select' && t !== 'draw' && t !== 'region') setView('split');
     editorRef.current?.setTool(t);
     setToolState(t);
-    setInspectorTab(t === 'select' && !editorRef.current?.getSelection() ? 'texture' : 'props');
+    setInspectorTab(t === 'region' ? 'texture' : 'props');
   };
   chooseToolRef.current = setTool;
+
+  const chooseActivity = (next: Activity) => {
+    if (!ready || placingImageRef.current) return;
+    if (next !== 'navigate') { setTool(next === 'paint' ? 'draw' : 'select'); return; }
+    setImagePlacement(null);
+    editorRef.current?.setTool('select');
+    editorRef.current?.setNavigation(true);
+    setToolState('select'); setNavigating(true); setInspectorTab('texture');
+  };
 
   const onBrushSmoothing = (v: number) => {
     setBrushSmoothing(v);
@@ -1141,13 +1244,16 @@ export default function App() {
   };
 
   const onUseOfficialMesh = async () => {
-    setSkin3d(null);
+    if (busyRef.current || projectRestoringRef.current) return;
+    setBusy('Chargement de la voiture officielle…');
     try {
       await previewRef.current?.loadOfficialModel();
-      notify('Aperçu : voiture officielle. L’export ne contiendra plus le mesh custom.');
+      setSkin3d(null);
+      editorRef.current?.setBlenderParts();
+      notify('Voiture officielle restaurée. Les textures et leurs calques sont conservés.');
     } catch (err) {
       notify(`Échec du rechargement : ${err instanceof Error ? err.message : String(err)}`);
-    }
+    } finally { setBusy(null); }
   };
 
   const onImageChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1157,8 +1263,14 @@ export default function App() {
     try {
       if (file.size > 32 * 1024 * 1024) throw new Error('32 Mo maximum.');
       if (file.type && !file.type.startsWith('image/')) throw new Error('Choisissez une image PNG, JPEG, WebP ou SVG.');
+      setTool('select');
+      if (isDirtMask(editorRef.current?.activeMap ?? 'Skin_B')) {
+        await editorRef.current?.addImageFromFile(file);
+        setTool('select'); setView('split'); setInspectorTab('props');
+        notify('Image ajoutée au masque de saleté. Placez-la sur la texture ; son effet reste visible dans l’aperçu 3D.');
+        return;
+      }
       if (view !== '2d') {
-        setTool('select');
         setImagePlacement({ file, mode: 'projection', material: false, channel: MAP_BY_ID[editorRef.current?.activeMap ?? 'Skin_B'].kind === 'illum' ? 'illum' : 'basecolor' });
         setInspectorTab('props');
         return;
@@ -1172,6 +1284,7 @@ export default function App() {
   const changeView = (next: View) => {
     if (placingImageRef.current) return;
     setImagePlacement(null);
+    setVehiclePose({ ...REST_VEHICLE_POSE });
     setView(next);
   };
 
@@ -1183,6 +1296,15 @@ export default function App() {
     const ed = editorRef.current;
     try {
       const result = await importSkinZip(file);
+      const modelOnly = !!skin3d && !!result.skin3d?.preview && result.imported.length === 0;
+      let previewWarning: string | null = null;
+      if (result.skin3d || result.imported.length) {
+        if (!previewRef.current) throw new Error('L’aperçu 3D n’est pas encore prêt.');
+        const loaded = await loadSkinImportPreview(result.skin3d, previewRef.current);
+        result.skin3d = loaded.model;
+        previewWarning = loaded.warning;
+        ed.setBlenderParts(result.skin3d?.parts);
+      }
       const applied: string[] = [];
       const appliedIds: MapId[] = [];
       const applyErrors: string[] = [];
@@ -1198,6 +1320,7 @@ export default function App() {
             flush: false,
             recordHistory: false,
             illumination: MAP_BY_ID[id].kind === 'illum' ? image : undefined,
+            parts: paintIslandsForModel(result.skin3d?.parts, MAP_BY_ID[id].group),
           });
           applied.push(label);
           appliedIds.push(id);
@@ -1208,39 +1331,37 @@ export default function App() {
       if (appliedIds.length) ed.commitImportState(appliedIds);
       if (applied.length) ed.flushTexture();
       if (applied.length) setBgColor(ed.getBackgroundColor());
-      if (result.skin3d?.name) setSkinName(result.skin3d.name.replace(/[\\/:*?"<>|]/g, ''));
-      else setSkinName(file.name.replace(/\.zip$/i, ''));
-      if (result.skin3d) {
-        setSkin3d(result.skin3d);
-        if (result.skin3d.preview && previewRef.current) {
-          try {
-            await previewRef.current.loadCustomPreview(result.skin3d.preview);
-          } catch (err) {
-            applyErrors.push(
-              `aperçu 3D : ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }
-        }
+      if (!modelOnly) {
+        if (result.skin3d?.name) setSkinName(result.skin3d.name.replace(/[\\/:*?"<>|]/g, ''));
+        else setSkinName(file.name.replace(/\.zip$/i, ''));
+      }
+      if (result.skin3d || result.imported.length) {
+        setSkin3d(modelOnly ? replaceSkin3DGeometry(skin3d!, result.skin3d!) : result.skin3d);
       }
       if (applied.length || result.skin3d) {
-        setDirtEnabled(true); setDirtPreview(0);
-        previewRef.current?.setDirtPreview(0, true);
-        setProjectId(null); setSavedAt(null); setSavedMetadata(null); rememberProject(null);
+        if (!modelOnly) {
+          setDirtEnabled(true); setDirtPreview(0);
+          previewRef.current?.setDirtPreview(0, true);
+        }
+        if (!modelOnly) { setProjectId(null); setSavedAt(null); rememberProject(null); }
+        setSavedMetadata(null);
         const parts: string[] = [];
         if (applied.length) parts.push(`${applied.length} texture(s) importée(s)`);
         if (result.skin3d) {
           parts.push(
             result.skin3d.preview
               ? 'mesh 3D chargé'
-              : 'mesh 3D chargé (aperçu officiel : preview.glb absent)',
+              : 'modèle du jeu importé, aperçu générique',
           );
+          if (modelOnly) parts.push('modèle mis à jour, tous les calques conservés');
         }
-        const skipped = result.skipped.length + applyErrors.length;
+        const skipped = result.skipped.length + result.failures.length + applyErrors.length;
         if (skipped) parts.push(`${skipped} ignorée(s)`);
-        notify(`${parts.join(', ')}.`);
-        if (applyErrors.length) {
-          notify(`Textures non appliquées : ${applyErrors.join(' ; ')}`);
-        }
+        notify([
+          `${parts.join(', ')}.`,
+          previewWarning,
+          applyErrors.length ? `Textures non appliquées : ${applyErrors.join(' ; ')}` : null,
+        ].filter(Boolean).join(' '));
       } else if (result.imported.length) {
         notify(`Échec de l'import : aucune texture n'a pu être appliquée. ${applyErrors.join(' ; ')}`);
       } else {
@@ -1263,14 +1384,15 @@ export default function App() {
     const content = await ed.captureProject();
     const assets = new Map<string, Blob | Uint8Array>(content.assets);
     const model = skin3d ? { mesh: 'assets/mesh.gbx', preview: skin3d.preview ? 'assets/preview.glb' : null, name: skin3d.name,
+      ...(skin3d.parts ? { parts: skin3d.parts } : {}),
       passthrough: skin3d.passthrough.map((entry, index) => ({ name: entry.name, asset: `assets/extra-${index}.bin` })) } : null;
     if (skin3d) {
       assets.set('assets/mesh.gbx', skin3d.mesh);
       if (skin3d.preview) assets.set('assets/preview.glb', new Uint8Array(skin3d.preview));
       skin3d.passthrough.forEach((entry, index) => assets.set(`assets/extra-${index}.bin`, entry.data));
     }
-    const workspace: ProjectWorkspace = { activeMap: ed.activeMap, view, camera: pv.getViewState(), coatIntensity, neonIntensity, night, braking, dirtEnabled, dirtPreview };
-    return { document: { format: 'tm-skin-studio', version: 1, name: skinName.trim().slice(0, 120) || 'Sans titre',
+    const workspace: ProjectWorkspace = { activeMap: ed.activeMap, view, camera: pv.getViewState(), coatIntensity, neonIntensity, night, braking, dirtEnabled, dirtPreview, environment: pv.getEnvironment() };
+    return { document: { format: 'tm-skin-studio', version: 2, name: skinName.trim().slice(0, 120) || 'Sans titre',
       editor: { maps: content.maps, speedColor: content.speedColor, illumRole: content.illumRole }, workspace, model }, assets };
   };
 
@@ -1287,13 +1409,13 @@ export default function App() {
     setSkinName(name);
     setProjectId(id); setSavedAt(now);
     const content = editorRef.current!.getProjectContentState(); setProjectContent(content); setSavedContent(content);
-    setSavedMetadata(JSON.stringify([name, coatIntensity, neonIntensity, !!skin3d, dirtEnabled])); rememberProject(id);
+    setSavedMetadata(JSON.stringify([name, coatIntensity, neonIntensity, !!skin3d, dirtEnabled, previewEnvironment.venue, previewEnvironment.mood, braking])); rememberProject(id);
     return id;
   };
 
   const saveProject = async (copy = false) => {
     setBusy('Enregistrement du projet et de ses images…');
-    try { await persistProject(copy); notify(copy ? 'Copie enregistrée dans Mes projets.' : 'Projet enregistré avec tous ses calques dans Mes projets.'); }
+    try { await persistProject(copy); notify(copy ? 'Copie enregistrée dans ce navigateur.' : 'Projet enregistré sur cet appareil, dans ce navigateur.'); }
     finally { setBusy(null); }
   };
   saveProjectRef.current = async () => { try { await saveProject(); } catch (error) { notify(projectError(error)); } };
@@ -1306,39 +1428,53 @@ export default function App() {
     } finally { setBusy(null); }
   };
 
-  const loadProjectBundle = async (bundle: ProjectBundle, saved?: LocalProject) => {
+  const loadProjectBundle = async (bundle: ProjectBundle, saved?: LocalProject, mode: 'open' | 'reset' = 'open') => {
     const ed = editorRef.current; const pv = previewRef.current;
     if (!ed || !pv) throw new Error('L’éditeur n’est pas encore prêt.');
     const checkpoint = ed.createCheckpoint(); const previousModel = skin3d;
+    const previousView = pv.getViewState(); const previousPose = { ...vehiclePose };
     const hydrated = hydrateProject(bundle);
-    setBusy('Ouverture du projet et de tous ses calques…'); projectRestoringRef.current = true;
+    setBusy(mode === 'reset' ? 'Réinitialisation de toutes les textures et de la voiture…' : 'Ouverture du projet et de tous ses calques…'); projectRestoringRef.current = true;
     try {
+      // Verify the base vehicle before discarding any edited texture.
+      if (mode === 'reset') await pv.loadOfficialModel();
       await ed.loadProject(hydrated.document.editor.maps, hydrated.document.editor);
+      if (hydrated.model?.preview && !hydrated.model.parts) { try { hydrated.model.parts = blenderPartsFromGlb(hydrated.model.preview); } catch { /* preserve legacy projects */ } }
+      ed.setBlenderParts(hydrated.model?.parts);
       if (hydrated.model?.preview) await pv.loadCustomPreview(hydrated.model.preview);
-      else await pv.loadOfficialModel();
+      else if (mode !== 'reset') await pv.loadOfficialModel();
       const document = hydrated.document; const workspace = document.workspace;
       for (const url of ed.takeObjectUrls()) URL.revokeObjectURL(url);
       ed.adoptObjectUrls(hydrated.urls);
       ed.setClipIsland(null); ed.setTool('select'); ed.setActiveMap(workspace.activeMap);
       activeMapRef.current = ed.activeMap; setActiveMapState(ed.activeMap); setToolState('select');
       setClipIsland(null); setFocusedRegion(null); setImagePlacement(null); setInspectorTab('layers');
-      setSkin3d(hydrated.model); setSkinName(saved?.name ?? document.name); setView(workspace.view); setExplore3D(true);
-      setCoatIntensity(workspace.coatIntensity); setNeonIntensity(workspace.neonIntensity); setNight(workspace.night); setBraking(workspace.braking);
-      pv.setCoatIntensity(workspace.coatIntensity); pv.setEmissiveIntensity(workspace.neonIntensity); pv.setNight(workspace.night); pv.setBraking(workspace.braking);
+      skin3dRef.current = hydrated.model;
+      setSkin3d(hydrated.model); setSkinName(saved?.name ?? document.name); setView(workspace.view); setNavigating(true); ed.setNavigation(true);
+      const environment = resolvePreviewEnvironment(workspace.environment, workspace.night);
+      setCoatIntensity(workspace.coatIntensity); setNeonIntensity(workspace.neonIntensity); setPreviewEnvironment(environment); setBraking(workspace.braking);
+      pv.setCoatIntensity(workspace.coatIntensity); pv.setEmissiveIntensity(workspace.neonIntensity); pv.setEnvironment(environment); pv.setBraking(workspace.braking);
       setDirtEnabled(workspace.dirtEnabled ?? true); setDirtPreview(workspace.dirtPreview ?? 0);
       pv.setDirtPreview(workspace.dirtPreview ?? 0, workspace.dirtEnabled ?? true);
       pv.setIllumRole(document.editor.illumRole);
       setIllumRole(ed.getIllumBackgroundRole(ed.activeMap)); setSpeedColor(document.editor.speedColor);
       pv.restoreViewState(workspace.camera); setBgColor(ed.getBackgroundColor()); setLayers(ed.getLayers()); readSelection();
+      if (mode === 'reset') {
+        ed.illumToolRole = 'always'; setNewLightRole('always');
+        setQuickRegionKey(''); setRegionElement(null);
+        setVehiclePose({ ...REST_VEHICLE_POSE }); pv.setVehiclePose(REST_VEHICLE_POSE); pv.resetCamera();
+      }
       setProjectId(saved?.id ?? null); setSavedAt(saved?.updatedAt ?? null);
       const content = ed.getProjectContentState(); setProjectContent(content); setSavedContent(content);
-      setSavedMetadata(saved ? JSON.stringify([saved.name, workspace.coatIntensity, workspace.neonIntensity, !!hydrated.model, workspace.dirtEnabled ?? true]) : null);
+      setSavedMetadata(saved ? JSON.stringify([saved.name, workspace.coatIntensity, workspace.neonIntensity, !!hydrated.model, workspace.dirtEnabled ?? true, environment.venue, environment.mood, workspace.braking]) : null);
       rememberProject(saved?.id ?? null); setLibraryOpen(false);
-      notify(saved ? 'Projet rouvert : chaque calque reste modifiable.' : 'Fichier projet ouvert. Enregistrez-le pour l’ajouter à Mes projets.');
+      notify(mode === 'reset' ? 'Skin entièrement réinitialisé : voiture officielle, textures et réglages de base.' : saved ? 'Projet rouvert : chaque calque reste modifiable.' : 'Fichier projet ouvert. Enregistrez-le pour l’ajouter à Mes projets.');
     } catch (error) {
       try {
         await ed.restoreCheckpoint(checkpoint);
+        ed.setBlenderParts(previousModel?.parts);
         if (previousModel?.preview) await pv.loadCustomPreview(previousModel.preview); else await pv.loadOfficialModel();
+        pv.restoreViewState(previousView); pv.setVehiclePose(previousPose); setVehiclePose(previousPose);
       } finally { for (const url of hydrated.urls) URL.revokeObjectURL(url); }
       throw error;
     } finally { projectRestoringRef.current = false; setBusy(null); }
@@ -1390,10 +1526,20 @@ export default function App() {
     }
   };
 
+  const copyElementTo = async (target: MapId) => {
+    const ed = editorRef.current;
+    if (!ed || !elementCopyContext) return;
+    try {
+      await ed.copyLayerToMap(elementCopyContext.mapId, elementCopyContext.layerId, target);
+      closeElementCopyMenu();
+      notify(`Élément copié dans ${FAMILY_LABELS[MAP_BY_ID[target].group]} · ${CHANNEL_LABELS[target]}.`);
+    } catch (error) { notify(projectError(error)); }
+  };
+
   const onExport = async () => {
     const ed = editorRef.current;
     const pv = previewRef.current;
-    if (!ed || !pv) return;
+    if (!ed || !pv) return false;
     setBusy('Enregistrement local puis export pour Trackmania…');
     await new Promise((r) => setTimeout(r, 30));
     try {
@@ -1401,13 +1547,16 @@ export default function App() {
       try { await persistProject(); } catch (error) { saveError = projectError(error); }
       setBusy('Encodage DDS + création du zip…');
       ed.flushTexture();
+      let exportIcon: HTMLCanvasElement;
+      try { pv.setDirtPreview(0, dirtEnabled); exportIcon = pv.snapshot(256); }
+      finally { pv.setDirtPreview(dirtPreview, dirtEnabled); }
       const blob = await exportSkinZip(skinName, {
         dirtEnabled,
         getMapCanvas: (id) => ed.getCanvasElement(id),
         illumRole,
         getIllumRoleCanvas: (id) => ed.getIllumRoleCanvas(id),
         speedColor,
-        icon: pv.snapshot(256),
+        icon: exportIcon,
         meshGbx: skin3d?.mesh,
         passthrough: skin3d?.passthrough,
       });
@@ -1421,8 +1570,10 @@ export default function App() {
           ? 'Zip 3D exporté (mesh + textures). Placez-le dans Documents/Trackmania/Skins/Models/CarSport/ puis Garage > Upload skin.'
           : 'Zip exporté. Placez-le dans Documents/Trackmania/Skins/Models/CarSport/ puis Garage > Upload skin.') + (saveError ? ` Sauvegarde locale non effectuée : ${saveError}` : ' Projet modifiable enregistré dans Mes projets.'),
       );
+      return true;
     } catch (err) {
       notify(`Échec de l'export : ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
     } finally {
       setBusy(null);
     }
@@ -1433,7 +1584,10 @@ export default function App() {
   const openRandom = () => {
     const ed = editorRef.current;
     if (!ed) return;
+    setRandomOpts((previous) => sanitizeRandomOptions(previous));
     randomCheckpointRef.current = ed.createCheckpoint();
+    const pv = previewRef.current;
+    if (pv) { randomSceneRef.current = { camera: pv.getViewState(), environment: pv.getEnvironment(), braking: pv.getBraking() }; pv.resetCamera(); }
     setShowRandom(true);
   };
 
@@ -1444,11 +1598,15 @@ export default function App() {
     setGenerating(true);
     // Laisse React afficher l'indicateur avant le travail synchrone.
     await new Promise((r) => setTimeout(r, 30));
+    const before = ed.createCheckpoint();
     try {
-      const summary = generateSkin(ed, opts);
+      // Each variation starts from the opening state, even in overlay mode.
+      if (randomCheckpointRef.current) await ed.restoreCheckpoint(randomCheckpointRef.current);
+      const summary = generateSkin(ed, sanitizeRandomOptions(opts));
       setBgColor(ed.getBackgroundColor());
       return summary;
     } catch (err) {
+      await ed.restoreCheckpoint(before);
       notify(`Échec de la génération : ${err instanceof Error ? err.message : String(err)}`);
       return null;
     } finally {
@@ -1461,6 +1619,7 @@ export default function App() {
     const cp = randomCheckpointRef.current;
     if (cp) editorRef.current?.commitCheckpoint(cp);
     randomCheckpointRef.current = null;
+    randomSceneRef.current = null;
     setShowRandom(false);
   };
 
@@ -1470,6 +1629,9 @@ export default function App() {
     randomCheckpointRef.current = null;
     setShowRandom(false);
     const ed = editorRef.current;
+    const scene = randomSceneRef.current;
+    randomSceneRef.current = null;
+    if (scene) { setPreviewEnvironment(scene.environment); onBraking(scene.braking); previewRef.current?.restoreViewState(scene.camera); }
     if (!cp || !ed) return;
     await ed.restoreCheckpoint(cp);
     setBgColor(ed.getBackgroundColor());
@@ -1488,11 +1650,27 @@ export default function App() {
     notify('Texture réinitialisée. Ctrl+Z pour revenir à l’état précédent.');
   };
 
+  const confirmResetSkin = async () => {
+    const pv = previewRef.current;
+    if (!pv || !editorRef.current || busyRef.current || projectRestoringRef.current) return;
+    setResetRequested(false);
+    try { await loadProjectBundle(createBaseSkinProject(pv.getViewState()), undefined, 'reset'); }
+    catch (error) { notify(`Skin non réinitialisé : ${projectError(error)}`); }
+  };
+
   const mapDef = MAP_BY_ID[activeMap];
   const family = mapDef.group;
-  const guideIslands = UV_GUIDE_BY_FAMILY[family];
+  const guideIslands = useMemo(() => paintIslandsForModel(skin3d?.parts, family), [family, skin3d]);
+  const selectedIsland = guideIslands.find((island) => island.key === quickRegionKey);
+  const selectedElement = regionPrecision === 'element' && selectedIsland && regionElement !== null ? uvElementIsland(selectedIsland, regionElement) : null;
+  const selectedRegionKey = regionPrecision === 'element' ? selectedElement?.key ?? '' : quickRegionKey;
+  useEffect(() => { if (editorRef.current) editorRef.current.regionPrecision = regionPrecision; }, [regionPrecision, ready]);
+  useEffect(() => { setRegionElement(null); }, [family, skin3d]);
   /** Zones « Remplir une pièce » de la famille active (carrosserie ou détails). */
-  const regionSet = REGIONS_BY_FAMILY[family];
+  const regionSet = useMemo(() => Object.fromEntries([
+    ...Object.entries(REGIONS_BY_FAMILY[family] ?? {}),
+    ...guideIslands.map((i) => [i.key, uvRegionBounds(i)] as const),
+  ]), [family, guideIslands]);
   const regionEntries = useMemo(() => (regionSet ? Object.entries(regionSet) : []), [regionSet]);
   const { roughness: roughVal, metalness: metalVal } = decodeSurfaceMaterial(bgColor);
   const fillMaterial = decodeSurfaceMaterial(fillColor);
@@ -1502,21 +1680,25 @@ export default function App() {
     const firstRegion = regionEntries[0]?.[0] ?? '';
     setQuickRegionKey((prev) => {
       if (!firstRegion) return '';
-      return regionEntries.some(([key]) => key === prev) ? prev : firstRegion;
+      return regionEntries.some(([key]) => key === prev) ? prev : '';
     });
   }, [regionEntries]);
 
   const fillRegion = (key: string) => {
     const region = regionSet?.[key];
-    if (!region) return;
-    editorRef.current?.fillRegion(region, key);
+    if (!region || !selectedRegionKey) return;
+    editorRef.current?.fillRegion(selectedElement ? uvRegionBounds(selectedElement) : region, selectedRegionKey);
   };
 
   const dirtyCount = Object.values(dirtyMaps).filter(Boolean).length;
   const currentTool = TOOLS.find((t) => t.id === tool);
-  const sceneNavigation = explore3D || (tool !== 'select' && tool !== 'draw');
+  const activity: Activity = navigating ? 'navigate' : tool === 'draw' || tool === 'eyedropper' ? 'paint' : 'decorate';
+  const sceneNavigating = poseIsActive(vehiclePose) || navigating || (tool !== 'select' && tool !== 'draw');
+  const focusedBaseKey = focusedRegion?.split(':element:')[0];
+  const focusedBase = guideIslands.find((i) => i.key === focusedBaseKey);
+  const focusedElementIndex = focusedRegion?.includes(':element:') ? Number(focusedRegion.split(':element:')[1]) : null;
   const focusedLabel = focusedRegion
-    ? guideIslands.find((i) => i.key === focusedRegion)?.label ?? focusedRegion
+    ? focusedBase && focusedElementIndex !== null ? uvElementIsland(focusedBase, focusedElementIndex)?.label ?? focusedBase.label : focusedBase?.label ?? 'Zone isolée'
     : null;
 
   const renderMaterialControls = (
@@ -1763,17 +1945,19 @@ export default function App() {
 
   const renderLightPreview = () => (
     <Section title="Tester les lumières en 3D">
-      <Toggle checked={night} onChange={(on) => { setNight(on); previewRef.current?.setNight(on); }} label="Ambiance de nuit" />
+      {previewEnvironment.venue === 'stadium' && <Toggle checked={night} onChange={(on) => setPreviewEnvironment((current) => ({ ...current, mood: on ? 'night' : 'day' }))} label="Ambiance de nuit" />}
       <Toggle checked={braking} onChange={onBraking} label="Simuler le freinage" />
-      <SliderField label="Luminosité de l’aperçu" value={neonIntensity} min={0} max={4} step={0.1} format={(value) => `${value.toFixed(1)} ×`} onChange={onNeonIntensity} />
-      <p className="hint">La nuit active les phares ; le freinage active les feux de frein. Ces simulations et ce multiplicateur modifient uniquement l’aperçu. La couleur et l’opacité du calque règlent la lumière peinte.</p>
+      {previewEnvironment.venue === 'stadium' && <SliderField label="Émission des feux (aperçu)" value={neonIntensity} min={0} max={4} step={0.1} format={(value) => `${value.toFixed(1)} ×`} onChange={onNeonIntensity} />}
+      <p className="hint">{previewEnvironment.venue === 'studio'
+        ? 'Le studio garde son éclairage neutre. Le freinage active les feux de frein ; ouvrez Simulation pour tester les phares de nuit.'
+        : 'La nuit active les phares ; le freinage active les feux de frein. Ces simulations et ce multiplicateur modifient uniquement l’aperçu. La couleur et l’opacité du calque règlent la lumière peinte.'}</p>
     </Section>
   );
 
   const renderDirtControls = () => (
     <Section title="Saleté du skin">
       <Toggle label="Protéger tout le skin" checked={!dirtEnabled} onChange={(protectedSkin) => setDirtEnabled(!protectedSkin)} />
-      <p className="hint">Cette protection désactive la saleté sur la carrosserie, les détails et les roues à l’export. Vos masques et calques restent enregistrés et réutilisables.</p>
+      <p className="hint">Cette protection désactive la saleté sur la carrosserie, les détails, les roues et la verrière à l’export. Vos masques et calques restent enregistrés et réutilisables.</p>
       <SliderField label="Saleté sur la voiture (aperçu)" value={dirtPreview} min={0} max={1} step={.05} format={(value) => `${Math.round(value * 100)} %`} onChange={setDirtPreview} />
       <p className="hint">Aperçu simplifié pour vérifier les zones protégées. Ce curseur ne change pas l’export ; le jeu applique sa propre saleté en roulant.</p>
       {!dirtEnabled && <p className="hint light-limit">Protection active : le skin reste propre, même avec un masque blanc. Désactivez-la pour tester vos masques.</p>}
@@ -1794,7 +1978,21 @@ export default function App() {
     return (
       <>
         {isDirtMask(activeMap) && renderDirtControls()}
-        {selection.type === 'image' && <Section title="Image sur la voiture">
+        {selection.partKey && <Section title="Pièce importée">
+          <strong>{selection.name}</strong>
+          <p className="hint">{mapDef.kind === 'roughmetal' ? 'La finition modifie uniquement cette pièce. Annuler restaure ses valeurs importées.' : mapDef.kind === 'illum' ? 'Choisissez la couleur et le comportement lumineux de cette pièce. Noir = éteint.' : mapDef.kind === 'grayscale' ? 'Ce réglage modifie uniquement le masque de cette pièce.' : 'La texture de cette pièce est conservée. « Couleur unie » la recouvre ; Annuler restaure ses détails.'}{family === 'wheels' && ' Les quatre pneus utilisent les mêmes UV : ils partagent leur texture.'}</p>
+          <div className="part-channel-nav">{(['basecolor', 'roughmetal', 'illum', 'grayscale'] as MapKind[]).map((kind) => {
+            const id = MAPS.find((m) => m.group === family && m.kind === kind && (kind !== 'grayscale' || isDirtMask(m.id)))?.id;
+            if (!id) return null;
+            return <button key={id} type="button" className={`btn btn-sm${id === activeMap ? ' is-active' : ''}`} onClick={() => { setActiveMap(id); editorRef.current?.selectPartChannel(id, selection.partKey!); setInspectorTab('props'); }}><Icon name={kind === 'illum' ? 'sun' : 'droplet'} size={13} />{CHANNEL_LABELS[id]}</button>;
+          })}</div>
+          {mapDef.kind === 'roughmetal' ? <>
+            {renderMaterialControls('Finition de cette pièce', selectedMaterial, onRoughMetalSelectionChange)}
+            {renderMaterialPresets(selectedMaterial, onRoughMetalSelectionChange)}
+          </> : mapDef.kind === 'grayscale' ? <SliderField label={scalarLabel} value={decodeSurfaceMaterial(selection.paintColor).roughness} min={0} max={255} format={pct} onChange={(v) => editorRef.current?.setSelectionMaterial(encodeScalarMap(v), 'scalar-map')} onCommit={endHistoryGesture} /> : <Row label="Couleur unie"><Swatch value={selection.paintColor} title="Couleur unie de la pièce" showHex onChange={(color) => editorRef.current?.setSelectionMaterial(color, 'part-color')} /></Row>}
+          {mapDef.kind === 'illum' && lightRoleControl('Comportement de cette pièce', selection.lightRole, (role) => editorRef.current?.setSelectionIllumRole(role))}
+        </Section>}
+        {selection.type === 'image' && !selection.partKey && <Section title="Image sur la voiture">
           <div className="image-actions">
             <div className="image-actions-icon"><Icon name="image" size={24} /></div>
             <div><strong>{selection.name || 'Votre image'}</strong><p>{projection ? 'Projection 3D · un calque pour toutes les pièces touchées.' : 'Un calque indépendant, visible en 2D et en 3D.'}</p></div>
@@ -1802,7 +2000,7 @@ export default function App() {
           <button type="button" className="btn btn-primary btn-full" disabled={placingImage} onClick={() => {
             const image = editorRef.current?.getSelection() as (FabricObject & { id?: string }) | undefined;
             if (!image?.id) return;
-            setTool('select'); setExplore3D(false); setView('3d'); setImagePlacement({ mapId: activeMap, layerId: image.id });
+            setTool('select'); setNavigating(false); setView('3d'); setImagePlacement({ mapId: activeMap, layerId: image.id });
           }}><Icon name="target" size={15} /> Replacer sur la voiture</button>
           <div className="image-adjustments">
             <button type="button" className="btn btn-sm" aria-label="Réduire l’image" onClick={() => resizeImage(.85)}><Icon name="minus" size={14} /> Taille</button>
@@ -1828,7 +2026,7 @@ export default function App() {
             <p className="hint">Augmentez la profondeur pour atteindre des surfaces voisines. Les faces arrière et les surfaces masquées sont écartées. Le verre est exclu.</p></div>
           </details>
         </Section>}
-        {selection.imageMaterial && <Section title="Matière du logo">
+        {selection.imageMaterial && <Section title={selection.partKey ? 'Matière de la pièce' : 'Matière du logo'}>
           <Toggle label="Matière propre à l’image" checked={selection.imageMaterial.enabled} onChange={(enabled) => editorRef.current?.setImageMaterialEnabled(enabled)} />
           {selection.imageMaterial.enabled ? <>
             {renderMaterialControls('Finition de cette image', selection.imageMaterial.value, (roughness, metalness) => editorRef.current?.setImageMaterial(roughness, metalness))}
@@ -1836,7 +2034,7 @@ export default function App() {
             <p className="hint">Un calque lié dans Matière suit la silhouette transparente de l’image, sa taille et sa position. Le fond et les autres éléments gardent leur finition.</p>
           </> : <p className="hint">L’image utilise la matière déjà présente sur la voiture. Activez ce switch pour lui donner sa propre finition.</p>}
         </Section>}
-        {selection.imageLight && <Section title="Lumière du logo">
+        {selection.imageLight && <Section title={selection.partKey ? 'Lumière de la pièce' : 'Lumière du logo'}>
           {selection.imageLight.available ? <>
             <Toggle label="Image lumineuse" checked={selection.imageLight.enabled} onChange={(enabled) => editorRef.current?.setImageLightEnabled(enabled)} />
             {selection.imageLight.enabled && <>
@@ -1855,23 +2053,23 @@ export default function App() {
           <Row label="Nom du calque">
             <input className="element-name" value={selection.name} placeholder={SELECTION_TYPE_LABELS[selection.type] ?? 'Élément'} onChange={(e) => updateSel({ name: e.target.value }, 'name')} onBlur={endHistoryGesture} />
           </Row>
-          {mapDef.kind === 'illum' && <>
+          {mapDef.kind === 'illum' && !selection.partKey && <>
             {lightRoleControl('Comportement de cet élément', selection.lightRole, (role) => editorRef.current?.setSelectionIllumRole(role))}
             <p className="hint">Ce choix concerne uniquement la sélection. Le compteur reste indépendant.</p>
           </>}
-          {supportsElementMaterial ? (
+          {!selection.partKey && (supportsElementMaterial ? (
             <>
               {renderMaterialControls(selection.type === 'group' ? 'Matière de toutes les formes du groupe' : 'Matière de cet élément', selectedMaterial, onRoughMetalSelectionChange)}
               {renderMaterialPresets(selectedMaterial, onRoughMetalSelectionChange)}
               <p className="hint">{selection.paintMixed ? 'Le groupe contient plusieurs matières. Le prochain réglage applique la même finition à ses formes.' : 'Seul cet élément est modifié. Retrouvez le fond global dans l’onglet Texture.'}</p>
-              {!isStrokeColored(selection.type) && selection.type !== 'group' && (
+              {!isStrokeColored(selection.type) && selection.type !== 'group' && !selection.partKey && (
                 <Toggle checked={selection.noFill} onChange={onSelNoFill} label="Contour seul" />
               )}
             </>
           ) : mapDef.kind === 'grayscale' && selection.paintEditable ? (
             <SliderField label={scalarLabel} value={decodeSurfaceMaterial(selection.paintColor).roughness} min={0} max={255} format={pct} onChange={(v) => editorRef.current?.setSelectionMaterial(encodeScalarMap(v), 'scalar-map')} onCommit={endHistoryGesture} />
-          ) : selection.type !== 'image' ? (
-            <Row label={isStrokeColored(selection.type) ? 'Couleur' : 'Remplissage'}>
+          ) : selection.type !== 'image' || selection.partKey ? (
+            <Row label={selection.partKey ? 'Couleur unie' : isStrokeColored(selection.type) ? 'Couleur' : 'Remplissage'}>
               <Swatch
                 value={isStrokeColored(selection.type) ? selection.stroke : selection.fill}
                 title="Couleur de cet élément"
@@ -1880,11 +2078,11 @@ export default function App() {
                   isStrokeColored(selection.type) ? updateSel({ stroke: c }, 'stroke') : updateSel({ fill: c }, 'fill')
                 }
               />
-              {!isStrokeColored(selection.type) && (
+              {!isStrokeColored(selection.type) && !selection.partKey && (
                 <Toggle checked={selection.noFill} onChange={onSelNoFill} label="Contour seul" />
               )}
             </Row>
-          ) : mapDef.kind === 'roughmetal' ? <p className="hint">Cette image contient ses propres pixels de matière. Pour créer une finition réglable, ajoutez une forme sur la pièce depuis Texture.</p> : null}
+          ) : mapDef.kind === 'roughmetal' ? <p className="hint">Cette image contient ses propres pixels de matière. Pour créer une finition réglable, ajoutez une forme sur la pièce depuis Texture.</p> : null)}
           <SliderField
             label={isDirtMask(activeMap) ? 'Opacité du masque' : 'Opacité'}
             value={selection.opacity}
@@ -1973,6 +2171,12 @@ export default function App() {
             <button type="button" className="btn btn-sm" onClick={() => editorRef.current?.duplicateSelection()}>
               <Icon name="copy" size={14} /> Dupliquer
             </button>
+            {compatibleTargets.length > 0 && <button type="button" className="btn btn-sm" onClick={(event) => {
+              const object = editorRef.current?.getSelection() as (FabricObject & { id?: string }) | undefined;
+              if (!object?.id) return;
+              const rect = event.currentTarget.getBoundingClientRect();
+              setElementCopyContext({ mapId: activeMap, layerId: object.id, name: selection.name || 'Élément', clientX: rect.left, clientY: rect.bottom + 6 });
+            }}><Icon name="copy" size={14} /> Copier vers…</button>}
             <button type="button" className="btn btn-sm btn-danger" onClick={() => editorRef.current?.deleteSelection()}>
               <Icon name="trash" size={14} /> Supprimer
             </button>
@@ -2035,11 +2239,60 @@ export default function App() {
     );
   };
 
+  const renderRegionControls = () => (regionEntries.length > 0 && (
+        <Section key={tool === 'region' ? 'active-region' : 'region'} title="Peindre une pièce" collapsible defaultOpen={tool === 'region'}>
+          <div className="segmented segmented--sm segmented--full" role="group" aria-label="Précision de la sélection UV">
+            <button type="button" aria-pressed={regionPrecision === 'element'} className={regionPrecision === 'element' ? 'is-active' : ''} onClick={() => { setRegionPrecision('element'); setRegionElement(null); }}>Élément précis</button>
+            <button type="button" aria-pressed={regionPrecision === 'piece'} className={regionPrecision === 'piece' ? 'is-active' : ''} onClick={() => { setRegionPrecision('piece'); setRegionElement(null); }}>Pièce entière</button>
+          </div>
+          <button type="button" className={`btn btn-full${tool === 'region' ? ' is-active' : ''}`} onClick={() => { setView('2d'); setTool('region'); setShowGuide(true); setInspectorTab('texture'); }}><Icon name="guide" size={15} /> Sélectionner sur le guide 2D</button>
+          {mapDef.kind === 'illum' && lightRoleControl('Comportement du prochain tracé', newLightRole, onNewLightRole)}
+          <Row label="Zone choisie"><select aria-label="Zone à remplir" value={quickRegionKey} onChange={(e) => { setQuickRegionKey(e.target.value); setRegionElement(null); if (focusedRegion) onFocusRegion(e.target.value || null); }}>
+            <option value="">Choisir une pièce…</option>
+            {regionEntries.map(([key, region]) => <option key={key} value={key}>{region.label}</option>)}
+          </select></Row>
+          {regionPrecision === 'element' && selectedIsland && <Row label="Élément"><select aria-label="Élément UV à remplir" value={regionElement ?? ''} onChange={(e) => setRegionElement(e.target.value === '' ? null : Number(e.target.value))}><option value="">Cliquez sur une forme…</option>{selectedIsland.polygons.map((_poly, index) => <option key={index} value={index}>Élément {index + 1}</option>)}</select></Row>}
+          {mapDef.kind === 'roughmetal' && <>
+            {renderMaterialControls('Matière à appliquer à la pièce', fillMaterial, (rough, metal) => onRoughMetalToolChange('fill', rough, metal))}
+            {renderMaterialPresets(fillMaterial, (rough, metal) => onRoughMetalToolChange('fill', rough, metal))}
+          </>}
+          <div className="row row--actions">
+            {mapDef.kind === 'grayscale' ? renderToolPaintControls('fill', fillColor, 'Pièce') : mapDef.kind !== 'roughmetal' && <Swatch value={fillColor} onChange={onFillChange} title="Couleur de remplissage" />}
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={!selectedRegionKey}
+              onClick={() => fillRegion(quickRegionKey)}
+              title="Remplir uniquement la sélection UV avec la couleur ou la matière choisie"
+            >
+              <Icon name="droplet" size={14} /> Remplir la zone
+            </button>
+            {family === 'skin' && (
+              <button
+                type="button"
+                className={`btn btn-sm${focusedRegion === selectedRegionKey ? ' is-active' : ''}`}
+                disabled={!selectedRegionKey}
+                onClick={() => onFocusRegion(focusedRegion === selectedRegionKey ? null : selectedRegionKey)}
+                title="Isoler : zoom sur la pièce et rognage du dessin à ses contours"
+              >
+                <Icon name="crop" size={14} /> {focusedRegion === selectedRegionKey ? 'Tout voir' : 'Isoler'}
+              </button>
+            )}
+          </div>
+          <p className="hint">{selectedElement ? `Sélection : ${selectedElement.label}. ` : quickRegionKey && regionPrecision === 'piece' ? `Pièce : ${regionSet[quickRegionKey]?.label}. ` : 'Cliquez sur la forme exacte à remplir dans le guide 2D. ' }Remplir crée un calque éditable dans ce canal. Les formes voisines sont conservées.</p>
+        </Section>
+      ));
+
   const renderTextureProps = () => (
     <>
+      {tool === 'region' && renderRegionControls()}
+      {layers.some((layer) => layer.name === 'Texture importée') && <Section title="Retrouver les pièces">
+        <p className="hint">Ce projet utilise encore une texture aplatie. Séparez ses zones UV en calques indépendants. Les dessins existants sont conservés.</p>
+        <button type="button" className="btn btn-primary btn-full" onClick={async () => { setBusy('Séparation des pièces…'); try { const count = await editorRef.current?.separateImportedParts(); notify(count ? `${count} calques de pièces créés. Enregistrez une copie pour garder ce projet.` : 'Cette texture a été déplacée ou transformée : importez son ZIP pour séparer les pièces.'); } catch (error) { notify(projectError(error)); } finally { setBusy(null); } }}><Icon name="layers" size={15} /> Séparer les pièces importées</button>
+      </Section>}
       {isDirtMask(activeMap) && renderDirtControls()}
-      <Section title={`${FAMILY_LABELS[family]} · ${CHANNEL_LABELS[activeMap]}`}>
-        <p className="hint">{mapDef.description}</p>
+      <Section title={mapDef.kind === 'basecolor' ? 'Couleur de base' : `${FAMILY_LABELS[family]} · ${CHANNEL_LABELS[activeMap]}`}>
+        <p className="hint">{mapDef.kind === 'basecolor' ? `Choisissez la couleur de base ${family === 'skin' ? 'de la carrosserie' : family === 'details' ? 'des détails' : 'des roues'}. Les calques au-dessus gardent leurs couleurs.` : mapDef.description}</p>
         {mapDef.kind === 'roughmetal' ? (
           <>
             {renderMaterialControls('Fond de la texture', { roughness: roughVal, metalness: metalVal }, onRoughMetalChange)}
@@ -2051,7 +2304,7 @@ export default function App() {
             <button type="button" className="btn btn-sm material-uniformize" onClick={onApplyMaterialToAll}>
               <Icon name="layers" size={14} /> Appliquer à tous les éléments
             </button>
-            <p className="hint">Applique le fond choisi aux formes de cette carte, en conservant les calques. Les images et références gardent leurs propres valeurs. Annulable avec Ctrl+Z.</p>
+            <p className="hint">Applique la finition aux formes et aux pièces importées de ce canal, en conservant les calques. Les logos gardent leurs propres valeurs. Annulable avec Ctrl+Z.</p>
           </>
         ) : mapDef.kind === 'grayscale' ? (
           <>
@@ -2093,62 +2346,20 @@ export default function App() {
         )}
       </Section>
 
-      {mapDef.kind === 'basecolor' && <Section title="Éclairage">
+      {mapDef.kind === 'basecolor' && <Section title="Éclairage" collapsible defaultOpen={false}>
         <p className="hint">Ajoutez une lumière dans Néon / feux sur cette surface, ou activez « Image lumineuse » dans les propriétés d’un logo pour qu’elle suive son déplacement.</p>
         <div className="btn-group"><button type="button" className="btn btn-sm" onClick={() => { setActiveMap(resolvePaintMap('Details_I', family)!); imageInputRef.current?.click(); }}><Icon name="image" size={14} /> Image lumineuse</button><button type="button" className="btn btn-sm" onClick={() => { setActiveMap(resolvePaintMap('Details_I', family)!); setTool('draw'); }}><Icon name="brush" size={14} /> Peindre une lumière</button></div>
       </Section>}
 
-      {regionSet && (
-        <Section title="Peindre une pièce">
-          {mapDef.kind === 'illum' && lightRoleControl('Comportement du prochain tracé', newLightRole, onNewLightRole)}
-          <div className="chip-grid">
-            {regionEntries.map(([key, r]) => (
-              <button
-                key={key}
-                type="button"
-                className={`chip${quickRegionKey === key ? ' is-active' : ''}${
-                  focusedRegion === key ? ' is-focused' : ''
-                }`}
-                onClick={() => {
-                  setQuickRegionKey(key);
-                  if (family === 'skin' && focusedRegion) onFocusRegion(key);
-                }}
-                title={r.label}
-              >
-                {r.label}
-              </button>
-            ))}
-          </div>
-          {mapDef.kind === 'roughmetal' && <>
-            {renderMaterialControls('Matière à appliquer à la pièce', fillMaterial, (rough, metal) => onRoughMetalToolChange('fill', rough, metal))}
-            {renderMaterialPresets(fillMaterial, (rough, metal) => onRoughMetalToolChange('fill', rough, metal))}
-          </>}
-          <div className="row row--actions">
-            {mapDef.kind === 'grayscale' ? renderToolPaintControls('fill', fillColor, 'Pièce') : mapDef.kind !== 'roughmetal' && <Swatch value={fillColor} onChange={onFillChange} title="Couleur de remplissage" />}
-            <button
-              type="button"
-              className="btn btn-sm"
-              disabled={!quickRegionKey}
-              onClick={() => fillRegion(quickRegionKey)}
-              title="Remplir la pièce sélectionnée avec la couleur (contours UV exacts)"
-            >
-              <Icon name="droplet" size={14} /> Appliquer
-            </button>
-            {family === 'skin' && (
-              <button
-                type="button"
-                className={`btn btn-sm${focusedRegion === quickRegionKey ? ' is-active' : ''}`}
-                disabled={!quickRegionKey}
-                onClick={() => onFocusRegion(focusedRegion === quickRegionKey ? null : quickRegionKey)}
-                title="Isoler : zoom sur la pièce et rognage du dessin à ses contours"
-              >
-                <Icon name="crop" size={14} /> {focusedRegion === quickRegionKey ? 'Tout voir' : 'Isoler'}
-              </button>
-            )}
-          </div>
-          <p className="hint">Choisissez une pièce, puis appliquez la {mapDef.kind === 'roughmetal' ? 'matière' : 'couleur'}. Un calque éditable épouse son contour. « Isoler » limite le dessin à cette pièce.</p>
-        </Section>
-      )}
+      {tool !== 'region' && renderRegionControls()}
+
+      {skin3d && <Section title="Modèle 3D" collapsible defaultOpen={false}>
+        {!skin3d.preview && <p className="hint">L’aperçu affiche la voiture officielle. Importez la version du skin pour l’app (…-app.zip ou skin3d-project.zip) pour afficher sa forme. Le modèle importé sera utilisé dans le jeu.</p>}
+        <p className="hint">Remplacez le modèle personnalisé en conservant les textures et tous leurs calques.</p>
+        <button type="button" className="btn btn-sm btn-full" onClick={() => void onUseOfficialMesh()} disabled={!ready || !!busy || placingImage}>
+          <Icon name="box" size={14} /> Restaurer la voiture officielle
+        </button>
+      </Section>}
 
       <Section title="Précision" collapsible defaultOpen={false}>
         <div className="stack">
@@ -2226,7 +2437,7 @@ export default function App() {
                 l.locked ? ' is-locked' : ''
               }`}
             >
-              <button type="button" className="layer-select" aria-pressed={l.selected} onClick={() => { editorRef.current?.selectLayer(l.id); if (l.linked && !l.locked) setInspectorTab('props'); }} onDoubleClick={() => setInspectorTab('props')} title={`${l.name} · ${l.linked ? 'réglages liés à l’image' : 'double-clic pour modifier'}`}>
+              <button type="button" className="layer-select" aria-pressed={l.selected} onClick={() => { setTool('select'); editorRef.current?.selectLayer(l.id); setInspectorTab(l.linked && !l.locked ? 'props' : 'layers'); }} onDoubleClick={() => setInspectorTab('props')} title={`${l.name} · ${l.linked ? 'réglages liés à l’image' : 'double-clic pour modifier'}`}>
               <Icon name={LAYER_ICONS[l.type] ?? 'square'} size={14} className="layer-type" />
               <span className="layer-name" title={l.name}>
                 {l.name}
@@ -2278,10 +2489,11 @@ export default function App() {
       <header className="topbar">
         <div className="topbar-left">
           <div className="brand">
-            <span className="brand-mark">TM</span>
-            <span className="brand-name">Skin Studio</span>
+            <span className="brand-mark" aria-hidden="true">S</span>
+            <span className="brand-name">Skion Studio</span>
           </div>
           <span className="topbar-sep" />
+          <div className="project-identity">
           <input
             className="project-name"
             value={skinName}
@@ -2291,36 +2503,26 @@ export default function App() {
             maxLength={120}
             spellCheck={false}
           />
-          <span className={`project-save-status ${projectModified ? 'is-unsaved' : ''}`} title={projectModified ? 'Enregistrez le projet pour conserver tous les calques.' : savedAt ? `Enregistré le ${new Date(savedAt).toLocaleString('fr-FR')}` : ''}>
-            <Icon name={projectModified ? 'pen' : 'check'} size={12} /> {projectModified ? 'À enregistrer' : 'Enregistré'}
+          <span className={`project-save-status ${projectModified ? 'is-unsaved' : ''}`} role="status" title={projectModified ? 'Enregistrer conserve les calques dans ce navigateur, sur cet appareil.' : savedAt ? `Dans ce navigateur · enregistré le ${new Date(savedAt).toLocaleString('fr-FR')}` : ''}>
+            <Icon name={projectModified ? 'pen' : 'check'} size={12} /> {projectModified ? 'À enregistrer sur cet appareil' : 'Enregistré sur cet appareil'}
           </span>
+          </div>
           {skin3d && (
-            <span className="mesh-badge" title="L'export inclura MainBody.Mesh.gbx. La hitbox du jeu ne change pas.">
-              Mesh 3D
+            <span className="mesh-badge" title={skin3d.preview ? "L'export inclura MainBody.Mesh.gbx. La hitbox du jeu ne change pas." : 'La voiture officielle sert d’aperçu. Importez la version pour l’app (…-app.zip ou skin3d-project.zip) pour voir la forme du skin ; le modèle du jeu est conservé pour l’export.'}>
+              {skin3d.preview ? 'Mesh 3D' : 'Aperçu générique'}
             </span>
           )}
         </div>
 
         <div className="topbar-center">
-          <div className="segmented" role="tablist" aria-label="Vue">
-            <button type="button" role="tab" aria-selected={view === '2d'} className={view === '2d' ? 'is-active' : ''} onClick={() => changeView('2d')} disabled={placingImage} title="Éditeur de texture">
-              <Icon name="image" size={14} /> Texture 2D
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === 'split'}
-              className={view === 'split' ? 'is-active' : ''}
-              onClick={() => changeView('split')}
-              disabled={!ready || placingImage}
-              title="Texture et voiture côte à côte"
-            >
-              <Icon name="panelRight" size={14} /> Côte à côte
-            </button>
-            <button type="button" role="tab" aria-selected={view === '3d'} className={view === '3d' ? 'is-active' : ''} onClick={() => changeView('3d')} disabled={!ready || placingImage} title="Voiture plein cadre">
-              <Icon name="box" size={14} /> Atelier 3D
-            </button>
-          </div>
+          <label className="view-select">
+            <Icon name={view === '3d' ? 'box' : view === '2d' ? 'image' : 'panelRight'} size={15} />
+            <select aria-label="Vue de travail" value={view} disabled={!ready || placingImage} onChange={(event) => changeView(event.target.value as View)}>
+              <option value="3d">Voiture 3D</option>
+              <option value="2d">Texture 2D</option>
+              <option value="split">Côte à côte</option>
+            </select>
+          </label>
         </div>
 
         <div className="topbar-right">
@@ -2330,20 +2532,18 @@ export default function App() {
           </div>
           <span className="topbar-sep" />
           <button type="button" className="btn" onClick={() => setLibraryOpen(true)} disabled={!ready || placingImage || !!imagePlacement} title="Ouvrir la bibliothèque des projets locaux"><Icon name="folder" size={15} /> Mes projets</button>
-          <button type="button" className="btn" onClick={() => void saveProjectRef.current()} disabled={!ready || placingImage || !!imagePlacement} title="Enregistrer le projet complet · Ctrl+S"><Icon name="save" size={15} /> Enregistrer</button>
+          <button type="button" className="btn" onClick={() => void saveProjectRef.current()} disabled={!ready || placingImage || !!imagePlacement} title="Enregistrer dans ce navigateur, sur cet appareil · Ctrl+S"><Icon name="save" size={15} /> Enregistrer</button>
           <button type="button" className="btn" onClick={openRandom} disabled={!ready || placingImage} title="Générer une livrée complète">
             <Icon name="sparkles" size={15} /> Générer
           </button>
           <button type="button" className="btn" onClick={() => zipInputRef.current?.click()} disabled={!ready || placingImage} title="Importer un skin (.zip) ou un projet 3D (skin3d-project.zip)">
-            <Icon name="upload" size={15} /> Importer
+            <Icon name="upload" size={15} /> Importer un skin
           </button>
-          {skin3d && (
-            <button type="button" className="btn" onClick={() => void onUseOfficialMesh()} disabled={!ready} title="Oublier le mesh custom et revenir à la voiture officielle">
-              Mesh officiel
-            </button>
-          )}
-          <button type="button" className="btn btn-primary" onClick={onExport} disabled={!ready || placingImage} title="Exporter le skin pour Trackmania (.zip)">
-            <Icon name="download" size={15} /> Exporter
+          <button type="button" className="btn btn-danger" onClick={() => setResetRequested(true)} disabled={!ready || !!busy || placingImage || !!imagePlacement || projectRestoringRef.current} title="Repartir du skin de base : voiture officielle, toutes les textures et leurs réglages">
+            <Icon name="rotate" size={15} /> Réinitialiser le skin
+          </button>
+          <button type="button" className="btn btn-primary" onClick={() => setDownloadsOpen(true)} disabled={!ready || placingImage || !!imagePlacement} title="Projet éditable (.tmskin) ou skin pour Trackmania (.zip)">
+            <Icon name="download" size={15} /> Télécharger
           </button>
         </div>
       </header>
@@ -2352,19 +2552,24 @@ export default function App() {
       <div className="options-bar">
         <div className="options-left">
           <div className="options-tool">
-            <Icon name={currentTool?.icon ?? 'select'} size={15} />
-            <span>{currentTool?.label}</span>
+            <Icon name={navigating ? 'rotate' : currentTool?.icon ?? 'select'} size={15} />
+            <span>{navigating ? 'Naviguer' : currentTool?.label}</span>
           </div>
           <span className="opt-sep" />
-          {tool === 'select' && selection ? (
+          {navigating ? (
+            <span className="opt-hint">{view === 'split' ? 'Glissez sur la voiture pour tourner, sur la texture pour la déplacer · molette pour zoomer.' : view === '2d' ? 'Glissez pour déplacer la texture · molette pour zoomer.' : 'Glissez pour tourner la voiture · molette pour zoomer.'}</span>
+          ) : tool === 'select' && selection ? (
             <div className="selection-context">
               <span>{selection.name || SELECTION_TYPE_LABELS[selection.type] || 'Élément sélectionné'}</span>
-              <span className="opt-hint">{selection.projection ? view === '2d' ? 'Déplacement dans Atelier 3D · taille et matière dans Élément' : explore3D ? 'Tournez pour choisir la vue · alignez la projection dans Élément' : 'Glissez sur le logo · poignées pour taille et rotation · matière dans Élément' : view === '3d' ? selection.type === 'image' ? 'Glissez sur l’image pour déplacer · taille et rotation dans Élément' : 'Réglages dans Élément · ouvrez Texture 2D pour déplacer cette forme' : 'Glissez pour déplacer · poignées pour redimensionner · réglages dans Élément'}</span>
+              <span className="opt-hint">{selection.projection ? view === '2d' ? 'Déplacement dans Voiture 3D · taille et matière dans Élément' : 'Glissez sur le logo · poignées pour taille et rotation · matière dans Élément' : view === '3d' ? selection.type === 'image' ? 'Glissez sur l’image pour déplacer · taille et rotation dans Élément' : 'Réglages dans Élément · ouvrez Texture 2D pour déplacer cette forme' : 'Glissez pour déplacer · poignées pour redimensionner · réglages dans Élément'}</span>
             </div>
           ) : <span className="opt-hint">{tool === 'select' ? view === '3d' ? 'Ajoutez une image, puis cliquez sur la voiture pour la placer.' : 'Choisissez un dessin sur la texture ou dans Calques. Espace + glisser pour déplacer la vue.' : currentTool?.hint}</span>}
         </div>
         <div className="options-right">
-          {tool !== 'select' && (
+          <button type="button" className={`btn btn-sm${fluidEditing ? ' is-active' : ''}`} aria-pressed={fluidEditing} onClick={() => setFluidEditing((enabled) => !enabled)} title={fluidEditing ? 'Aperçu allégé pendant les modifications, qualité complète au repos. Les originaux et l’export gardent leur précision.' : 'Qualité complète en permanence. Activez l’édition fluide pour alléger l’aperçu pendant les modifications.'}>
+            <Icon name="sliders" size={14} /> Édition fluide
+          </button>
+          {!navigating && tool !== 'select' && (
             <button type="button" className="btn btn-sm" onClick={() => setInspectorTab('props')}>
               <Icon name="sliders" size={14} /> Réglages de l’outil
             </button>
@@ -2399,31 +2604,32 @@ export default function App() {
       <div className="body">
         {/* ------------------------------------------------------------ rail */}
         <aside className="rail">
-          <button type="button" className="rail-image-add" aria-label="Importer un logo ou une image" disabled={placingImage} onClick={() => imageInputRef.current?.click()}>
+          <button type="button" className="rail-image-add" aria-label="Ajouter une image" disabled={!ready || placingImage} onClick={() => imageInputRef.current?.click()}>
             <span className="rail-image-symbol"><Icon name="image" size={22} /><Icon name="plus" size={12} /></span>
-            <strong>Ajouter un logo</strong><small>Image PNG, JPG, SVG…</small>
+            <strong>Ajouter une image</strong><small>Logo, sticker, numéro…</small>
           </button>
-          <div className="rail-caption">ÉDITER</div>
-          <div className="rail-group">
-            {TOOLS.map((t, index) => (
-              <Fragment key={t.id}>
-              {index === 2 && <div className="rail-caption rail-caption--section">DESSIN SUR LA TEXTURE <span>2D</span></div>}
-              <button
-                type="button"
-                className={`tool-item${tool === t.id ? ' is-active' : ''}`}
-                aria-label={t.label}
-                aria-pressed={tool === t.id}
-                onClick={() => setTool(t.id)}
-                title={`${t.hint} · ${t.key}`}
-              >
-                <Icon name={t.icon} size={17} />
-                <span>{t.label}</span>
-                <kbd>{t.key}</kbd>
-              </button>
-              </Fragment>
-            ))}
+          <div className="rail-caption">ACTIVITÉ</div>
+          <div className="rail-group" role="group" aria-label="Activité d’édition">
+            {ACTIVITIES.map((item) => <button key={item.id} type="button" className={`tool-item${activity === item.id ? ' is-active' : ''}`} aria-pressed={activity === item.id} disabled={!ready || placingImage} onClick={() => chooseActivity(item.id)}>
+              <Icon name={item.icon} size={17} /><span>{item.label}</span>
+              {item.id !== 'navigate' && <kbd>{item.id === 'paint' ? 'B' : 'V'}</kbd>}
+            </button>)}
           </div>
-          <div className="rail-group rail-group--bottom">
+          {activity === 'decorate' && <div className="rail-context">
+            <p className="rail-hint">Sélectionnez un élément sur la texture, une image sur la voiture ou un calque à droite.</p>
+            <button type="button" className={`tool-item${tool === 'region' ? ' is-active' : ''}`} aria-label="Sélection UV" aria-pressed={tool === 'region'} disabled={placingImage} onClick={() => setTool('region')} title="Sélectionner une pièce ou un élément sur le guide 2D · U"><Icon name="guide" size={17} /><span>Sélection UV</span><kbd>U</kbd></button>
+            <details className="rail-tools" open={drawingToolsOpen} onToggle={(event) => setDrawingToolsOpen(event.currentTarget.open)}>
+              <summary>Formes et texte <span>2D</span><Icon name="chevronRight" size={12} /></summary>
+              <div className="rail-group">{TOOLS.filter((item) => !['select', 'draw', 'eyedropper', 'region'].includes(item.id)).map((item) => <button key={item.id} type="button" className={`tool-item${tool === item.id ? ' is-active' : ''}`} aria-label={item.label} aria-pressed={tool === item.id} disabled={placingImage} onClick={() => setTool(item.id)} title={`${item.hint} · ${item.key}`}>
+                <Icon name={item.icon} size={17} /><span>{item.label}</span><kbd>{item.key}</kbd>
+              </button>)}</div>
+            </details>
+          </div>}
+          {activity === 'paint' && <div className="rail-context">
+            <p className="rail-hint">Peignez sur la voiture ou la texture. Couleur et taille se règlent à droite.</p>
+            <button type="button" className={`tool-item${tool === 'eyedropper' ? ' is-active' : ''}`} aria-label="Pipette" aria-pressed={tool === 'eyedropper'} disabled={placingImage} onClick={() => setTool('eyedropper')} title="Prélever une couleur sur la texture · I"><Icon name="pipette" size={17} /><span>Pipette</span><kbd>I</kbd></button>
+          </div>}
+          {(view !== '3d' || activity !== 'navigate') && <div className="rail-group rail-group--bottom">
             <div className="rail-caption">AIDES</div>
             <button type="button" className={`tool-item tool-item--utility${symmetry ? ' is-active' : ''}`} aria-pressed={symmetry} onClick={onToggleSymmetry} title="Duplique les ajouts de l’autre côté de la texture">
               <Icon name="flipH" size={16} /><span>Symétrie</span><i className={`status-dot${symmetry ? ' is-on' : ''}`} />
@@ -2434,7 +2640,7 @@ export default function App() {
             <button type="button" className={`tool-item tool-item--utility${showGuide ? ' is-active' : ''}`} aria-pressed={showGuide} onClick={() => setShowGuide((v) => !v)} title="Afficher les formes des pièces de carrosserie">
               <Icon name="guide" size={16} /><span>Guide UV</span><i className={`status-dot${showGuide ? ' is-on' : ''}`} />
             </button>
-          </div>
+          </div>}
         </aside>
 
         {/* ----------------------------------------------------------- stage */}
@@ -2454,21 +2660,10 @@ export default function App() {
             </div>
             <div className="channel-row">
             <span className="workspace-label">Peinture</span>
-            <div className="channel-tabs">
-              {MAPS.filter((m) => m.group === family).map((m) => (
-                <button
-                  key={m.id}
-                  type="button"
-                  className={`channel-tab${activeMap === m.id ? ' is-active' : ''}`}
-                  aria-pressed={activeMap === m.id}
-                  onClick={() => setActiveMap(m.id)}
-                  title={m.description}
-                >
-                  <Icon name={m.kind === 'roughmetal' ? 'sliders' : m.kind === 'illum' ? 'sun' : 'droplet'} size={14} /> {CHANNEL_LABELS[m.id]}
-                  {dirtyMaps[m.id] && <span className="dot" aria-hidden />}
-                </button>
-              ))}
-            </div>
+            <select className="paint-channel" aria-label="Canal de peinture" value={activeMap} disabled={!ready || placingImage} onChange={(event) => setActiveMap(event.target.value as MapId)}>
+              {MAPS.filter((map) => map.group === family && map.kind === 'basecolor').map((map) => <option key={map.id} value={map.id}>Couleur{dirtyMaps[map.id] ? ' · modifiée' : ''}</option>)}
+              <optgroup label="Finitions et effets">{MAPS.filter((map) => map.group === family && map.kind !== 'basecolor').map((map) => <option key={map.id} value={map.id}>{CHANNEL_LABELS[map.id]}{dirtyMaps[map.id] ? ' · modifié' : ''}</option>)}</optgroup>
+            </select>
             <div className="texture-bar-right">
               {compatibleTargets.length > 0 && (
                 <div className="popover-anchor">
@@ -2516,6 +2711,9 @@ export default function App() {
           </div>
 
           <div className={`stage stage--${view}`}>
+            {elementCopyContext && <ElementCopyMenu context={elementCopyContext}
+              targets={COPY_COMPATIBLE_TARGETS[elementCopyContext.mapId].map((id) => ({ id, label: CHANNEL_LABELS[id], icon: MAP_BY_ID[id].kind === 'roughmetal' ? 'sliders' : MAP_BY_ID[id].kind === 'illum' ? 'sun' : 'droplet' }))}
+              onCopy={copyElementTo} onClose={closeElementCopyMenu} />}
             <div
               ref={canvasStageRef}
               className={`canvas-stage${tool === 'draw' ? ' canvas-stage--draw' : ''}${mapDef.kind === 'roughmetal' ? ` canvas-stage--${surfaceView}` : ''}`}
@@ -2526,7 +2724,7 @@ export default function App() {
                 <div ref={editorHostRef} className="canvas-host" />
                 <div className="canvas-overlays" style={{ transform: overlayTransform }}>
                   {showGrid && <div className="grid-overlay" style={{ backgroundSize: `${100 / gridDiv}% ${100 / gridDiv}%` }} />}
-                  <UvGuideOverlay activeMap={activeMap} visible={showGuide && guideIslands.length > 0} focusedRegion={family === 'skin' ? focusedRegion : null} />
+                  <UvGuideOverlay activeMap={activeMap} islands={guideIslands} zoom={zoomPercent / 100} visible={(showGuide || tool === 'region') && guideIslands.length > 0} focusedRegion={family === 'skin' ? focusedRegion : null} selectedRegion={tool === 'region' && regionPrecision === 'piece' ? quickRegionKey : null} selectedElement={tool === 'region' ? selectedElement : null} onSelect={tool === 'region' ? (key) => { setQuickRegionKey(key); setRegionElement(null); setInspectorTab('texture'); } : undefined} />
                 </div>
               </div>
               {mapDef.kind === 'roughmetal' && (
@@ -2555,24 +2753,19 @@ export default function App() {
             </div>
 
             <div className="viewer3d">
+              <EnvironmentControls value={previewEnvironment} braking={braking} onChange={setPreviewEnvironment} onBraking={onBraking} />
+              {vehicleRigReady && <VehiclePoseControls value={vehiclePose} onChange={setVehiclePose} />}
+              <div className="viewer3d-scene">
               <div ref={preview3dHostRef} className="viewer3d-host" />
-              <div className="scene-toolbar" role="toolbar" aria-label="Édition de la voiture">
-                <div className="scene-modes">
-                  <button type="button" aria-pressed={sceneNavigation && !imagePlacement} className={sceneNavigation && !imagePlacement ? 'is-active' : ''} disabled={placingImage} onClick={() => { setImagePlacement(null); setExplore3D(true); }}><Icon name="rotate" size={16} /><span>Explorer</span></button>
-                  <button type="button" aria-pressed={!explore3D && tool === 'select' && !imagePlacement} className={!explore3D && tool === 'select' && !imagePlacement ? 'is-active' : ''} disabled={placingImage} onClick={() => setTool('select')}><Icon name="move" size={16} /><span>Images</span></button>
-                  <button type="button" aria-pressed={!explore3D && tool === 'draw' && !imagePlacement} className={!explore3D && tool === 'draw' && !imagePlacement ? 'is-active' : ''} disabled={placingImage} onClick={() => setTool('draw')}><Icon name="brush" size={16} /><span>Peindre</span></button>
-                </div>
-                <button type="button" className="scene-add" disabled={placingImage} onClick={() => imageInputRef.current?.click()}><Icon name="plus" size={16} /> Ajouter une image</button>
-              </div>
+              {!imagePlacement && <div className="scene-context" role="status"><Icon name={sceneNavigating ? 'rotate' : tool === 'draw' ? 'brush' : 'select'} size={15} /> {sceneNavigating ? 'Navigation de la voiture' : tool === 'draw' ? 'Peinture sur la voiture' : 'Sélection et déplacement des images'}</div>}
               {imagePlacement && <div className="placement-banner" role="status">
                 {imagePreview ? <img src={imagePreview} alt="Image à placer" /> : <Icon name="target" size={22} />}
                 <div><strong>{placingImage ? 'Placement en cours…' : 'Cliquez sur la voiture pour placer l’image'}</strong><span>{'file' in imagePlacement ? imagePlacement.file.name : `Nouvel emplacement · ${FAMILY_LABELS[MAP_BY_ID[imagePlacement.mapId].group]}`}</span></div>
                 <button type="button" className="btn btn-sm" disabled={placingImage} onClick={() => setImagePlacement(null)}>Annuler <kbd>Échap</kbd></button>
               </div>}
-              {!imagePlacement && !explore3D && tool === 'select' && <div className="scene-selection"><span className="status-dot is-on" />{selection?.type === 'image' ? `${selection.name || 'Image'} · glissez pour déplacer` : 'Cliquez sur une image pour la sélectionner'}</div>}
               <div className="float float--bl">
                 <span className="float-item">
-                  {!explore3D && (tool === 'draw' || tool === 'select' || imagePlacement) ? (
+                  {!sceneNavigating && (tool === 'draw' || tool === 'select' || imagePlacement) ? (
                     <>
                       <Icon name={tool === 'draw' ? 'brush' : 'move'} size={12} /> Gauche : {imagePlacement ? 'placer l’image' : tool === 'draw' ? 'peindre' : 'déplacer l’image'} · droit : tourner · milieu : déplacer la vue ·
                       molette : zoom
@@ -2587,6 +2780,9 @@ export default function App() {
                 <span className="float-item float-item--muted">ZQSD / flèches : se déplacer · Pg↑ Pg↓ : monter / descendre</span>
               </div>
               <div className="float float--br">
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => previewRef.current?.viewUnderbody()} title="Passer sous la voiture pour y peindre ou placer une image">
+                  <Icon name="chevronDown" size={14} /> Voir le dessous
+                </button>
                 <IconButton
                   size="sm"
                   icon="target"
@@ -2595,6 +2791,7 @@ export default function App() {
                   onClick={() => previewRef.current?.resetCamera()}
                   tipSide="top"
                 />
+              </div>
               </div>
             </div>
           </div>
@@ -2606,6 +2803,7 @@ export default function App() {
             <div ref={previewHostRef} className="preview-host" />
             <IconButton icon="maximize" label="Agrandir la vue 3D" onClick={() => setView('split')} className="preview-expand" tipSide="left" />
           </div>
+          {view === '2d' && <EnvironmentControls value={previewEnvironment} braking={braking} onChange={setPreviewEnvironment} onBraking={onBraking} />}
           <div className="inspector-tabs" role="tablist">
             <button type="button" role="tab" aria-selected={inspectorTab === 'texture'} className={inspectorTab === 'texture' ? 'is-active' : ''} onClick={() => setInspectorTab('texture')}>
               <Icon name="droplet" size={14} /> Texture
@@ -2619,7 +2817,7 @@ export default function App() {
             </button>
           </div>
           <div className="inspector-context"><span>{FAMILY_LABELS[family]} <Icon name="chevronRight" size={12} /> {CHANNEL_LABELS[activeMap]}</span><strong>{inspectorTab === 'texture' ? 'Fond & pièces' : inspectorTab === 'layers' ? 'Calques' : tool !== 'select' ? 'Prochain tracé' : 'Sélection'}</strong></div>
-          <div className="inspector-body">
+          <div className="inspector-body" ref={inspectorBodyRef}>
             {imagePlacement ? <div className="placement-help"><Icon name="target" size={24} /><strong>Choisissez son emplacement</strong><p>Cliquez sur une surface de la voiture. Tournez la voiture avec le clic droit.</p>
               {'file' in imagePlacement && <div className="placement-settings">
                 <Toggle label="Image lumineuse" checked={imagePlacement.channel === 'illum'} onChange={(on) => setImagePlacement({ ...imagePlacement, channel: on ? 'illum' : 'basecolor', material: on ? false : imagePlacement.material })} />
@@ -2631,15 +2829,19 @@ export default function App() {
               </div>}
               <button type="button" className="btn btn-full" disabled={placingImage} onClick={() => setImagePlacement(null)}>Annuler le placement</button></div> : <>
             {mapDef.kind === 'illum' && inspectorTab !== 'layers' && renderLightPreview()}
-            {inspectorTab === 'layers' ? renderLayers() : inspectorTab === 'texture' ? renderTextureProps() : tool !== 'select' ? (
+            {inspectorTab === 'layers' ? renderLayers() : inspectorTab === 'texture' || tool === 'region' ? renderTextureProps() : tool !== 'select' ? (
               <Section title={`${currentTool?.label ?? 'Outil'} · prochain tracé`}>
                 <div className="tool-settings">{renderToolOptions()}</div>
                 {mapDef.kind === 'illum' && lightRoleControl('Comportement du prochain tracé', newLightRole, onNewLightRole)}
-                <p className="hint">Ces réglages s’appliquent aux prochains éléments. Pour retoucher un dessin existant, utilisez Sélection puis l’onglet Élément.</p>
+                <p className="hint">Ces réglages s’appliquent aux prochains éléments. Pour retoucher un dessin existant, choisissez Décorer puis l’onglet Élément.</p>
               </Section>
             ) : selection ? renderSelectionProps() : (
-              <div className="empty studio-welcome"><div className="welcome-symbol"><Icon name={view === '3d' ? 'box' : 'select'} size={28} /></div><h2>{imagePlacement ? 'Prêt à placer votre image' : 'Créez votre livrée'}</h2><p>{view === '3d' ? 'Ajoutez un logo directement sur la voiture, ou commencez par peindre une pièce.' : 'Ajoutez un dessin, du texte ou un logo. Chaque élément reste modifiable.'}</p>
-                {!imagePlacement && <><button type="button" className="btn btn-primary btn-full" onClick={() => imageInputRef.current?.click()}><Icon name="image" size={15} /> Ajouter une image</button><button type="button" className="btn btn-full" onClick={() => setInspectorTab('texture')}><Icon name="droplet" size={15} /> Couleurs et matières</button><button type="button" className="btn btn-ghost btn-full" onClick={() => setInspectorTab('layers')}><Icon name="layers" size={15} /> Retrouver mes calques</button></>}
+              <div className="empty studio-welcome">
+                <div className="welcome-symbol"><Icon name="image" size={28} /></div>
+                <h2>Décorez votre livrée</h2>
+                <p>Utilisez « Ajouter une image » à gauche pour poser un logo. Pour dessiner, ouvrez « Formes et texte ».</p>
+                <p>Chaque élément reste modifiable : sélectionnez-le sur la texture, sur la voiture ou dans Calques.</p>
+                <button type="button" className="btn btn-full" onClick={() => setInspectorTab('texture')}><Icon name="droplet" size={15} /> Choisir la couleur de base</button>
               </div>
             )}
             </>}
@@ -2650,6 +2852,8 @@ export default function App() {
       <input ref={imageInputRef} type="file" accept="image/*" hidden onChange={onImageChosen} />
       <input ref={refInputRef} type="file" accept="image/*" hidden onChange={onRefChosen} />
       <input ref={zipInputRef} type="file" accept=".zip" hidden onChange={onZipChosen} />
+
+      {downloadsOpen && <DownloadDialog onClose={closeDownloads} onPrepareProject={downloadCurrentProject} onExport={onExport} />}
 
       {libraryOpen && <ProjectLibrary currentId={projectId} needsSave={projectModified && (dirtyCount > 0 || !!projectId || skinName !== 'MonSkin' || !!editorRef.current?.hasProjectContent() || !!skin3d || coatIntensity !== 1 || neonIntensity !== 1.4 || !dirtEnabled)}
         onClose={() => setLibraryOpen(false)} onSave={saveProject} onOpen={openSavedProject} onImport={importProjectFile} onDownloadCurrent={downloadCurrentProject}
@@ -2665,6 +2869,11 @@ export default function App() {
           onCancel={() => void onRandomCancel()}
           generating={generating}
           previewHostRef={randomPreviewHostRef}
+          onPreviewHost={mountRandomPreview}
+          previewEnvironment={previewEnvironment}
+          onEnvironmentChange={setPreviewEnvironment}
+          braking={braking}
+          onBrakingChange={onBraking}
         />
       )}
 
@@ -2675,6 +2884,10 @@ export default function App() {
         </div>
       )}
       {clearRequested && <ConfirmDialog title="Réinitialiser cette texture ?" message={`Les calques indépendants de « ${MAP_BY_ID[clearRequested].label} » seront retirés et son fond réinitialisé.${layers.some((layer) => layer.linked) ? ' Les images et matières liées restent gérées par leur image : sélectionnez leur calque pour les modifier ou les retirer.' : ''}`} onCancel={() => setClearRequested(null)} onConfirm={confirmClearMap} />}
+      {resetRequested && <ConfirmDialog title="Réinitialiser tout le skin ?"
+        message="Tous les calques de la carrosserie, des détails et des roues seront supprimés, y compris les images, matières et lumières liées. La voiture officielle et les réglages de base seront restaurés."
+        hint="Les modifications non enregistrées et l’historique seront effacés. Les projets déjà enregistrés dans Mes projets sont conservés."
+        confirmLabel="Tout réinitialiser" onCancel={() => setResetRequested(false)} onConfirm={() => void confirmResetSkin()} />}
       {toast && (
         <div className="toast" role="status">
           <Icon name="info" size={14} />

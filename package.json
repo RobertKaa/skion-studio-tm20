@@ -1,5 +1,5 @@
 {
-  "name": "tm-skin",
+  "name": "skion-studio",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -7,6 +7,14 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "test:desktop-ux": "tsx --tsconfig tsconfig.app.json scripts/test-desktop-ux.tsx",
+    "test:environment": "tsx scripts/test-preview-environment.ts && tsx scripts/test-project-file.ts",
+    "test:reset": "tsx scripts/test-reset-skin.ts && tsx scripts/test-reset-model.ts && tsx scripts/test-project-file.ts",
+    "test:projects": "tsx scripts/test-project-file.ts && tsx scripts/test-large-project.ts && tsx scripts/test-resolution.ts",
+    "test:performance": "tsx scripts/test-adaptive-preview.ts && tsx scripts/test-resolution.ts",
+    "test:underbody": "tsx scripts/test-underbody-view.ts && tsx scripts/test-decal-projection.ts && tsx scripts/test-preview-environment.ts",
+    "test:generator": "tsx scripts/test-generator.ts",
+    "test:element-copy": "tsx scripts/test-element-copy.ts",
     "preview": "vite preview",
     "preview:gh": "vite build && vite preview --base /skion-studio-tm20/"
   },

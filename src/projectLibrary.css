@@ -2,6 +2,9 @@
 .app .topbar-right { gap: 6px; }
 .project-save-status { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; color: var(--accent); font-size: 10px; }
 .project-save-status.is-unsaved { color: var(--fg-2); }
+.project-identity { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.project-identity .project-save-status { padding-left: 8px; white-space: nowrap; }
+.topbar-left .project-identity .project-name { height: 23px; padding-block: 1px; }
 .topbar-left .project-name { min-width: 90px; width: 140px; max-width: 160px; }
 .modal.project-library { width: min(1000px, calc(100vw - 64px)); max-height: calc(100vh - 64px); display: flex; flex-direction: column; }
 .project-library .modal-head { flex-shrink: 0; }
@@ -33,3 +36,34 @@
 .project-notice .btn-group { flex-wrap: wrap; gap: 6px; }
 .project-error { color: #ffb1b1; margin: 16px 22px 0; padding: 12px; background: #52222260; border-radius: 8px; }
 @media (max-width: 1360px) { .topbar .brand-name { display: none; } .topbar .topbar-left { gap: 6px; } .topbar .topbar-right > .btn { padding-inline: 9px; } .topbar-center .segmented button { padding-inline: 9px; } }
+
+/* Keep project, view and destructive actions readable on narrower desktops. */
+@media (max-width: 1440px) {
+  .app { --topbar-h: 96px; }
+  .app .topbar { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: 1fr 1fr; }
+  .app .topbar-left { grid-column: 1; grid-row: 1; }
+  .app .topbar-center { grid-column: 2; grid-row: 1; }
+  .app .topbar-right { grid-column: 1 / -1; grid-row: 2; }
+  .app .topbar .brand-name { display: inline; }
+  .app .topbar-left .project-name { width: 220px; max-width: 240px; }
+}
+
+.modal.download-dialog { width: min(760px, calc(100vw - 64px)); max-height: calc(100dvh - 48px); overflow-y: auto; }
+.download-dialog .modal-head p { margin-top: 6px; color: var(--fg-2); font-size: 12px; }
+.download-formats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding: 22px; }
+.download-format { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 22px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg-0); }
+.download-format > svg { color: var(--accent); }
+.download-format h3 { margin: 0; font-size: 16px; font-weight: 600; }
+.download-extension { color: var(--accent); font-size: 11px; }
+.download-format p { flex: 1; color: var(--fg-2); font-size: 12px; line-height: 1.7; }
+.download-format .btn { width: 100%; min-height: 36px; height: auto; justify-content: center; white-space: normal; overflow-wrap: anywhere; padding-block: 7px; }
+.download-format .btn svg { flex-shrink: 0; }
+.download-storage { display: flex; align-items: flex-start; gap: 9px; padding: 16px 22px; border-top: 1px solid var(--line); color: var(--fg-2); font-size: 11px; line-height: 1.6; }
+.download-storage svg { flex-shrink: 0; margin-top: 1px; }
+.download-error { margin: 0 22px 18px; padding: 12px; color: #ffb1b1; background: #52222260; border-radius: 8px; }
+@media (max-width: 640px) {
+  .modal.download-dialog { width: calc(100vw - 24px); }
+  .download-formats { grid-template-columns: minmax(0, 1fr); padding: 16px; }
+  .download-format { padding: 16px; }
+  .project-identity .project-save-status { white-space: normal; }
+}

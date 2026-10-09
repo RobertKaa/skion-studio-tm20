@@ -1,472 +1,219 @@
-import { useEffect, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type RefObject } from 'react';
 import {
-  FINISH_LABELS,
-  NEON_LABELS,
-  PATTERN_LABELS,
-  THEME_DESCRIPTIONS,
-  THEME_LABELS,
-  type Coat,
-  type DetailStyle,
-  type Finish,
-  type GenerationSummary,
-  type GeneratorOptions,
-  type Harmony,
-  type Neon,
-  type Pattern,
-  type Theme,
-  type WheelStyle,
+  FINISH_LABELS, NEON_LABELS, PATTERN_LABELS, THEME_CATALOG, THEME_LABELS,
+  type GenerationSummary, type GeneratorOptions,
 } from './generator';
-import { ILLUM_ROLES, type IllumRole } from './maps';
+import { LIGHTING_PRESETS, type PreviewEnvironment } from './previewEnvironment';
 import { Icon } from './ui/Icon';
+import './randomModal.css';
 
-const HARMONY_LABELS: Record<Exclude<Harmony, 'auto'>, string> = {
-  mono: 'Monochrome',
-  complementary: 'Complémentaire',
-  analogous: 'Analogues',
-  triadic: 'Triade',
+const TIRE_LABELS: Record<GeneratorOptions['tire'], string> = {
+  auto: 'Accordés à la livrée', slick: 'Slick · piste sèche',
+  semiSlick: 'Semi-slick · route & piste', wet: 'Pluie · rainures profondes', rally: 'Rallye · gomme sculptée',
 };
-
-const COAT_LABELS: Record<Exclude<Coat, 'auto'>, string> = {
-  none: 'Aucun',
-  light: 'Léger',
-  full: 'Total',
+const LIGHT_LABELS: Record<GeneratorOptions['lights'], string> = {
+  auto: 'Signature du style', brake: 'Freinage · rouge discret',
+  endurance: 'Endurance · repères & freinage', street: 'Tuning · néons, nuit & freinage', none: 'Affichage de vitesse uniquement',
 };
+const HARMONY_LABELS = { mono: 'Monochrome', complementary: 'Complémentaire', analogous: 'Analogues', triadic: 'Triade' };
+const COAT_LABELS = { none: 'Aucun', light: 'Léger', full: 'Total' };
+const WHEEL_LABELS = { dark: 'Sombres', accent: 'Couleur d’accent', base: 'Couleur de base' };
+const DETAIL_LABELS = { dark: 'Sombres', accent: 'Couleur d’accent' };
 
-const WHEEL_LABELS: Record<Exclude<WheelStyle, 'auto'>, string> = {
-  dark: 'Sombres',
-  accent: "Couleur d'accent",
-  base: 'Couleur de base',
-};
-
-const DETAIL_LABELS: Record<Exclude<DetailStyle, 'auto'>, string> = {
-  dark: 'Sombres',
-  accent: "Couleur d'accent",
-};
-
-/** Ordre d'affichage des thèmes : livrées soignées d'abord, aléatoire complet en fin. */
-const THEME_ORDER: Theme[] = [
-  'random',
-  'racingGT',
-  'retro',
-  'arrow',
-  'wave',
-  'chrome',
-  'stealth',
-  'cyber',
-  'rally',
-  'drift',
-  'esport',
-  'zevent',
-  'full',
-];
-
-const NEON_ROLE_LABELS: Record<IllumRole, string> = Object.fromEntries(
-  ILLUM_ROLES.map((r) => [r.id, r.label]),
-) as Record<IllumRole, string>;
-
-function OptionSelect<T extends string>({
-  label,
-  value,
-  labels,
-  onChange,
-}: {
-  label: string;
-  value: T | 'auto';
-  labels: Record<string, string>;
-  onChange: (v: T | 'auto') => void;
+function SelectField<T extends string>({ label, value, labels, onChange, autoLabel = 'Accordé au style' }: {
+  label: string; value: T | 'auto'; labels: Record<string, string>;
+  onChange: (value: T | 'auto') => void; autoLabel?: string;
 }) {
-  return (
-    <label className="gen-field">
-      <span>{label}</span>
-      <select value={value} onChange={(e) => onChange(e.target.value as T | 'auto')}>
-        <option value="auto">Aléatoire</option>
-        {Object.entries(labels).map(([k, v]) => (
-          <option key={k} value={k}>
-            {v}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
+  const labelId = useId();
+  return <label className="gen-field"><span id={labelId}>{label}</span><select aria-labelledby={labelId} value={value} onChange={(event) => onChange(event.target.value as T | 'auto')}>
+    {!Object.hasOwn(labels, 'auto') && <option value="auto">{autoLabel}</option>}
+    {Object.entries(labels).map(([key, name]) => <option key={key} value={key}>{name}</option>)}
+  </select></label>;
 }
 
-/** Dernier tirage affiché dans le panneau d'aperçu. */
-interface LastRun {
-  summary: GenerationSummary;
-  /** Graine saisie par l'utilisateur (vide = aléatoire) au moment du tirage. */
-  baseSeed: string;
-  /** Décalage appliqué à une graine fixe pour que « Régénérer » varie. */
-  variation: number;
-}
+interface LastRun { summary: GenerationSummary; baseSeed: string; variation: number; }
 
-export default function RandomModal({
-  opts,
-  onChange,
-  onGenerate,
-  onKeep,
-  onCancel,
-  generating,
-  previewHostRef,
-}: {
-  opts: GeneratorOptions;
-  onChange: (opts: GeneratorOptions) => void;
-  /** Applique la génération à l'éditeur ; résout `null` en cas d'échec. */
+export default function RandomModal({ opts, onChange, onGenerate, onKeep, onCancel, generating, previewHostRef, onPreviewHost, previewEnvironment, onEnvironmentChange, braking, onBrakingChange }: {
+  opts: GeneratorOptions; onChange: (opts: GeneratorOptions) => void;
+  /** Aperçu temporaire ; App conserve le checkpoint jusqu’à validation. */
   onGenerate: (opts: GeneratorOptions) => Promise<GenerationSummary | null>;
-  /** Ferme en gardant le résultat. */
-  onKeep: () => void;
-  /** Ferme en restaurant l'état d'avant l'ouverture (ou ferme simplement si rien n'a été généré). */
-  onCancel: () => void;
-  generating: boolean;
-  /** Conteneur dans lequel App monte l'aperçu 3D pendant que la modale est ouverte. */
+  onKeep: () => void; onCancel: () => void; generating: boolean;
   previewHostRef: RefObject<HTMLDivElement | null>;
+  onPreviewHost?: (host: HTMLDivElement) => void;
+  previewEnvironment?: PreviewEnvironment;
+  onEnvironmentChange?: (value: PreviewEnvironment) => void;
+  braking?: boolean;
+  onBrakingChange?: (value: boolean) => void;
 }) {
-  const set = <K extends keyof GeneratorOptions>(key: K, value: GeneratorOptions[K]) =>
-    onChange({ ...opts, [key]: value });
-
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const [section, setSection] = useState<'catalog' | 'settings'>('catalog');
+  const [category, setCategory] = useState<'all' | 'competition' | 'street' | 'fantasy'>('all');
   const [last, setLast] = useState<LastRun | null>(null);
-  /** Config telle qu'utilisée au dernier tirage, pour détecter « même config ⇒ variation ». */
   const [lastKey, setLastKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const runningRef = useRef(false);
   const generated = last !== null;
+  const changed = generated && JSON.stringify(opts) !== lastKey;
+  const selected = THEME_CATALOG.find((entry) => entry.id === opts.theme);
+  const set = <K extends keyof GeneratorOptions>(key: K, value: GeneratorOptions[K]) => onChange({ ...opts, [key]: value });
+  const setPreviewHost = useCallback((host: HTMLDivElement | null) => {
+    previewHostRef.current = host;
+    if (host) onPreviewHost?.(host);
+  }, [previewHostRef, onPreviewHost]);
 
-  // Escape = Annuler (restaure l'état d'avant la modale).
+  // Focus initial, tabulation contenue et retour au déclencheur à la fermeture.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (!generating) onCancel();
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dialogRef.current?.querySelector<HTMLButtonElement>('.gen-dismiss')?.focus();
+    return () => { if (previous?.isConnected) previous.focus(); };
+  }, []);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault(); event.stopPropagation();
+        if (!generating && !runningRef.current) onCancel();
+      }
+      if (event.key !== 'Tab' || !dialogRef.current) return;
+      const nodes = Array.from(dialogRef.current.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), summary, [tabindex="0"]')).filter((node) => node.getClientRects().length > 0);
+      const first = nodes[0]; const final = nodes[nodes.length - 1];
+      if (!first || !final) return;
+      if (event.shiftKey && (document.activeElement === first || !dialogRef.current.contains(document.activeElement))) { event.preventDefault(); final.focus(); }
+      else if (!event.shiftKey && (document.activeElement === final || !dialogRef.current.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [onCancel, generating]);
 
-  const run = async () => {
-    if (generating) return;
+  const run = async (newVariation = false) => {
+    if (generating || runningRef.current) return;
+    runningRef.current = true;
     const key = JSON.stringify(opts);
     const fixedSeed = opts.seed.trim() !== '';
-    // Graine fixe + config inchangée : on décale la graine pour obtenir une
-    // nouvelle variante (affichée telle quelle, donc toujours reproductible).
-    const variation = fixedSeed && key === lastKey && last ? last.variation + 1 : 0;
-    const effective: GeneratorOptions =
-      variation > 0 ? { ...opts, seed: String(Number(opts.seed.trim()) + variation) } : opts;
+    const advanceSeed = fixedSeed && (newVariation || key === lastKey && last !== null);
+    const variation = advanceSeed ? last?.baseSeed === opts.seed.trim() ? last.variation + 1 : 1 : 0;
+    const effective = variation > 0 ? { ...opts, seed: String(Number(opts.seed.trim()) + variation) } : opts;
     setError(null);
-    const summary = await onGenerate(effective);
-    if (!summary) {
-      setError('La génération a échoué. Modifiez les options et réessayez.');
-      return;
-    }
-    setLast({ summary, baseSeed: opts.seed.trim(), variation });
-    setLastKey(key);
+    try {
+      const summary = await onGenerate(effective);
+      if (!summary) { setError('L’aperçu n’a pas pu être créé. Réessayez ou revenez à votre livrée.'); return; }
+      setLast({ summary, baseSeed: opts.seed.trim(), variation }); setLastKey(key);
+    } catch { setError('L’aperçu n’a pas pu être créé. Réessayez ou revenez à votre livrée.'); }
+    finally { runningRef.current = false; }
   };
 
-  const themeDescription =
-    opts.theme === 'random'
-      ? 'Pioche une livrée cohérente au hasard (couleurs, motif, matériaux et néon accordés).'
-      : opts.theme === 'full'
-        ? 'Génération 100 % aléatoire (motifs et matériaux variés, style « bruit »).'
-        : THEME_DESCRIPTIONS[opts.theme];
+  const rememberSeed = () => {
+    if (!last) return;
+    const seed = String(last.summary.seed);
+    const next = { ...opts, seed };
+    onChange(next);
+    // Mémoriser une graine ne change pas la composition déjà affichée.
+    if (!changed) { setLastKey(JSON.stringify(next)); setLast({ ...last, baseSeed: seed, variation: 0 }); }
+  };
 
-  const fixedSeed = opts.seed.trim() !== '';
-  const seedLocked = Boolean(last && last.baseSeed !== '' && last.baseSeed === opts.seed.trim() && last.variation === 0);
-
-  return (
-    <div
-      className="modal-overlay"
-      onClick={() => {
-        // Clic hors de la modale : ne ferme que s'il n'y a rien à perdre.
-        if (!generated && !generating) onCancel();
-      }}
-    >
-      <div className="modal modal--gen" role="dialog" aria-modal="true" aria-labelledby="gen-title" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <h2 id="gen-title">Générer une livrée</h2>
-          <button
-            type="button"
-            className="modal-close"
-            onClick={onCancel}
-            disabled={generating}
-            aria-label={generated ? 'Annuler et fermer' : 'Fermer'}
-          >
-            <Icon name="x" size={16} />
-          </button>
-        </div>
-
-        <div className="gen-layout">
-          <div className="modal-body gen-config">
-            <fieldset className="gen-theme">
-              <legend>Style de livrée</legend>
-              <div className="theme-grid">
-                {THEME_ORDER.map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    className={`theme-card${opts.theme === t ? ' is-active' : ''}`}
-                    aria-pressed={opts.theme === t}
-                    onClick={() => set('theme', t)}
-                  >
-                    {THEME_LABELS[t]}
-                  </button>
-                ))}
-              </div>
-              <p className="hint">{themeDescription}</p>
-            </fieldset>
-
-            <div className="gen-grid">
-              <fieldset>
-                <legend>Couleurs</legend>
-                <label className="gen-field gen-inline">
-                  <input
-                    type="checkbox"
-                    checked={opts.randomBaseHue}
-                    onChange={(e) => set('randomBaseHue', e.target.checked)}
-                  />
-                  <span>Teinte de base aléatoire</span>
-                </label>
-                {!opts.randomBaseHue && (
-                  <label className="gen-field">
-                    <span>Couleur de base</span>
-                    <input
-                      type="color"
-                      value={opts.baseColor}
-                      onChange={(e) => set('baseColor', e.target.value)}
-                    />
-                  </label>
-                )}
-                <label className="gen-field gen-inline">
-                  <input
-                    type="checkbox"
-                    checked={opts.randomAccent}
-                    onChange={(e) => set('randomAccent', e.target.checked)}
-                  />
-                  <span>Accent (« néon ») aléatoire</span>
-                </label>
-                {!opts.randomAccent && (
-                  <label className="gen-field">
-                    <span>Couleur d'accent</span>
-                    <input
-                      type="color"
-                      value={opts.accentColor}
-                      onChange={(e) => set('accentColor', e.target.value)}
-                    />
-                  </label>
-                )}
-                <OptionSelect
-                  label="Harmonie des accents"
-                  value={opts.harmony}
-                  labels={HARMONY_LABELS}
-                  onChange={(v) => set('harmony', v as Harmony)}
-                />
-              </fieldset>
-
-              <fieldset>
-                <legend>Motif carrosserie</legend>
-                <OptionSelect
-                  label="Motif"
-                  value={opts.pattern}
-                  labels={PATTERN_LABELS}
-                  onChange={(v) => set('pattern', v as Pattern)}
-                />
-                <label className="gen-field">
-                  <span>Complexité : {opts.complexity}</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={opts.complexity}
-                    onChange={(e) => set('complexity', Number(e.target.value))}
-                  />
-                </label>
-                <label className="gen-field gen-inline">
-                  <input
-                    type="checkbox"
-                    checked={opts.raceNumber}
-                    onChange={(e) => set('raceNumber', e.target.checked)}
-                  />
-                  <span>Numéro de course (capot + flancs)</span>
-                </label>
-                {opts.raceNumber && (
-                  <label className="gen-field">
-                    <span>Numéro (vide = aléatoire)</span>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      maxLength={3}
-                      placeholder="Ex. 27"
-                      value={opts.raceNumberValue}
-                      onChange={(e) => set('raceNumberValue', e.target.value.replace(/\D/g, ''))}
-                    />
-                  </label>
-                )}
-              </fieldset>
-
-              <fieldset>
-                <legend>Peinture</legend>
-                <OptionSelect
-                  label="Finition"
-                  value={opts.finish}
-                  labels={FINISH_LABELS}
-                  onChange={(v) => set('finish', v as Finish)}
-                />
-                <OptionSelect
-                  label="Vernis / paillettes"
-                  value={opts.coat}
-                  labels={COAT_LABELS}
-                  onChange={(v) => set('coat', v as Coat)}
-                />
-                <label className="gen-field">
-                  <span>Saleté autorisée sur le skin : {opts.dirt}%</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={opts.dirt}
-                    onChange={(e) => set('dirt', Number(e.target.value))}
-                  />
-                </label>
-              </fieldset>
-
-              <fieldset>
-                <legend>Roues &amp; détails</legend>
-                <OptionSelect
-                  label="Roues"
-                  value={opts.wheels}
-                  labels={WHEEL_LABELS}
-                  onChange={(v) => set('wheels', v as WheelStyle)}
-                />
-                <OptionSelect
-                  label="Détails (aileron, châssis…)"
-                  value={opts.details}
-                  labels={DETAIL_LABELS}
-                  onChange={(v) => set('details', v as DetailStyle)}
-                />
-                <OptionSelect
-                  label="Néon détails (Details_I)"
-                  value={opts.neon}
-                  labels={NEON_LABELS}
-                  onChange={(v) => set('neon', v as Neon)}
-                />
-                {opts.neon !== 'none' && (
-                  <label className="gen-field">
-                    <span>Rôle du néon</span>
-                    <select value={opts.neonRole} onChange={(e) => set('neonRole', e.target.value as IllumRole)}>
-                      {ILLUM_ROLES.map((r) => (
-                        <option key={r.id} value={r.id}>
-                          {NEON_ROLE_LABELS[r.id]}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-              </fieldset>
-
-              <fieldset className="gen-span">
-                <legend>Reproductibilité</legend>
-                <label className="gen-field">
-                  <span>Graine (vide = nouveau tirage à chaque fois)</span>
-                  <div className="gen-seed-row">
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      placeholder="Ex. 123456"
-                      value={opts.seed}
-                      onChange={(e) => set('seed', e.target.value.replace(/\D/g, '').slice(0, 12))}
-                    />
-                    {fixedSeed && (
-                      <button type="button" className="btn btn-sm" onClick={() => set('seed', '')} title="Revenir à une graine aléatoire">
-                        Vider
-                      </button>
-                    )}
-                  </div>
-                </label>
-                <p className="hint">
-                  {fixedSeed
-                    ? 'Graine fixée : la même configuration redonne la même livrée. « Régénérer » sans rien changer essaie la graine suivante.'
-                    : 'Notez la graine affichée sous l’aperçu pour retrouver une livrée plus tard.'}
-                </p>
-              </fieldset>
-            </div>
-
-            <p className="hint">
-              Les éléments générés restent des calques éditables. Le néon des détails est peint sur{' '}
-              <code>Details_I</code>. Pour ajouter une lumière sur la carrosserie ou les roues, utilisez ensuite leur canal Néon / feux.
-            </p>
+  return <div className="modal-overlay gen-overlay" onClick={() => { if (!generated && !generating && !runningRef.current) onCancel(); }}>
+    <div ref={dialogRef} className="modal modal--gen gen-studio" role="dialog" aria-modal="true" aria-busy={generating} aria-labelledby="gen-title" aria-describedby="gen-description" onClick={(event) => event.stopPropagation()}>
+      <header className="modal-head gen-header">
+        <div><span className="gen-eyebrow">Atelier de livrées</span><h2 id="gen-title">Une identité pour chaque piste.</h2><p id="gen-description">Choisissez une inspiration, générez des variations, puis affinez votre préférée.</p></div>
+        <button type="button" className="modal-close gen-dismiss" onClick={onCancel} disabled={generating} aria-label={generated ? 'Revenir à ma livrée et fermer' : 'Fermer'}><Icon name="x" size={18} /></button>
+      </header>
+      <div className="gen-layout">
+        <div className="gen-config">
+          <div className="gen-section-tabs" role="tablist" aria-label="Configuration de la livrée" onKeyDown={(event) => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault(); event.stopPropagation();
+            const next = event.key === 'Home' ? 'catalog' : event.key === 'End' ? 'settings' : section === 'catalog' ? 'settings' : 'catalog';
+            setSection(next); document.getElementById(`gen-${next === 'catalog' ? 'catalog' : 'settings'}-tab`)?.focus();
+          }}>
+            <button type="button" id="gen-catalog-tab" role="tab" aria-controls="gen-catalog-panel" aria-selected={section === 'catalog'} className={section === 'catalog' ? 'is-active' : ''} onClick={() => setSection('catalog')}><span>01</span> Choisir une livrée</button>
+            <button type="button" id="gen-settings-tab" role="tab" aria-controls="gen-settings-panel" aria-selected={section === 'settings'} className={section === 'settings' ? 'is-active' : ''} onClick={() => setSection('settings')}><span>02</span> Personnaliser</button>
           </div>
-
-          <div className="gen-preview" aria-live="polite">
-            <div ref={previewHostRef} className="gen-preview-host" data-testid="gen-preview-host" />
-            {!generated && !generating && !error && (
-              <div className="gen-preview-empty">
-                <Icon name="sparkles" size={18} />
-                <p>Choisissez un style, puis cliquez sur « Générer ».</p>
-                <small>La livrée actuelle est affichée en attendant ; l’aperçu se met à jour ici sans fermer la fenêtre.</small>
+          <div className="gen-config-scroll">
+            {section === 'catalog' ? <section id="gen-catalog-panel" role="tabpanel" aria-labelledby="gen-catalog-tab" className="gen-catalog">
+              <div className="gen-catalog-tools">
+                <div className="gen-category" aria-label="Famille de livrée">{([{ id: 'all', label: 'Toutes' }, { id: 'competition', label: 'Compétition' }, { id: 'street', label: 'Tuning' }, { id: 'fantasy', label: 'Fantaisie' }] as const).map((item) => <button key={item.id} type="button" aria-pressed={category === item.id} className={category === item.id ? 'is-active' : ''} onClick={() => setCategory(item.id)}>{item.label}</button>)}</div>
+                <button type="button" className={`gen-surprise${opts.theme === 'random' ? ' is-active' : ''}`} aria-pressed={opts.theme === 'random'} onClick={() => set('theme', 'random')} title={`Choisir l’une des ${THEME_CATALOG.length} inspirations du catalogue au hasard`}><Icon name="sparkles" size={13} /> Surprenez-moi</button>
               </div>
-            )}
-            {generating && (
-              <div className="gen-preview-busy">
-                <div className="spinner" />
-                <span>Génération…</span>
-              </div>
-            )}
-            {error && !generating && <div className="gen-preview-error">{error}</div>}
-            {last && !generating && (
-              <div className="gen-preview-summary">
-                <div className="gen-summary-main">
-                  <b>{THEME_LABELS[last.summary.theme]}</b>
-                  <span className="gen-sep" />
-                  <span>{PATTERN_LABELS[last.summary.pattern]}</span>
-                  <span className="gen-sep" />
-                  <span>{FINISH_LABELS[last.summary.finish]}</span>
+              <p className="gen-family-note">{category === 'competition' ? 'Endurance, Grand Prix, rallye et stock-car : les codes de compétition sur la Stadium.' : category === 'street' ? 'Tuning des années 2000 : grands vinyles, candy, chrome et néons sur la Stadium.' : category === 'fantasy' ? 'Cristaux, nébuleuses et circuits arcaniques : une transformation imaginaire de la Stadium.' : 'Compétition, tuning des années 2000 et fantaisie, adaptés aux lignes de la Stadium.'}</p>
+              <div className="gen-variation-note"><div><strong>Un style, plusieurs livrées.</strong><p>Composition, palette et matières automatiques varient. Vos choix manuels sont conservés.</p></div><button type="button" className="btn btn-sm" onClick={() => void run(generated)} disabled={generating}><Icon name="rotate" size={13} /> Nouvelle variation</button></div>
+              <p className="gen-catalog-note">Exemples sur la Stadium · les couleurs et la composition de votre variation peuvent changer</p>
+              <div className="gen-catalog-grid">{THEME_CATALOG.filter((entry) => category === 'all' || entry.category === category).map((entry, index) => <button type="button" key={entry.id} className={`gen-livery-card${opts.theme === entry.id ? ' is-active' : ''}`} aria-pressed={opts.theme === entry.id} onClick={() => set('theme', entry.id)}>
+                <div className="gen-livery-visual"><img className="gen-livery-image" src={`${import.meta.env.BASE_URL}liveries/${entry.id}.webp?v=prism-1`} alt="" width={768} height={432} loading={index < 4 ? 'eager' : 'lazy'} decoding="async" draggable={false} /><span className="gen-card-check"><Icon name="check" size={13} /></span></div>
+                <div className="gen-livery-caption"><div className="gen-livery-title"><strong>{entry.label}</strong><span className="gen-palette-mini" aria-label="Palette indicative">{entry.colors.slice(0, 3).map((color, index) => <i key={index} style={{ background: color }} />)}</span></div><p>{entry.description}</p><div className="gen-livery-tags">{entry.tags.slice(0, 2).map((tag) => <span key={tag}>{tag}</span>)}</div></div>
+              </button>)}</div>
+              <div className="gen-direction"><div><strong>{selected?.label ?? 'Un style choisi pour vous'}</strong><p>{selected ? 'Trois compositions et plusieurs palettes pour explorer cette inspiration.' : `Un style parmi ${THEME_CATALOG.length} inspirations, puis une composition et une palette assorties.`}</p></div><button type="button" className="btn btn-sm" onClick={() => setSection('settings')}>Personnaliser <Icon name="chevronRight" size={13} /></button></div>
+            </section> : <section id="gen-settings-panel" role="tabpanel" aria-labelledby="gen-settings-tab" className="gen-settings">
+              <div className="gen-settings-intro"><span className="gen-eyebrow">Votre direction</span><h3>{THEME_LABELS[opts.theme]}</h3><p>Les réglages automatiques varient dans le style choisi. Fixez une couleur ou une matière pour la garder entre les variations.</p><p>Compositions calibrées pour les UV Stadium : vérifiez l’alignement sur les modèles personnalisés.</p></div>
+              <fieldset><legend>Palette &amp; peinture</legend>
+                <div className="gen-palette-fields">
+                  <div className="gen-color-control"><label className="gen-field"><span>Couleur principale</span><span className="gen-color-chip"><input type="color" value={opts.baseColor} disabled={opts.randomBaseHue} onChange={(event) => set('baseColor', event.target.value)} /><span>{opts.randomBaseHue ? 'Palette variable' : opts.baseColor.toUpperCase()}</span></span></label><label className="gen-field gen-inline"><input type="checkbox" checked={opts.randomBaseHue} onChange={(event) => set('randomBaseHue', event.target.checked)} /><span>Automatique</span></label></div>
+                  <div className="gen-color-control"><label className="gen-field"><span>Couleur d’accent</span><span className="gen-color-chip"><input type="color" value={opts.accentColor} disabled={opts.randomAccent} onChange={(event) => set('accentColor', event.target.value)} /><span>{opts.randomAccent ? 'Accordée au style' : opts.accentColor.toUpperCase()}</span></span></label><label className="gen-field gen-inline"><input type="checkbox" checked={opts.randomAccent} onChange={(event) => set('randomAccent', event.target.checked)} /><span>Automatique</span></label></div>
                 </div>
-                <div className="gen-summary-side">
-                  <span className="gen-swatches" aria-label="Palette">
-                    {[last.summary.palette.base, last.summary.palette.accent1, last.summary.palette.accent2].map((c, i) => (
-                      <i key={i} style={{ background: c }} title={c.toUpperCase()} />
-                    ))}
-                  </span>
-                  <span className="gen-seed">
-                    Graine {last.summary.seed}
-                    {last.variation > 0 && <small> ({last.baseSeed} + {last.variation})</small>}
-                  </span>
-                  {!seedLocked && (
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      onClick={() => set('seed', String(last.summary.seed))}
-                      title="Reporter cette graine dans le champ « Graine » pour retrouver exactement cette livrée"
-                    >
-                      Fixer
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-            <span className="gen-preview-hint">Glisser : tourner · molette : zoom</span>
+                <SelectField label="Finition de la peinture" value={opts.finish} labels={FINISH_LABELS} onChange={(value) => set('finish', value)} />
+                <p className="gen-help">{opts.theme === 'fantasy' ? 'La peinture suit ce réglage. Les décors cristallins et leurs accents lumineux conservent leurs matières.' : 'La peinture suit ce réglage. Marquages mats, décors chrome selon le style ; les pièces carbone gardent leur matière.'}</p>
+              </fieldset>
+              <fieldset><legend>Identité &amp; composition</legend>
+                {selected?.category === 'fantasy' ? <p className="gen-help">Les motifs remplacent les numéros de course et les sponsors.</p> : selected?.category === 'street' ? <p className="gen-help">Une signature d’atelier, sans numéro de course.</p> : <>
+                  <label className="gen-field gen-inline"><input type="checkbox" checked={opts.raceNumber} onChange={(event) => set('raceNumber', event.target.checked)} /><span>Afficher un numéro de course</span></label>
+                  {opts.raceNumber && <label className="gen-field"><span>Numéro de course</span><input type="text" inputMode="numeric" maxLength={3} placeholder="Automatique, ou ex. 27" value={opts.raceNumberValue} onChange={(event) => set('raceNumberValue', event.target.value.replace(/\D/g, '').slice(0, 3))} /></label>}
+                </>}
+                <label className="gen-field"><span className="gen-range-label">Densité des détails <output>{opts.complexity}%</output></span><input type="range" min={0} max={100} value={opts.complexity} onChange={(event) => set('complexity', Number(event.target.value))} /><span className="gen-range-ends"><span>Épurée</span><span>Affirmée</span></span></label>
+              </fieldset>
+              <fieldset><legend>Roues &amp; patine</legend>
+                <SelectField label="Texture des pneus" value={opts.tire} labels={TIRE_LABELS} onChange={(value) => set('tire', value)} />
+                <label className="gen-field"><span className="gen-range-label">Usure visuelle <output>{opts.wear}%</output></span><input type="range" min={0} max={100} value={opts.wear} onChange={(event) => set('wear', Number(event.target.value))} /><span className="gen-range-ends"><span>Sortie d’atelier</span><span>Retour de course</span></span></label>
+                <p className="gen-help">Patine des pneus et traces sur les surfaces exposées, visibles dans l’aperçu.</p>
+                <label className="gen-field"><span className="gen-range-label">Saleté autorisée en jeu <output>{opts.dirt}%</output></span><input type="range" min={0} max={100} value={opts.dirt} onChange={(event) => set('dirt', Number(event.target.value))} /><span className="gen-range-ends"><span>Protégée</span><span>Exposée</span></span></label>
+                <p className="gen-help">0 % protège les surfaces. 100 % laisse la saleté du jeu s’accumuler ; ce réglage n’ajoute pas de boue à la livrée.</p>
+              </fieldset>
+              <fieldset><legend>Signature lumineuse</legend>
+                <SelectField label="Éclairage" value={opts.lights} labels={LIGHT_LABELS} onChange={(value) => set('lights', value)} />
+                <p className="gen-help">{opts.theme === 'fantasy' ? 'En automatique, motifs et cristaux composent la signature lumineuse. Testez Nuit et Freinage dans l’aperçu.' : 'Freinage, repères de nuit et accents permanents selon le style. Testez Nuit et Freinage dans l’aperçu.'} L’affichage de vitesse d’origine reste actif.</p>
+              </fieldset>
+              <details className="gen-advanced"><summary><Icon name="sliders" size={14} /> Réglages avancés <Icon name="chevronDown" size={13} /></summary><div className="gen-advanced-fields">
+                <SelectField label="Harmonie des couleurs" value={opts.harmony} labels={HARMONY_LABELS} onChange={(value) => set('harmony', value)} />
+                <SelectField label="Motif · remplace la composition du style" value={opts.pattern} labels={PATTERN_LABELS} onChange={(value) => set('pattern', value)} autoLabel="Composition du style" />
+                <SelectField label="Vernis" value={opts.coat} labels={COAT_LABELS} onChange={(value) => set('coat', value)} />
+                <SelectField label="Couleur des jantes" value={opts.wheels} labels={WHEEL_LABELS} onChange={(value) => set('wheels', value)} />
+                <SelectField label="Accents des détails" value={opts.details} labels={DETAIL_LABELS} onChange={(value) => set('details', value)} />
+                <SelectField label="Couleur des accents lumineux" value={opts.neon} labels={NEON_LABELS} onChange={(value) => set('neon', value)} />
+                <label className="gen-field"><span>Graine · pour retrouver une composition</span><div className="gen-seed-row"><input type="text" inputMode="numeric" placeholder="Automatique, ou ex. 123456" value={opts.seed} onChange={(event) => set('seed', event.target.value.replace(/\D/g, '').slice(0, 12))} />{opts.seed && <button type="button" className="btn btn-sm" onClick={() => set('seed', '')}>Vider</button>}</div></label>
+                <p className="gen-help">Graine vide : variation automatique. Même graine et mêmes réglages : même livrée. « Nouvelle variation » essaie la graine suivante si elle est fixée.</p>
+              </div></details>
+            </section>}
           </div>
         </div>
-
-        <div className="modal-actions">
-          <label className="gen-field gen-inline">
-            <input
-              type="checkbox"
-              checked={!opts.clearExisting}
-              onChange={(e) => set('clearExisting', !e.target.checked)}
-            />
-            <span>Garder les calques existants</span>
-          </label>
-          <span className="spacer" />
-          <button type="button" className="btn" onClick={onCancel} disabled={generating}>
-            {generated ? 'Revenir à ma livrée' : 'Fermer'}
-          </button>
-          <button type="button" className="btn" onClick={onKeep} disabled={!generated || generating} title="Fermer en gardant la livrée générée">
-            <Icon name="check" size={14} /> Garder cette livrée
-          </button>
-          <button type="button" className="btn btn-primary" disabled={generating} onClick={() => void run()}>
-            <Icon name={generated ? 'rotate' : 'sparkles'} size={14} />{' '}
-            {generating ? 'Génération…' : generated ? 'Régénérer' : 'Générer'}
-          </button>
-        </div>
+        <section className="gen-preview" aria-label="Aperçu 3D de la livrée">
+          <div className="gen-preview-topline"><span className={`gen-preview-status${generated ? ' is-generated' : ''}`}><i />{generated ? 'Aperçu temporaire' : 'Votre livrée actuelle'}</span><span className="gen-3d-label">3D · en direct</span></div>
+          {previewEnvironment && onEnvironmentChange && <div className="gen-preview-checks" role="group" aria-label="Vérifier la livrée sous différentes lumières">
+            <label><Icon name="sun" size={13} /><select aria-label="Éclairage de l’aperçu" value={previewEnvironment.venue === 'studio' ? 'studio' : previewEnvironment.mood} onChange={(event) => {
+              const mood = LIGHTING_PRESETS.find((preset) => preset.id === event.target.value)?.id;
+              onEnvironmentChange(mood ? { venue: 'stadium', mood } : { ...previewEnvironment, venue: 'studio' });
+            }}><option value="studio">Studio · neutre</option>{LIGHTING_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}</select></label>
+            {onBrakingChange && <button type="button" aria-pressed={Boolean(braking)} onClick={() => onBrakingChange(!braking)}><i /> Freinage</button>}
+          </div>}
+          <div className="gen-preview-stage">
+            <div ref={setPreviewHost} className="gen-preview-host" data-testid="gen-preview-host" />
+            {generating && <div className="gen-preview-busy" role="status"><div className="spinner" /><span>Composition de la livrée…</span></div>}
+            {error && !generating && <div className="gen-preview-error" role="alert">{error}</div>}
+            <span className="gen-preview-hint">Glisser pour tourner · molette pour zoomer · F pour recadrer</span>
+          </div>
+          {!generated && !generating && !error && <div className="gen-preview-intro"><Icon name="sparkles" size={17} /><div><strong>Générez votre première variation.</strong><p>Explorez les résultats avant d’appliquer. Votre livrée actuelle peut être restaurée.</p></div></div>}
+          {last && !generating && <div className="gen-result" aria-live="polite">
+            <div className="gen-result-heading"><h3>{THEME_LABELS[last.summary.theme]}</h3><span className="gen-swatches" aria-label="Palette générée">{[last.summary.palette.base, last.summary.palette.accent1, last.summary.palette.accent2].map((color, index) => <i key={index} style={{ background: color }} title={color.toUpperCase()} />)}</span></div>
+            {(last.summary.composition || last.summary.paletteName) && <p className="gen-result-identity" title={last.summary.inspiration}>{[last.summary.composition, last.summary.paletteName].filter(Boolean).join(' · ')}</p>}
+            <div className="gen-result-tags"><span>{FINISH_LABELS[last.summary.finish]}</span><span>{last.summary.stockTyres ? TIRE_LABELS[last.summary.tire] : 'Textures des roues personnalisées conservées'}</span><span>{last.summary.layers} calques éditables</span></div>
+            <div className="gen-result-seed"><span>Graine {last.summary.seed}{last.variation > 0 && <small> · variation {last.variation}</small>}</span><button type="button" onClick={rememberSeed} title="Conserver cette graine dans les réglages">Conserver la graine <Icon name="lock" size={11} /></button></div>
+            {changed && <p className="gen-pending" role="status"><Icon name="info" size={13} /> Réglages modifiés : prévisualisez pour les voir.</p>}
+          </div>}
+        </section>
       </div>
+      <footer className="modal-actions gen-actions">
+        <label className="gen-field gen-inline gen-keep-layers"><input type="checkbox" checked={!opts.clearExisting} onChange={(event) => set('clearExisting', !event.target.checked)} disabled={generating} /><span>Conserver mes calques</span></label>
+        <span className="spacer" />
+        <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={generating}>{generated ? 'Revenir à ma livrée' : 'Fermer'}</button>
+        <button type="button" className={`btn${generated && !changed ? '' : ' btn-primary'}`} onClick={() => void run(generated && !changed)} disabled={generating}><Icon name={generated && !changed ? 'rotate' : 'sparkles'} size={14} />{generating ? 'Création…' : generated && !changed ? 'Nouvelle variation' : generated ? 'Prévisualiser les réglages' : 'Générer une variation'}</button>
+        {generated && <button type="button" className="btn btn-primary" onClick={onKeep} disabled={generating || changed || Boolean(error)} title={changed ? 'Prévisualisez les nouveaux réglages avant de les appliquer' : 'Garder cette livrée et revenir à l’éditeur'}><Icon name="check" size={14} /> Appliquer cette livrée</button>}
+      </footer>
     </div>
-  );
+  </div>;
 }

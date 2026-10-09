@@ -10,7 +10,7 @@ interface Props {
   onDownloadCurrent(): Promise<{ file: Blob; name: string }>;
   onRenameCurrent(id: string, name: string): void; onDeleteCurrent(id: string): void;
 }
-function ProjectDownload({ project, disabled, label }: { project: Pick<LocalProject, 'file' | 'name'>; disabled: boolean; label?: string }) {
+export function ProjectDownload({ project, disabled, label }: { project: Pick<LocalProject, 'file' | 'name'>; disabled: boolean; label?: string }) {
   const [url, setUrl] = useState('');
   useEffect(() => { const next = URL.createObjectURL(project.file); setUrl(next); return () => URL.revokeObjectURL(next); }, [project.file]);
   return <a className="btn btn-ghost btn-sm" aria-label={label || `Télécharger ${project.name}`} aria-disabled={disabled} href={disabled ? undefined : url} download={`${project.name.replace(/[\\/:*?"<>|]/g, '').trim() || 'skin'}${PROJECT_EXTENSION}`} onClick={(event) => { if (disabled) event.preventDefault(); }}><Icon name="download" size={14} />{label}</a>;
@@ -60,11 +60,11 @@ export default function ProjectLibrary(props: Props) {
   const activeCount = projects.filter((p) => !p.deletedAt).length; const trashCount = projects.length - activeCount;
   return <div className="modal-overlay" onClick={() => { if (!working) props.onClose(); }}>
     <div ref={panel} className="modal project-library" role="dialog" aria-modal="true" aria-labelledby="projects-title" onClick={(e) => e.stopPropagation()}>
-      <div className="modal-head"><div><h2 id="projects-title">Mes projets</h2><p>Retrouvez tous vos calques, images et matières pour continuer l’édition.</p></div><button type="button" className="modal-close" aria-label="Fermer les projets" disabled={working} onClick={props.onClose}><Icon name="x" /></button></div>
+      <div className="modal-head"><div><h2 id="projects-title">Mes projets sur cet appareil</h2><p>Sauvegardés dans ce navigateur. Téléchargez un projet .tmskin pour le conserver ailleurs.</p></div><button type="button" className="modal-close" aria-label="Fermer les projets" disabled={working} onClick={props.onClose}><Icon name="x" /></button></div>
       <div className="project-library-toolbar">
         <button type="button" className="btn btn-primary" disabled={working} onClick={() => void run(() => props.onSave(false))}><Icon name="save" size={15} /> Enregistrer le projet courant</button>
         <button type="button" className="btn" disabled={working} onClick={() => void run(() => props.onSave(true))}><Icon name="copy" size={15} /> Enregistrer une copie</button>
-        <button type="button" className="btn" disabled={working} onClick={() => void run(async () => { setPrepared(await props.onDownloadCurrent()); })}><Icon name="download" size={15} /> Fichier projet…</button>
+        <button type="button" className="btn" disabled={working} onClick={() => void run(async () => { setPrepared(await props.onDownloadCurrent()); })}><Icon name="download" size={15} /> Télécharger le projet .tmskin</button>
         <button type="button" className="btn" disabled={working} onClick={() => input.current?.click()}><Icon name="upload" size={15} /> Importer un projet</button>
       </div>
       {prepared && <div className="project-notice" role="status"><strong>Fichier projet prêt</strong><p>Il contient les images originales et tous les calques éditables.</p><ProjectDownload project={prepared} disabled={working} label={`Télécharger ${prepared.name}${PROJECT_EXTENSION}`} /></div>}

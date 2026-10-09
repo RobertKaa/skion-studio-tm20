@@ -17,7 +17,18 @@ export interface RGBAImage {
   data: Uint8ClampedArray; // RGBA
 }
 
-function downsample(img: RGBAImage): RGBAImage {
+export interface DDSEncodeOptions {
+  /** Color mipmaps average light in linear space; material data stays linear. */
+  colorSpace?: 'linear' | 'srgb';
+}
+const SRGB_TO_LINEAR = Float64Array.from({ length: 256 }, (_, value) => {
+  const x = value / 255; return x <= .04045 ? x / 12.92 : ((x + .055) / 1.055) ** 2.4;
+});
+const LINEAR_TO_SRGB = Uint8Array.from({ length: 8193 }, (_, value) => {
+  const x = value / 8192; return Math.round(255 * (x <= .0031308 ? x * 12.92 : 1.055 * x ** (1 / 2.4) - .055));
+});
+
+function downsample(img: RGBAImage, srgb: boolean): RGBAImage {
   const w = Math.max(1, img.width >> 1);
   const h = Math.max(1, img.height >> 1);
   const out = new Uint8ClampedArray(w * h * 4);
@@ -32,18 +43,20 @@ function downsample(img: RGBAImage): RGBAImage {
         const b = img.data[(sy * img.width + sx1) * 4 + c];
         const cc = img.data[(sy1 * img.width + sx) * 4 + c];
         const d = img.data[(sy1 * img.width + sx1) * 4 + c];
-        out[(y * w + x) * 4 + c] = (a + b + cc + d + 2) >> 2;
+        out[(y * w + x) * 4 + c] = srgb && c < 3
+          ? LINEAR_TO_SRGB[Math.round((SRGB_TO_LINEAR[a] + SRGB_TO_LINEAR[b] + SRGB_TO_LINEAR[cc] + SRGB_TO_LINEAR[d]) * 2048)]
+          : (a + b + cc + d + 2) >> 2;
       }
     }
   }
   return { width: w, height: h, data: out };
 }
 
-function mipChain(img: RGBAImage): RGBAImage[] {
+function mipChain(img: RGBAImage, srgb: boolean): RGBAImage[] {
   const chain = [img];
   let cur = img;
   while (cur.width > 1 || cur.height > 1) {
-    cur = downsample(cur);
+    cur = downsample(cur, srgb);
     chain.push(cur);
   }
   return chain;
@@ -79,17 +92,94 @@ function from565(c: number): [number, number, number] {
   return [(r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2)];
 }
 
-function encodeBlockBC1(block: Uint8Array, out: DataView, offset: number) {
-  // Endpoints : min/max projetés sur l'axe de plus grande variance (approx. luminance-fit)
+interface BC1Fit {
+  palette: Int16Array;
+  c0: number; c1: number; bits: number; error: number;
+  best0: number; best1: number; bestBits: number; bestError: number;
+}
+
+function nearest565(r: number, g: number, b: number): number {
+  return (Math.round(Math.max(0, Math.min(255, r)) * 31 / 255) << 11)
+    | (Math.round(Math.max(0, Math.min(255, g)) * 63 / 255) << 5)
+    | Math.round(Math.max(0, Math.min(255, b)) * 31 / 255);
+}
+
+/** Score the actual decoded palette, rather than its unquantized endpoints. */
+function fitBC1Candidate(block: Uint8Array, c0: number, c1: number, fit: BC1Fit) {
+  if (c0 < c1) [c0, c1] = [c1, c0];
+  const p = fit.palette;
+  const a = from565(c0), b = from565(c1);
+  for (let k = 0; k < 3; k++) {
+    p[k] = a[k]; p[3 + k] = b[k];
+    p[6 + k] = Math.round((2 * a[k] + b[k]) / 3);
+    p[9 + k] = Math.round((a[k] + 2 * b[k]) / 3);
+  }
+  let bits = 0, error = 0;
+  for (let i = 0; i < 16; i++) {
+    let index = 0, distance = Infinity;
+    for (let j = 0; j < (c0 === c1 ? 1 : 4); j++) {
+      const r = block[i * 4] - p[j * 3], g = block[i * 4 + 1] - p[j * 3 + 1], b = block[i * 4 + 2] - p[j * 3 + 2];
+      const d = r * r + g * g + b * b;
+      if (d < distance) { distance = d; index = j; }
+    }
+    bits |= index << (i * 2); error += distance;
+  }
+  fit.c0 = c0; fit.c1 = c1; fit.bits = bits >>> 0; fit.error = error;
+  if (error < fit.bestError) { fit.best0 = c0; fit.best1 = c1; fit.bestBits = bits >>> 0; fit.bestError = error; }
+}
+
+/** Optimize the two reference colors against the assigned clusters (bounded). */
+function refineBC1(block: Uint8Array, fit: BC1Fit) {
+  for (let iteration = 0; iteration < 4 && fit.error > 0; iteration++) {
+    let aa = 0, ab = 0, bb = 0, ar = 0, ag = 0, az = 0, br = 0, bg = 0, bz = 0;
+    for (let i = 0; i < 16; i++) {
+      const index = (fit.bits >>> (i * 2)) & 3;
+      const a = index === 0 ? 1 : index === 1 ? 0 : index === 2 ? 2 / 3 : 1 / 3, b = 1 - a;
+      aa += a * a; ab += a * b; bb += b * b;
+      ar += a * block[i * 4]; ag += a * block[i * 4 + 1]; az += a * block[i * 4 + 2];
+      br += b * block[i * 4]; bg += b * block[i * 4 + 1]; bz += b * block[i * 4 + 2];
+    }
+    const determinant = aa * bb - ab * ab;
+    if (determinant < 1e-8) break;
+    const c0 = nearest565((ar * bb - br * ab) / determinant, (ag * bb - bg * ab) / determinant, (az * bb - bz * ab) / determinant);
+    const c1 = nearest565((br * aa - ar * ab) / determinant, (bg * aa - ag * ab) / determinant, (bz * aa - az * ab) / determinant);
+    if (Math.max(c0, c1) === fit.c0 && Math.min(c0, c1) === fit.c1) break;
+    const previousError = fit.error;
+    fitBC1Candidate(block, c0, c1, fit);
+    if (fit.error >= previousError) break;
+  }
+}
+
+/** Single-color blocks can use an interpolated color, avoiding an RGB565 bias. */
+function singleColorTable(bits: number) {
+  const count = 1 << bits, expand = (x: number) => bits === 5 ? (x << 3) | (x >> 2) : (x << 2) | (x >> 4);
+  const table = new Uint16Array(256);
+  for (let value = 0; value < 256; value++) {
+    let error = Infinity;
+    for (let a = 0; a < count; a++) for (let b = 0; b < count; b++) {
+      const distance = Math.abs(value - Math.round((2 * expand(a) + expand(b)) / 3));
+      if (distance < error) { error = distance; table[value] = (a << bits) | b; }
+    }
+  }
+  return table;
+}
+const SINGLE_5 = singleColorTable(5), SINGLE_6 = singleColorTable(6);
+
+function encodeBlockBC1(block: Uint8Array, out: DataView, offset: number, fit: BC1Fit) {
+  // Keep the old luminance candidate as a quality floor, then fit the RGB axis.
   let minV = Infinity;
   let maxV = -Infinity;
   let minI = 0;
   let maxI = 0;
+  let sr = 0, sg = 0, sb = 0, lowR = 255, lowG = 255, lowB = 255, highR = 0, highG = 0, highB = 0;
   for (let i = 0; i < 16; i++) {
     const r = block[i * 4];
     const g = block[i * 4 + 1];
     const b = block[i * 4 + 2];
     const v = r * 0.299 + g * 0.587 + b * 0.114;
+    sr += r; sg += g; sb += b;
+    lowR = Math.min(lowR, r); lowG = Math.min(lowG, g); lowB = Math.min(lowB, b);
+    highR = Math.max(highR, r); highG = Math.max(highG, g); highB = Math.max(highB, b);
     if (v < minV) {
       minV = v;
       minI = i;
@@ -99,50 +189,44 @@ function encodeBlockBC1(block: Uint8Array, out: DataView, offset: number) {
       maxI = i;
     }
   }
-  let c0 = to565(block[maxI * 4], block[maxI * 4 + 1], block[maxI * 4 + 2]);
-  let c1 = to565(block[minI * 4], block[minI * 4 + 1], block[minI * 4 + 2]);
-  if (c0 === c1) {
-    out.setUint16(offset, c0, true);
-    out.setUint16(offset + 2, c1, true);
-    out.setUint32(offset + 4, 0, true);
+  fit.bestError = Infinity;
+  if (lowR === highR && lowG === highG && lowB === highB) {
+    const r = SINGLE_5[lowR], g = SINGLE_6[lowG], b = SINGLE_5[lowB];
+    const c0 = ((r >> 5) << 11) | ((g >> 6) << 5) | (b >> 5);
+    const c1 = ((r & 31) << 11) | ((g & 63) << 5) | (b & 31);
+    fitBC1Candidate(block, c0, c1, fit);
+    const nearest = nearest565(lowR, lowG, lowB);
+    fitBC1Candidate(block, nearest, nearest, fit);
+    out.setUint16(offset, fit.best0, true); out.setUint16(offset + 2, fit.best1, true); out.setUint32(offset + 4, fit.bestBits, true);
     return;
   }
-  // c0 > c1 => mode 4 couleurs opaque
-  if (c0 < c1) {
-    const t = c0;
-    c0 = c1;
-    c1 = t;
-  }
-  const [r0, g0, b0] = from565(c0);
-  const [r1, g1, b1] = from565(c1);
-  const palette = [
-    [r0, g0, b0],
-    [r1, g1, b1],
-    [(2 * r0 + r1 + 1) / 3, (2 * g0 + g1 + 1) / 3, (2 * b0 + b1 + 1) / 3],
-    [(r0 + 2 * r1 + 1) / 3, (g0 + 2 * g1 + 1) / 3, (b0 + 2 * b1 + 1) / 3],
-  ];
-  let indices = 0;
+  fitBC1Candidate(block, to565(block[maxI * 4], block[maxI * 4 + 1], block[maxI * 4 + 2]), to565(block[minI * 4], block[minI * 4 + 1], block[minI * 4 + 2]), fit);
+  refineBC1(block, fit);
+  fitBC1Candidate(block, nearest565(block[maxI * 4], block[maxI * 4 + 1], block[maxI * 4 + 2]), nearest565(block[minI * 4], block[minI * 4 + 1], block[minI * 4 + 2]), fit);
+  refineBC1(block, fit);
+
+  // Principal RGB direction also handles differently colored, equal-luma pixels.
+  const mr = sr / 16, mg = sg / 16, mb = sb / 16;
+  let rr = 0, rg = 0, rb = 0, gg = 0, gb = 0, bb = 0;
   for (let i = 0; i < 16; i++) {
-    const r = block[i * 4];
-    const g = block[i * 4 + 1];
-    const b = block[i * 4 + 2];
-    let best = 0;
-    let bestD = Infinity;
-    for (let p = 0; p < 4; p++) {
-      const dr = r - palette[p][0];
-      const dg = g - palette[p][1];
-      const db = b - palette[p][2];
-      const d = dr * dr + dg * dg + db * db;
-      if (d < bestD) {
-        bestD = d;
-        best = p;
-      }
-    }
-    indices |= best << (i * 2);
+    const r = block[i * 4] - mr, g = block[i * 4 + 1] - mg, b = block[i * 4 + 2] - mb;
+    rr += r * r; rg += r * g; rb += r * b; gg += g * g; gb += g * b; bb += b * b;
   }
-  out.setUint16(offset, c0, true);
-  out.setUint16(offset + 2, c1, true);
-  out.setUint32(offset + 4, indices >>> 0, true);
+  let ax = rr >= gg && rr >= bb ? 1 : 0, ay = gg > rr && gg >= bb ? 1 : 0, az = bb > rr && bb > gg ? 1 : 0;
+  for (let iteration = 0; iteration < 6; iteration++) {
+    const x = rr * ax + rg * ay + rb * az, y = rg * ax + gg * ay + gb * az, z = rb * ax + gb * ay + bb * az;
+    const length = Math.hypot(x, y, z);
+    if (length < 1e-8) break;
+    ax = x / length; ay = y / length; az = z / length;
+  }
+  minV = Infinity; maxV = -Infinity;
+  for (let i = 0; i < 16; i++) {
+    const v = block[i * 4] * ax + block[i * 4 + 1] * ay + block[i * 4 + 2] * az;
+    if (v < minV) { minV = v; minI = i; } if (v > maxV) { maxV = v; maxI = i; }
+  }
+  fitBC1Candidate(block, nearest565(block[maxI * 4], block[maxI * 4 + 1], block[maxI * 4 + 2]), nearest565(block[minI * 4], block[minI * 4 + 1], block[minI * 4 + 2]), fit);
+  refineBC1(block, fit);
+  out.setUint16(offset, fit.best0, true); out.setUint16(offset + 2, fit.best1, true); out.setUint32(offset + 4, fit.bestBits, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -224,9 +308,9 @@ const FORMAT_INFO: Record<BCFormat, { fourcc: string; blockBytes: number }> = {
 };
 
 /** Encode une image RGBA en DDS compressé avec chaîne de mipmaps complète. */
-export function encodeDDS(img: RGBAImage, format: BCFormat): ArrayBuffer {
+export function encodeDDS(img: RGBAImage, format: BCFormat, options: DDSEncodeOptions = {}): ArrayBuffer {
   const info = FORMAT_INFO[format];
-  const mips = mipChain(img);
+  const mips = mipChain(img, options.colorSpace === 'srgb' && (format === 'BC1' || format === 'BC3'));
   let dataSize = 0;
   for (const m of mips) {
     dataSize +=
@@ -260,6 +344,7 @@ export function encodeDDS(img: RGBAImage, format: BCFormat): ArrayBuffer {
   dv.setUint32(108, DDSCAPS_COMPLEX | DDSCAPS_TEXTURE | DDSCAPS_MIPMAP, true);
 
   const block = new Uint8Array(64);
+  const colorFit: BC1Fit = { palette: new Int16Array(12), c0: 0, c1: 0, bits: 0, error: 0, best0: 0, best1: 0, bestBits: 0, bestError: Infinity };
   let offset = 128;
   for (const m of mips) {
     const bw = Math.max(1, Math.ceil(m.width / 4));
@@ -268,12 +353,12 @@ export function encodeDDS(img: RGBAImage, format: BCFormat): ArrayBuffer {
       for (let bx = 0; bx < bw; bx++) {
         getBlock(m, bx, by, block);
         if (format === 'BC1') {
-          encodeBlockBC1(block, dv, offset);
+          encodeBlockBC1(block, dv, offset, colorFit);
           offset += 8;
         } else if (format === 'BC3') {
           // DXT5 : bloc alpha interpolé (canal 3, 8 octets) + bloc couleur BC1 (8 octets).
           encodeBlockBC4(block, 3, dv, offset);
-          encodeBlockBC1(block, dv, offset + 8);
+          encodeBlockBC1(block, dv, offset + 8, colorFit);
           offset += 16;
         } else if (format === 'BC4') {
           encodeBlockBC4(block, 0, dv, offset); // canal rouge (image en niveaux de gris)

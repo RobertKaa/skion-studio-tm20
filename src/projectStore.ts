@@ -11,7 +11,7 @@ function db() {
     request.onupgradeneeded = () => request.result.createObjectStore('projects', { keyPath: 'id' });
     request.onsuccess = () => { request.result.onversionchange = () => { request.result.close(); database = null; }; resolve(request.result); };
     request.onerror = () => { database = null; reject(request.error); };
-    request.onblocked = () => { database = null; reject(new Error('Fermez les autres onglets de Skin Studio puis réessayez.')); };
+    request.onblocked = () => { database = null; reject(new Error('Fermez les autres onglets de Skion Studio puis réessayez.')); };
   });
   return database;
 }

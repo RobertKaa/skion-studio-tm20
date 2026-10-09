@@ -37,13 +37,17 @@ import {
 import type { EditorCore } from './editor/EditorCore';
 import {
   MAP_BY_ID,
-  DIRT_MASK_IDS,
   SKIN_REGIONS,
   getRegionOrientation,
   type IllumRole,
   type UVRegion,
+  type MapId,
 } from './maps';
 import { UV_GUIDE_ISLANDS } from './uvGuideData';
+import { WHEEL_UV_GUIDE } from './wheelUvGuide';
+import { LIVERY_COMPOSITIONS, LIVERY_PALETTES } from './liveryDirections';
+import { projectSurfacePolygons } from './generatorSurface';
+import { tribalMotif, flameMotif, tornMotif, transformMotif, ribbon, type MotifPolygon } from './generatorMotifs';
 
 export type Harmony = 'auto' | 'mono' | 'complementary' | 'analogous' | 'triadic';
 export type Pattern =
@@ -58,7 +62,7 @@ export type Pattern =
   | 'splatter'
   | 'gradient'
   | 'solid';
-export type Finish = 'auto' | 'matte' | 'gloss' | 'metallic' | 'chrome';
+export type Finish = 'auto' | 'matte' | 'satin' | 'gloss' | 'metallic' | 'chrome';
 export type Coat = 'auto' | 'none' | 'light' | 'full';
 export type WheelStyle = 'auto' | 'dark' | 'accent' | 'base';
 export type DetailStyle = 'auto' | 'dark' | 'accent';
@@ -66,22 +70,11 @@ export type DetailStyle = 'auto' | 'dark' | 'accent';
 export type Neon = 'auto' | 'none' | 'accent' | 'base';
 
 /** Thème / livrée : jeu cohérent de couleurs, motif, finition et stratégie matériau/néon. */
-export type Theme =
-  | 'random' // 🎲 pioche une livrée soignée au hasard
-  | 'racingGT'
-  | 'retro'
-  | 'arrow'
-  | 'wave'
-  | 'chrome'
-  | 'stealth'
-  | 'cyber'
-  | 'rally'
-  | 'drift'
-  | 'esport'
-  | 'zevent' // hommage ZEvent 2026 (palette, lettrage, Z, cœurs — pas le logo officiel)
-  | 'full'; // aléatoire complet (bruit)
+export type Theme = 'random' | 'endurance' | 'heritage' | 'touring' | 'rallyRaid' | 'trackday' | 'streetArt' | 'drift' | 'nightRun' | 'fantasy';
+export type Tire = 'auto' | 'slick' | 'semiSlick' | 'wet' | 'rally';
+export type Lights = 'auto' | 'brake' | 'endurance' | 'street' | 'none';
 
-type CuratedTheme = Exclude<Theme, 'random' | 'full'>;
+type CuratedTheme = Exclude<Theme, 'random'>;
 
 export interface GeneratorOptions {
   theme: Theme;
@@ -103,6 +96,9 @@ export interface GeneratorOptions {
   neonRole: IllumRole;
   seed: string; // vide = graine aléatoire
   clearExisting: boolean;
+  tire: Tire;
+  wear: number;
+  lights: Lights;
 }
 
 export const DEFAULT_OPTIONS: GeneratorOptions = {
@@ -118,13 +114,16 @@ export const DEFAULT_OPTIONS: GeneratorOptions = {
   raceNumberValue: '',
   finish: 'auto',
   coat: 'auto',
-  dirt: 0,
+  dirt: 25,
   wheels: 'auto',
   details: 'auto',
   neon: 'auto',
-  neonRole: 'always',
+  neonRole: 'brake',
   seed: '',
   clearExisting: true,
+  tire: 'auto',
+  wear: 8,
+  lights: 'auto',
 };
 
 export const PATTERN_LABELS: Record<Exclude<Pattern, 'auto'>, string> = {
@@ -142,6 +141,7 @@ export const PATTERN_LABELS: Record<Exclude<Pattern, 'auto'>, string> = {
 
 export const FINISH_LABELS: Record<Exclude<Finish, 'auto'>, string> = {
   matte: 'Mat',
+  satin: 'Satiné',
   gloss: 'Brillant',
   metallic: 'Métallisé',
   chrome: 'Chrome',
@@ -154,35 +154,46 @@ export const NEON_LABELS: Record<Exclude<Neon, 'auto'>, string> = {
 };
 
 export const THEME_LABELS: Record<Theme, string> = {
-  random: 'Livrée aléatoire',
-  racingGT: 'Racing GT',
-  retro: 'Rétro bicolore',
-  arrow: 'Chevrons racing',
-  wave: 'Vague / swoosh',
-  chrome: 'Chrome / Métal',
-  stealth: 'Furtif mat',
-  cyber: 'Cyber néon',
-  rally: 'Rallye / Camo',
-  drift: 'Drift show',
-  esport: 'Esport digital',
-  zevent: 'ZEvent 2026',
-  full: 'Aléatoire complet',
+  random: 'Surprenez-moi',
+  endurance: 'Endurance Prototype',
+  heritage: 'Rallye 90',
+  touring: 'Grand Prix',
+  rallyRaid: 'Rallye Works',
+  trackday: 'Stock Car',
+  streetArt: 'Tuning Tribal',
+  drift: 'Tuning Showcar',
+  nightRun: 'Tuning Performance',
+  fantasy: 'Prisme vivant',
 };
 
 export const THEME_DESCRIPTIONS: Record<CuratedTheme, string> = {
-  racingGT: 'Doubles bandes du nez à l’arrière, numéro sur cocarde capot + flancs, laque brillante.',
-  retro: 'Bas de caisse contrasté, large bande centrale, cocarde rétro façon endurance.',
-  arrow: 'Chevrons pointés vers l’avant sur capot, flancs et arrière, numéro sur le nez.',
-  wave: 'Grandes vagues fluides le long des flancs et du capot, numéros latéraux.',
-  chrome: 'Swoosh chromés sur carrosserie métallisée, jantes chrome, sans numéro.',
-  stealth: 'Noir mat, chevrons brillants ton sur ton, numéro laqué discret.',
-  cyber: 'Carrosserie sombre satinée, nid d’abeille lumineux, néon sur les détails.',
-  rally: 'Camouflage mat, tons terreux, plaques de numéro blanches.',
-  drift: 'Éclaboussures vives, jantes accent, numéros latéraux XXL.',
-  esport: 'Sombre digital, panneaux géométriques vifs et néon sur les détails.',
-  zevent:
-    'Hommage ZEvent 2026 (T-shirt officiel + merch) : noir, vert sérigraphie, ZEVENT outline, swooshes, 10e / dernière édition, pictos 22 assos. Pas une copie du logo.',
+  endurance: 'Bandes des prototypes des 24 heures, palettes Gulf ou tricolores, repères de classe et carbone.',
+  heritage: 'Comètes bleu et or, rubans vert et rouge ou blocs Groupe B : les codes des rallyes des années 90.',
+  touring: 'Papaye et carbone, rouge course ou argent et turquoise : des panneaux dessinés pour une monoplace.',
+  rallyRaid: 'Découpes de carrosserie, plaques de spéciale, partenaires et protections : une équipe de rallye usine.',
+  trackday: 'Capot publicitaire, grands aplats, numéros détourés et flammes : les codes du stock-car américain.',
+  streetArt: 'Tuning années 2000 : grands tribaux, dragon mécanique, peinture candy et capot carbone.',
+  drift: 'Déchirures chromées, flammes et vagues bicolores, jantes brillantes et néons : l’esprit des showcars.',
+  nightRun: 'Bandes agressives, griffures, sponsors de préparateur et carbone : une préparation japonaise de rue.',
+  fantasy: 'Cristaux, nébuleuses et circuits arcanes. Matières minérales, veines lumineuses et réactions au freinage.',
 };
+
+export const THEME_CATALOG = (['endurance', 'heritage', 'touring', 'rallyRaid', 'trackday', 'streetArt', 'drift', 'nightRun', 'fantasy'] as const).map((id, index) => ({
+  id, label: THEME_LABELS[id], description: THEME_DESCRIPTIONS[id], category: index < 5 ? 'competition' as const : id==='fantasy' ? 'fantasy' as const : 'street' as const,
+  colors: [
+    ['#71bed7', '#f87518', '#f6f0db'], ['#123c94', '#edc847', '#f4f1e4'],
+    ['#f47a18', '#192128', '#e8edf0'], ['#f1f1e9', '#d92430', '#182025'],
+    ['#133a82', '#ffcc20', '#f7f0db'], ['#8bdb13', '#433a97', '#e4e8ec'],
+    ['#c31930', '#ccd7de', '#262232'], ['#b7c2ce', '#d62631', '#19232b'],
+    ['#302453', '#2cebdd', '#de7fe8'],
+  ][index],
+  tags: [
+    ['24 heures', 'Carbone', 'Slicks'], ['Années 90', 'Or', 'Gravier'], ['F1', 'Papaye', 'Carbone'],
+    ['Rallye usine', 'Plaques', 'Gravier'], ['NASCAR', 'Sponsors', 'Slicks'], ['Tribal', 'Candy', 'Carbone'],
+    ['Flammes', 'Chrome', 'Néons'], ['JDM', 'Vinyles', 'Carbone'],
+    ['Minéral', 'Lumière', 'Fantaisie'],
+  ][index],
+}));
 
 // ---------------------------------------------------------------- PRNG seedé
 
@@ -307,32 +318,10 @@ function buildPalette(rng: Rng, opts: GeneratorOptions, spec: PaletteSpec): Pale
   };
 }
 
-/**
- * Palette hommage merch 2026 : noir coton + vert sérigraphie boutique
- * (`#00BD00` / lime T-shirt ~H118), blanc outline. La graine ne décale
- * la teinte que de quelques degrés ; l'utilisateur peut forcer base / accent.
- */
-function zeventPalette(rng: Rng, opts: GeneratorOptions): Palette {
-  const j = rand(rng, -5, 5);
-  const limeH = 118 + j;
-  const baseH = 126 + j * 0.3;
-  const base = opts.randomBaseHue ? hsl(baseH, 28, 6) : opts.baseColor;
-  const accent1 = opts.randomAccent ? hsl(limeH, 86, 44) : opts.accentColor;
-  const accent2 = hsl(limeH - 4, 56, 24);
-  return {
-    base,
-    accent1,
-    accent2,
-    dark: hsl(baseH, 22, 4),
-    light: hsl(limeH, 6, 95),
-    tones: [accent1, accent2, base, hsl(limeH, 48, 16)],
-  };
-}
-
 // ---------------------------------------------------------------- matériaux
 
 /** Familles de matériau, converties en canaux Skin_R (R = rugosité, G = métal). */
-export type Material = 'gloss' | 'satin' | 'matte' | 'metallic' | 'chrome' | 'carbon';
+export type Material = 'gloss' | 'satin' | 'matte' | 'metallic' | 'chrome' | 'carbon' | 'vinyl';
 
 const MATERIAL_RG: Record<Material, [number, number]> = {
   gloss: [40, 10], // laque brillante (peu rugueux, non métal)
@@ -340,7 +329,8 @@ const MATERIAL_RG: Record<Material, [number, number]> = {
   matte: [205, 8], // mat
   metallic: [80, 195], // peinture métallisée
   chrome: [18, 250], // chrome miroir
-  carbon: [130, 150], // carbone (rugosité moyenne, semi-métal)
+  carbon: [130, 8], // carbone (rugosité moyenne, semi-métal)
+  vinyl: [180, 0], // adhésif mat : diélectrique, indépendant de la peinture
 };
 
 /** Vernis (Skin_CoatR, gris) associé à chaque matériau : les surfaces brillantes reçoivent un vernis fort. */
@@ -351,6 +341,7 @@ const MATERIAL_VARNISH: Record<Material, number> = {
   metallic: 205,
   chrome: 255,
   carbon: 80,
+  vinyl: 0,
 };
 
 const materialColor = (m: Material): string => {
@@ -360,13 +351,14 @@ const materialColor = (m: Material): string => {
 
 const finishToMaterial: Record<Exclude<Finish, 'auto'>, Material> = {
   matte: 'matte',
+  satin: 'satin',
   gloss: 'gloss',
   metallic: 'metallic',
   chrome: 'chrome',
 };
 
 /** Rôle d'une forme du dessin : pilote le matériau (Skin_R) et le vernis (Skin_CoatR). */
-type ShapeRole = 'body' | 'stripe' | 'accent' | 'number' | 'panel' | 'trim' | 'deco';
+type ShapeRole = 'body' | 'stripe' | 'accent' | 'number' | 'panel' | 'trim' | 'deco' | 'decal';
 
 interface MaterialScheme {
   body: Material;
@@ -376,14 +368,15 @@ interface MaterialScheme {
   panel: Material;
   trim: Material;
   deco: Material;
+  decal: Material;
 }
 
 // ---------------------------------------------------------------- thèmes
 
 /** Emplacements possibles du numéro de course. */
-type NumberPlacement = 'nose' | 'hood' | 'flanks';
+type NumberPlacement = 'nose' | 'hood' | 'roof' | 'flanks';
 /** Couleur des disques de jante (îlots archL / archR de la carrosserie). */
-type RimStyle = 'none' | 'dark' | 'accent' | 'light' | 'base';
+type RimStyle = 'none' | 'dark' | 'accent' | 'light' | 'base' | 'bronze' | 'chrome';
 
 interface ThemeSpec {
   pattern: Exclude<Pattern, 'auto'>;
@@ -404,340 +397,36 @@ interface ThemeSpec {
   rims: RimStyle;
 }
 
-const THEMES: Record<CuratedTheme, ThemeSpec> = {
-  // Racing GT : doubles bandes, cocarde capot, numéros flancs, laque.
-  racingGT: {
-    pattern: 'stripes',
-    finish: 'gloss',
-    coat: 'full',
-    palette: { harmony: 'complementary', sat: [55, 90], light: [38, 58] },
-    materials: {
-      body: 'gloss',
-      stripe: 'gloss',
-      accent: 'matte',
-      number: 'matte',
-      panel: 'gloss',
-      trim: 'chrome',
-      deco: 'gloss',
-    },
-    details: 'dark',
-    detailMaterial: 'carbon',
-    wheels: 'dark',
-    wheelMaterial: 'chrome',
-    neon: 'none',
-    raceNumber: true,
-    numbers: ['nose', 'hood', 'flanks'],
-    plate: 'roundel',
-    rims: 'dark',
-  },
-  // Rétro bicolore : bas de caisse sombre, large bande centrale, cocarde.
-  retro: {
-    pattern: 'split',
-    finish: 'gloss',
-    coat: 'full',
-    palette: { harmony: 'complementary', sat: [45, 80], light: [55, 72] },
-    materials: {
-      body: 'gloss',
-      stripe: 'gloss',
-      accent: 'gloss',
-      number: 'matte',
-      panel: 'satin',
-      trim: 'chrome',
-      deco: 'gloss',
-    },
-    details: 'accent',
-    detailMaterial: 'gloss',
-    wheels: 'base',
-    wheelMaterial: 'metallic',
-    neon: 'none',
-    raceNumber: true,
-    numbers: ['nose', 'hood'],
-    plate: 'roundel',
-    rims: 'light',
-  },
-  // Chevrons racing : chevrons vifs vers l'avant, numéro sur le nez.
-  arrow: {
-    pattern: 'chevrons',
-    finish: 'gloss',
-    coat: 'full',
-    palette: { harmony: 'triadic', sat: [60, 92], light: [36, 56] },
-    materials: {
-      body: 'gloss',
-      stripe: 'gloss',
-      accent: 'gloss',
-      number: 'matte',
-      panel: 'gloss',
-      trim: 'chrome',
-      deco: 'gloss',
-    },
-    details: 'dark',
-    detailMaterial: 'carbon',
-    wheels: 'dark',
-    wheelMaterial: 'chrome',
-    neon: 'none',
-    raceNumber: true,
-    numbers: ['nose', 'hood'],
-    plate: 'roundel',
-    rims: 'dark',
-  },
-  // Vague / swoosh : grandes courbes fluides, numéros latéraux.
-  wave: {
-    pattern: 'swoosh',
-    finish: 'gloss',
-    coat: 'full',
-    palette: { harmony: 'analogous', sat: [55, 90], light: [40, 62] },
-    materials: {
-      body: 'gloss',
-      stripe: 'gloss',
-      accent: 'metallic',
-      number: 'matte',
-      panel: 'gloss',
-      trim: 'chrome',
-      deco: 'gloss',
-    },
-    details: 'dark',
-    detailMaterial: 'satin',
-    wheels: 'base',
-    wheelMaterial: 'metallic',
-    neon: 'none',
-    raceNumber: true,
-    numbers: ['flanks', 'nose'],
-    plate: 'none',
-    rims: 'base',
-  },
-  // Chrome / Métal : swoosh chromés, tons argentés, jantes chrome.
-  chrome: {
-    pattern: 'swoosh',
-    finish: 'metallic',
-    coat: 'full',
-    palette: { harmony: 'analogous', sat: [8, 30], light: [55, 78] },
-    materials: {
-      body: 'metallic',
-      stripe: 'chrome',
-      accent: 'metallic',
-      number: 'matte',
-      panel: 'chrome',
-      trim: 'chrome',
-      deco: 'metallic',
-    },
-    details: 'accent',
-    detailMaterial: 'chrome',
-    wheels: 'accent',
-    wheelMaterial: 'chrome',
-    neon: 'none',
-    raceNumber: false,
-    numbers: ['flanks'],
-    plate: 'none',
-    rims: 'accent',
-  },
-  // Furtif mat : noir mat, chevrons brillants ton sur ton, numéro laqué.
-  stealth: {
-    pattern: 'chevrons',
-    finish: 'matte',
-    coat: 'none',
-    palette: { harmony: 'mono', sat: [4, 22], light: [6, 16] },
-    materials: {
-      body: 'matte',
-      stripe: 'gloss',
-      accent: 'gloss',
-      number: 'gloss',
-      panel: 'satin',
-      trim: 'satin',
-      deco: 'gloss',
-    },
-    details: 'dark',
-    detailMaterial: 'matte',
-    wheels: 'dark',
-    wheelMaterial: 'satin',
-    neon: 'none',
-    raceNumber: true,
-    numbers: ['nose'],
-    plate: 'none',
-    rims: 'dark',
-  },
-  // Cyber néon : carrosserie sombre satinée, nid d'abeille, néon sur les détails.
-  cyber: {
-    pattern: 'hex',
-    finish: 'gloss',
-    coat: 'light',
-    palette: { harmony: 'triadic', sat: [40, 75], light: [10, 24] },
-    materials: {
-      body: 'satin',
-      stripe: 'gloss',
-      accent: 'gloss',
-      number: 'satin',
-      panel: 'gloss',
-      trim: 'chrome',
-      deco: 'gloss',
-    },
-    details: 'dark',
-    detailMaterial: 'gloss',
-    wheels: 'accent',
-    wheelMaterial: 'gloss',
-    neon: 'accent',
-    raceNumber: true,
-    numbers: ['flanks'],
-    plate: 'none',
-    rims: 'accent',
-  },
-  // Rallye / Camo : camouflage mat, tons terreux, plaques de numéro.
-  rally: {
-    pattern: 'camo',
-    finish: 'matte',
-    coat: 'light',
-    palette: { harmony: 'analogous', sat: [30, 62], light: [28, 52] },
-    materials: {
-      body: 'matte',
-      stripe: 'satin',
-      accent: 'matte',
-      number: 'matte',
-      panel: 'matte',
-      trim: 'satin',
-      deco: 'matte',
-    },
-    details: 'dark',
-    detailMaterial: 'matte',
-    wheels: 'dark',
-    wheelMaterial: 'satin',
-    neon: 'none',
-    raceNumber: true,
-    numbers: ['nose', 'hood', 'flanks'],
-    plate: 'plate',
-    rims: 'dark',
-  },
-  // Drift show : éclaboussures, jantes accent, numéros XXL.
-  drift: {
-    pattern: 'splatter',
-    finish: 'gloss',
-    coat: 'full',
-    palette: { harmony: 'triadic', sat: [70, 95], light: [32, 52] },
-    materials: {
-      body: 'gloss',
-      stripe: 'gloss',
-      accent: 'gloss',
-      number: 'matte',
-      panel: 'gloss',
-      trim: 'chrome',
-      deco: 'gloss',
-    },
-    details: 'accent',
-    detailMaterial: 'gloss',
-    wheels: 'accent',
-    wheelMaterial: 'chrome',
-    neon: 'none',
-    raceNumber: true,
-    numbers: ['flanks', 'hood'],
-    plate: 'none',
-    rims: 'accent',
-  },
-  // Esport digital : sombre, géométrie vive, néon sur les détails.
-  esport: {
-    pattern: 'geo',
-    finish: 'gloss',
-    coat: 'light',
-    palette: { harmony: 'triadic', sat: [55, 85], light: [8, 22] },
-    materials: {
-      body: 'satin',
-      stripe: 'gloss',
-      accent: 'gloss',
-      number: 'gloss',
-      panel: 'gloss',
-      trim: 'chrome',
-      deco: 'gloss',
-    },
-    details: 'dark',
-    detailMaterial: 'gloss',
-    wheels: 'accent',
-    wheelMaterial: 'gloss',
-    neon: 'accent',
-    raceNumber: true,
-    numbers: ['hood', 'flanks'],
-    plate: 'none',
-    rims: 'accent',
-  },
-  // Hommage ZEvent 2026 : coton noir mat, graphismes lime/blanc laqués, néon ciblé.
-  zevent: {
-    pattern: 'stripes',
-    finish: 'gloss',
-    coat: 'none',
-    palette: { harmony: 'analogous', sat: [50, 80], light: [7, 14] },
-    materials: {
-      body: 'satin',
-      stripe: 'gloss',
-      accent: 'gloss',
-      number: 'gloss',
-      panel: 'satin',
-      trim: 'chrome',
-      deco: 'gloss',
-    },
-    details: 'dark',
-    detailMaterial: 'gloss',
-    wheels: 'accent',
-    wheelMaterial: 'gloss',
-    neon: 'accent',
-    raceNumber: false,
-    numbers: [],
-    plate: 'none',
-    rims: 'accent',
-  },
-};
-
-/** Construit un thème complètement aléatoire (ancien comportement « bruit »). */
-function randomThemeSpec(rng: Rng): ThemeSpec {
-  const mats: Material[] = ['gloss', 'satin', 'matte', 'metallic', 'chrome', 'carbon'];
-  const rm = () => pick(rng, mats);
-  const placements: NumberPlacement[] = ['nose', 'hood', 'flanks'];
-  return {
-    pattern: pick(rng, ['stripes', 'chevrons', 'swoosh', 'split', 'hex', 'camo', 'geo', 'splatter', 'gradient'] as const),
-    finish: pick(rng, ['matte', 'gloss', 'gloss', 'metallic', 'chrome'] as const),
-    coat: pick(rng, ['none', 'light', 'full'] as const),
-    palette: {
-      harmony: pick(rng, ['mono', 'complementary', 'analogous', 'triadic'] as const),
-      sat: [45, 90],
-      light: [30, 60],
-    },
-    materials: {
-      body: rm(),
-      stripe: rm(),
-      accent: rm(),
-      number: 'matte',
-      panel: rm(),
-      trim: pick(rng, ['chrome', 'metallic', 'gloss'] as const),
-      deco: rm(),
-    },
-    details: pick(rng, ['dark', 'accent'] as const),
-    detailMaterial: rm(),
-    wheels: pick(rng, ['dark', 'dark', 'accent', 'base'] as const),
-    wheelMaterial: pick(rng, ['chrome', 'metallic', 'satin'] as const),
-    neon: pick(rng, ['none', 'none', 'accent', 'base'] as const),
-    raceNumber: true,
-    numbers: placements.filter(() => rng() < 0.6),
-    plate: pick(rng, ['none', 'roundel', 'plate'] as const),
-    rims: pick(rng, ['dark', 'accent', 'light', 'base'] as const),
-  };
+const competitionMaterials: MaterialScheme = { body: 'gloss', stripe: 'vinyl', accent: 'vinyl', number: 'vinyl', panel: 'carbon', trim: 'metallic', deco: 'satin', decal: 'vinyl' };
+const streetMaterials: MaterialScheme = { ...competitionMaterials, body: 'metallic', stripe: 'vinyl', accent: 'vinyl' };
+function themeSpec(pattern: ThemeSpec['pattern'], overrides: Partial<ThemeSpec> = {}): ThemeSpec {
+  return { pattern, finish: 'gloss', coat: 'full', palette: { harmony: 'complementary', sat: [50, 80], light: [30, 55] },
+    materials: competitionMaterials, details: 'dark', detailMaterial: 'carbon', wheels: 'dark', wheelMaterial: 'matte',
+    neon: 'accent', raceNumber: true, numbers: ['nose', 'flanks'], plate: 'plate', rims: 'dark', ...overrides };
 }
-
-const CURATED_THEMES: CuratedTheme[] = [
-  'racingGT',
-  'retro',
-  'arrow',
-  'wave',
-  'chrome',
-  'stealth',
-  'cyber',
-  'rally',
-  'drift',
-  'esport',
-  'zevent',
-];
-
-function resolveTheme(rng: Rng, theme: Theme): { id: Theme; spec: ThemeSpec } {
-  if (theme === 'full') return { id: 'full', spec: randomThemeSpec(rng) };
-  if (theme === 'random') {
-    const id = pick(rng, CURATED_THEMES);
-    return { id, spec: THEMES[id] };
-  }
-  return { id: theme, spec: THEMES[theme] };
+const THEMES: Record<CuratedTheme, ThemeSpec> = {
+  endurance: themeSpec('stripes'),
+  heritage: themeSpec('swoosh', { rims: 'accent', detailMaterial: 'satin' }),
+  touring: themeSpec('geo', { rims: 'dark', plate: 'none' }),
+  rallyRaid: themeSpec('geo', { rims: 'light' }),
+  trackday: themeSpec('split', { rims: 'dark', plate: 'none', numbers: ['roof', 'flanks'] }),
+  streetArt: themeSpec('swoosh', { materials: streetMaterials, finish: 'metallic', numbers: [], rims: 'chrome' }),
+  drift: themeSpec('swoosh', { materials: streetMaterials, finish: 'metallic', numbers: [], rims: 'chrome' }),
+  nightRun: themeSpec('split', { materials: streetMaterials, finish: 'metallic', numbers: [], rims: 'bronze' }),
+  fantasy: themeSpec('geo', { materials: streetMaterials, finish: 'metallic', numbers: [], rims: 'chrome' }),
+};
+const CURATED_THEMES = THEME_CATALOG.map((entry) => entry.id);
+function resolveTheme(rng: Rng, theme: Theme): { id: CuratedTheme; spec: ThemeSpec } {
+  const id = theme === 'random' ? pick(rng, CURATED_THEMES) : theme;
+  if (!Object.hasOwn(THEMES, id)) throw new Error('Choisissez une livrée du catalogue.');
+  return { id, spec: THEMES[id] };
+}
+function themePalette(rng: Rng, opts: GeneratorOptions, id: CuratedTheme, spec: ThemeSpec, paletteIndex: number): Palette {
+  const colors = LIVERY_PALETTES[id][paletteIndex].colors;
+  if (opts.harmony !== 'auto') return buildPalette(rng, opts, spec.palette);
+  const base = opts.randomBaseHue ? colors[0] : opts.baseColor;
+  const accent1 = opts.randomAccent ? colors[1] : opts.accentColor;
+  return { base, accent1, accent2: colors[2], dark: '#151a20', light: '#f5f2e9', tones: [base, accent1, colors[2], '#151a20'] };
 }
 
 // ---------------------------------------------------------------- atlas UV
@@ -751,7 +440,15 @@ interface UVRect {
   h: number;
 }
 
-const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+/** Rear-facing outer lip, measured on the FBX and visible from either rear quarter.
+ * The guide's d_tail octagon maps to inner side walls, not a rear lamp.
+ * These two separate UV windows avoid the speed display and all wheel surfaces.
+ */
+export const BRAKE_LIGHT_ZONES: readonly UVRect[] = [
+  { x: .360, y: .666, w: .012, h: .036 },
+  { x: .360, y: .788, w: .012, h: .036 },
+];
+
 
 const name = (obj: FabricObject, n: string) => {
   (obj as FabricObject & { name?: string }).name = n;
@@ -759,7 +456,7 @@ const name = (obj: FabricObject, n: string) => {
 };
 
 function islandPolys(key: string): UVPoint[][] {
-  return UV_GUIDE_ISLANDS.find((i) => i.key === key)?.polygons ?? [];
+  return (key === 'tyres' ? WHEEL_UV_GUIDE : UV_GUIDE_ISLANDS).find((i) => i.key === key)?.polygons ?? [];
 }
 
 function polyBBox(poly: UVPoint[]): UVRect {
@@ -810,6 +507,7 @@ function clipFromPoly(poly: UVPoint[], S: number): Polygon {
  */
 interface DesignShape {
   role: ShapeRole;
+  material?: Material;
   color: string;
   label: string;
   make: (fill: string, mono: boolean) => FabricObject;
@@ -1420,6 +1118,10 @@ interface TextSpec {
   scale?: number;
   /** Épaisseur du contour relative à la taille (défaut 0.035). */
   strokeScale?: number;
+  fontFamily?: string;
+  fontStyle?: 'normal' | 'italic';
+  fontWeight?: number;
+  charSpacing?: number;
 }
 
 /**
@@ -1431,8 +1133,10 @@ function fittedText(text: string, spec: TextSpec, fill: string, stroke: string |
   const t = new IText(text, {
     originX: 'center',
     originY: 'center',
-    fontFamily: 'Arial Black, sans-serif',
-    fontWeight: 900,
+    fontFamily: spec.fontFamily ?? 'Arial Black, sans-serif',
+    fontWeight: spec.fontWeight ?? 900,
+    fontStyle: spec.fontStyle ?? 'normal',
+    charSpacing: spec.charSpacing ?? 0,
     fontSize: 100,
     fill,
   });
@@ -1472,600 +1176,12 @@ function labelOn(
     role,
     color,
     label,
-    (fill, mono) => fittedText(text, spec, fill, mono ? undefined : stroke, S),
+    (fill, mono) => fittedText(text, spec, fill, mono && stroke ? fill : stroke, S),
     S,
   );
 }
 
 /** Cœur vectoriel (pas le pictogramme officiel) : pointe vers +y canvas. */
-function heartD(cx: number, cy: number, s: number): (S: number) => string {
-  return (S) => {
-    const x = cx * S;
-    const y = cy * S;
-    const k = s * S;
-    return (
-      `M ${x} ${y + k * 0.42}` +
-      `C ${x - k * 0.55} ${y + k * 0.04} ${x - k * 0.5} ${y - k * 0.4} ${x} ${y - k * 0.16}` +
-      `C ${x + k * 0.5} ${y - k * 0.4} ${x + k * 0.55} ${y + k * 0.04} ${x} ${y + k * 0.42} Z`
-    );
-  };
-}
-
-function heartOn(
-  key: string,
-  cx: number,
-  cy: number,
-  s: number,
-  role: ShapeRole,
-  color: string,
-  label: string,
-  S: number,
-): DesignShape[] {
-  const bounds: UVRect = { x: cx - s * 0.62, y: cy - s * 0.48, w: s * 1.24, h: s * 1.02 };
-  return pathOn(key, heartD(cx, cy, s), bounds, role, color, label, S);
-}
-
-function ellipseOn(
-  key: string,
-  cx: number,
-  cy: number,
-  rx: number,
-  ry: number,
-  role: ShapeRole,
-  color: string,
-  label: string,
-  S: number,
-): DesignShape[] {
-  return onIsland(
-    key,
-    { x: cx - rx, y: cy - ry, w: rx * 2, h: ry * 2 },
-    role,
-    color,
-    label,
-    (fill) =>
-      new Ellipse({
-        left: cx * S,
-        top: cy * S,
-        originX: 'center',
-        originY: 'center',
-        rx: Math.max(rx * S, 1),
-        ry: Math.max(ry * S, 1),
-        fill,
-      }),
-    S,
-  );
-}
-
-function plusOn(
-  key: string,
-  cx: number,
-  cy: number,
-  s: number,
-  role: ShapeRole,
-  color: string,
-  label: string,
-  S: number,
-): DesignShape[] {
-  const t = s * 0.3;
-  return [
-    ...rectOn(key, { x: cx - t / 2, y: cy - s / 2, w: t, h: s }, role, color, label, S),
-    ...rectOn(key, { x: cx - s / 2, y: cy - t / 2, w: s, h: t }, role, color, label, S),
-  ];
-}
-
-/** Mégaphone bâton (hommage merch 2026, pas le pictogramme officiel). */
-function megaphoneOn(
-  key: string,
-  cx: number,
-  cy: number,
-  s: number,
-  role: ShapeRole,
-  color: string,
-  label: string,
-  S: number,
-): DesignShape[] {
-  const w = s * 1.2;
-  const h = s * 0.72;
-  const pts: UVPoint[] = [
-    { x: cx - w * 0.5, y: cy - h * 0.2 },
-    { x: cx + w * 0.08, y: cy - h * 0.36 },
-    { x: cx + w * 0.5, y: cy - h * 0.5 },
-    { x: cx + w * 0.5, y: cy + h * 0.5 },
-    { x: cx + w * 0.08, y: cy + h * 0.36 },
-    { x: cx - w * 0.5, y: cy + h * 0.2 },
-  ];
-  return polyOn(key, pts, role, color, label, S);
-}
-
-type ZeventPicto = 'heart' | 'plus' | 'mega' | 'globe';
-
-function zeventPicto(
-  kind: ZeventPicto,
-  key: string,
-  cx: number,
-  cy: number,
-  s: number,
-  role: ShapeRole,
-  color: string,
-  S: number,
-): DesignShape[] {
-  if (kind === 'heart') return heartOn(key, cx, cy, s, role, color, 'Picto cœur', S);
-  if (kind === 'plus') return plusOn(key, cx, cy, s, role, color, 'Picto +', S);
-  if (kind === 'mega') return megaphoneOn(key, cx, cy, s, role, color, 'Picto mégaphone', S);
-  return ellipseOn(key, cx, cy, s * 0.48, s * 0.48, role, color, 'Picto globe', S);
-}
-
-/** Z racing en barres (lettre bâton, distincte du logo ZEvent). */
-function blockZPts(cx: number, cy: number, w: number, h: number, t: number): UVPoint[] {
-  const x0 = cx - w / 2;
-  const x1 = cx + w / 2;
-  const y0 = cy - h / 2;
-  const y1 = cy + h / 2;
-  const bar = Math.min(t, h * 0.3, w * 0.24);
-  return [
-    { x: x0, y: y0 },
-    { x: x1, y: y0 },
-    { x: x1, y: y0 + bar },
-    { x: x0 + bar * 1.35, y: y1 - bar },
-    { x: x1, y: y1 - bar },
-    { x: x1, y: y1 },
-    { x: x0, y: y1 },
-    { x: x0, y: y1 - bar },
-    { x: x1 - bar * 1.35, y: y0 + bar },
-    { x: x0, y: y0 + bar },
-  ];
-}
-
-/**
- * Livrée de fond ZEvent 2026 : bas de caisse vert forêt, swooshes lime façon
- * T-shirt, filets blancs façon casquette, pas de grandes plages vides.
- */
-function makeZeventBody(rng: Rng, S: number, p: Palette, complexity: number): DesignShape[] {
-  const out: DesignShape[] = [];
-  for (const key of ['sillL', 'sillR', 'rearLow', 'rearSideL']) {
-    out.push(...fillIsland(key, 'panel', p.accent2, 'Bas ZEvent', S));
-  }
-  out.push(...fillIsland('rear', 'panel', p.dark, 'Bouclier sombre', S));
-  out.push(...fillIsland('shoulderL', 'panel', p.dark, 'Épaule sombre G.', S));
-  out.push(...fillIsland('shoulderR', 'panel', p.dark, 'Épaule sombre D.', S));
-
-  const stripeW = rand(rng, 0.015, 0.02);
-  const gap = 0.11 + (complexity > 60 ? 0.012 : 0);
-  // Bandes fines (énergie T-shirt) sur capot / toit avant : le capot moteur
-  // reste sombre pour le 10 / Z.
-  const hoodStripe = (offset: number, w: number, color: string, role: ShapeRole, label: string) => {
-    const x = 0.5 + offset - w / 2;
-    out.push(...rectOn('top', { x, y: 0.22, w, h: 0.59 }, role, color, label, S));
-    out.push(...rectOn('front', { x, y: 0.79, w, h: 0.21 }, role, color, label, S));
-  };
-  hoodStripe(-(gap / 2 + stripeW / 2), stripeW, p.accent1, 'stripe', 'Bande ZEvent');
-  hoodStripe(gap / 2 + stripeW / 2, stripeW, p.accent1, 'stripe', 'Bande ZEvent');
-  const hair = 0.0055;
-  hoodStripe(-(gap / 2 + stripeW + hair * 1.8), hair, p.light, 'trim', 'Filet blanc');
-  hoodStripe(gap / 2 + stripeW + hair * 0.7, hair, p.light, 'trim', 'Filet blanc');
-
-  // Swooshes lime (pinceau du T-shirt officiel) autour du capot.
-  const bulge = rand(rng, 0.04, 0.07);
-  const topBounds: UVRect = { x: 0.27, y: 0.18, w: 0.46, h: 0.62 };
-  const sp0 = { x: 0.31, y: 0.26 };
-  const sp1 = { x: 0.445, y: 0.78 };
-  const sc1 = { x: 0.29 - bulge * 0.2, y: 0.58 };
-  const sc2 = { x: 0.36 + bulge * 0.25, y: 0.5 };
-  out.push(...pathOn('top', crescent(sp0, sp1, sc1, sc2), topBounds, 'stripe', p.accent1, 'Swoosh capot G.', S));
-  out.push(
-    ...pathOn(
-      'top',
-      crescent(
-        { x: 1 - sp0.x, y: sp0.y },
-        { x: 1 - sp1.x, y: sp1.y },
-        { x: 1 - sc1.x, y: sc1.y },
-        { x: 1 - sc2.x, y: sc2.y },
-      ),
-      topBounds,
-      'stripe',
-      p.accent1,
-      'Swoosh capot D.',
-      S,
-    ),
-  );
-  const podH = POD_L.x1 - POD_L.x0;
-  const sideRect: UVRect = {
-    x: POD_L.x0 + podH * 0.5,
-    y: POD_L.yRear,
-    w: podH * 0.34,
-    h: POD_L.yFront - POD_L.yRear,
-  };
-  out.push(...rectOn('left', sideRect, 'stripe', p.accent1, 'Bande flanc G.', S));
-  out.push(...rectOn('right', mirrorRect(sideRect), 'stripe', p.accent1, 'Bande flanc D.', S));
-  const pipeW = podH * 0.055;
-  const pipeRect: UVRect = {
-    x: sideRect.x - pipeW * 1.35,
-    y: POD_L.yRear,
-    w: pipeW,
-    h: POD_L.yFront - POD_L.yRear,
-  };
-  out.push(...rectOn('left', pipeRect, 'trim', p.light, 'Filet flanc G.', S));
-  out.push(...rectOn('right', mirrorRect(pipeRect), 'trim', p.light, 'Filet flanc D.', S));
-
-  out.push(...rectOn('spoiler', { x: 0.635, y: 0.775, w: 0.2, h: 0.04 }, 'accent', p.accent1, 'Bande aileron', S));
-  out.push(...rectOn('spoiler', { x: 0.635, y: 0.762, w: 0.2, h: 0.008 }, 'trim', p.light, 'Filet aileron', S));
-  const shoulder: UVRect = { x: 0.705, y: 0.3, w: 0.11, h: 0.055 };
-  out.push(...rectOn('shoulderL', shoulder, 'accent', p.accent1, 'Épaulette G.', S));
-  out.push(...rectOn('shoulderR', mirrorRect(shoulder), 'accent', p.accent1, 'Épaulette D.', S));
-  out.push(...rectOn('shoulderL', { x: 0.705, y: 0.292, w: 0.11, h: 0.007 }, 'trim', p.light, 'Filet épaule G.', S));
-  out.push(
-    ...rectOn('shoulderR', { x: 1 - 0.705 - 0.11, y: 0.292, w: 0.11, h: 0.007 }, 'trim', p.light, 'Filet épaule D.', S),
-  );
-
-  out.push(
-    ...pathOn(
-      'front',
-      crescent({ x: 0.5, y: 0.8 }, { x: 0.5, y: 0.97 }, { x: 0.39, y: 0.9 }, { x: 0.46, y: 0.88 }),
-      { x: 0.38, y: 0.79, w: 0.24, h: 0.21 },
-      'stripe',
-      p.accent1,
-      'Swoosh nez G.',
-      S,
-    ),
-    ...pathOn(
-      'front',
-      crescent({ x: 0.5, y: 0.8 }, { x: 0.5, y: 0.97 }, { x: 0.61, y: 0.9 }, { x: 0.54, y: 0.88 }),
-      { x: 0.38, y: 0.79, w: 0.24, h: 0.21 },
-      'stripe',
-      p.accent1,
-      'Swoosh nez D.',
-      S,
-    ),
-  );
-  out.push(...rectOn('rear', { x: 0.07, y: 0.875, w: 0.28, h: 0.01 }, 'trim', p.light, 'Filet bouclier', S));
-  return out;
-}
-
-/**
- * Marques fixes de l'hommage merch 2026 : ZEVENT outline, 10e, dates, pictos,
- * barre de dons. Textes figés ; la graine ne jitter que les pictos / le compteur.
- */
-function makeZeventMarks(rng: Rng, S: number, p: Palette): DesignShape[] {
-  const out: DesignShape[] = [];
-  const ink = p.light;
-  const stroke = p.dark;
-  const lime = p.accent1;
-  const jitter = () => rand(rng, -0.004, 0.004);
-  const hs = 0.034 + rand(rng, -0.004, 0.004);
-  const kinds: ZeventPicto[] = ['heart', 'plus', 'mega', 'globe'];
-
-  const outline = (key: string, spec: TextSpec, label: string, text: string) =>
-    labelOn(key, { ...spec, strokeScale: 0.1 }, 'number', p.dark, label, text, S, ink);
-  const limeWord = (key: string, spec: TextSpec, label: string, text: string) =>
-    labelOn(key, spec, 'number', lime, label, text, S, stroke);
-  const whiteWord = (key: string, spec: TextSpec, label: string, text: string) =>
-    labelOn(key, spec, 'number', ink, label, text, S, stroke);
-
-  // Capot moteur : 10 ghost + Z racing (lisible de dessus / 3/4 arrière).
-  out.push(
-    ...rectOn('top', { x: 0.378, y: 0.012, w: 0.244, h: 0.148 }, 'panel', p.dark, 'Fond 10 arrière', S, {
-      rx: 0.012 * S,
-      ry: 0.012 * S,
-    }),
-  );
-  out.push(
-    ...outline('top', { cx: 0.5, cy: 0.086, maxW: 0.2, maxH: 0.12, angle: 0, flipX: false, scale: 0.92 }, '10e toit', '10'),
-  );
-  out.push(...polyOn('top', blockZPts(0.5, 0.086, 0.118, 0.068, 0.02), 'accent', lime, 'Z racing arrière', S));
-
-  out.push(
-    ...whiteWord(
-      'top',
-      { cx: 0.5, cy: 0.2, maxW: 0.26, maxH: 0.032, angle: 0, flipX: false },
-      'Dernière édition toit',
-      'DERNIÈRE ÉDITION',
-    ),
-  );
-  out.push(
-    ...limeWord(
-      'top',
-      { cx: 0.5, cy: 0.232, maxW: 0.2, maxH: 0.022, angle: 0, flipX: false },
-      'From 2016 toit',
-      '2016  →  2026',
-    ),
-  );
-
-  // Plaque titre capot : lockup T-shirt (ZEVENT outline, 2016 | 2026).
-  out.push(
-    ...rectOn('top', { x: 0.372, y: 0.638, w: 0.256, h: 0.148 }, 'panel', p.dark, 'Plaque titre capot', S, {
-      rx: 0.01 * S,
-      ry: 0.01 * S,
-    }),
-  );
-  out.push(...rectOn('top', { x: 0.372, y: 0.638, w: 0.256, h: 0.006 }, 'trim', ink, 'Filet plaque capot', S));
-  out.push(
-    ...outline(
-      'top',
-      { cx: HOOD.cx, cy: 0.675, maxW: 0.22, maxH: 0.042, angle: 0, flipX: false },
-      'ZEVENT capot',
-      'ZEVENT',
-    ),
-  );
-  out.push(
-    ...whiteWord('top', { cx: 0.43, cy: 0.712, maxW: 0.055, maxH: 0.02, angle: 0, flipX: false }, '2016 capot', '2016'),
-  );
-  out.push(
-    ...limeWord('top', { cx: 0.5, cy: 0.712, maxW: 0.04, maxH: 0.022, angle: 0, flipX: false }, '26 capot', '26'),
-  );
-  out.push(
-    ...whiteWord('top', { cx: 0.57, cy: 0.712, maxW: 0.055, maxH: 0.02, angle: 0, flipX: false }, '2026 capot', '2026'),
-  );
-
-  const bar: UVRect = { x: 0.392, y: 0.73, w: 0.216, h: 0.024 };
-  out.push(...rectOn('top', bar, 'panel', '#050805', 'Barre dons fond', S, { rx: 0.005 * S, ry: 0.005 * S }));
-  const fillRatio = rand(rng, 0.9, 0.97);
-  const pad = 0.0035;
-  out.push(
-    ...rectOn(
-      'top',
-      { x: bar.x + pad, y: bar.y + pad, w: (bar.w - pad * 2) * fillRatio, h: bar.h - pad * 2 },
-      'accent',
-      lime,
-      'Barre dons fill',
-      S,
-      { rx: 0.003 * S, ry: 0.003 * S },
-    ),
-  );
-  out.push(
-    ...whiteWord(
-      'top',
-      { cx: HOOD.cx, cy: 0.742, maxW: 0.15, maxH: 0.016, angle: 0, flipX: false, scale: 0.95 },
-      'Record dons',
-      '32,9 M€',
-    ),
-  );
-  out.push(
-    ...limeWord(
-      'top',
-      { cx: HOOD.cx, cy: 0.766, maxW: 0.18, maxH: 0.016, angle: 0, flipX: false },
-      'Dates capot',
-      '3-6 SEPT',
-    ),
-  );
-
-  const oFront = getRegionOrientation('front');
-  out.push(
-    ...limeWord(
-      'front',
-      { cx: NOSE.cx, cy: NOSE.cy + 0.008, maxW: 0.1, maxH: 0.038, angle: oFront.angle, flipX: oFront.flipX },
-      '26 nez',
-      '26',
-    ),
-  );
-  out.push(...heartOn('front', 0.5, 0.948, 0.05, 'accent', lime, 'Cœur nez', S));
-
-  const oRear = getRegionOrientation('rear');
-  out.push(
-    ...whiteWord(
-      'rear',
-      { cx: REAR_BUMPER.cx, cy: 0.905, maxW: 0.22, maxH: 0.045, angle: oRear.angle, flipX: oRear.flipX },
-      'MERCI arrière',
-      'MERCI',
-    ),
-  );
-  out.push(
-    ...limeWord(
-      'rear',
-      { cx: REAR_BUMPER.cx, cy: 0.948, maxW: 0.2, maxH: 0.032, angle: oRear.angle, flipX: oRear.flipX },
-      '10e arrière',
-      '10e ÉDITION',
-    ),
-  );
-
-  const oL = getRegionOrientation('left');
-  const oR = getRegionOrientation('right');
-  const plateW = 0.1;
-  const plateH = 0.2;
-  const plateL: UVRect = { x: POD_L.numCx - plateW / 2, y: POD_L.numCy - plateH / 2, w: plateW, h: plateH };
-  out.push(...rectOn('left', plateL, 'panel', p.dark, 'Plaque #ZEVENT G.', S, { rx: 0.01 * S, ry: 0.01 * S }));
-  out.push(...rectOn('right', mirrorRect(plateL), 'panel', p.dark, 'Plaque #ZEVENT D.', S, { rx: 0.01 * S, ry: 0.01 * S }));
-  const hashSpecL: TextSpec = {
-    cx: POD_L.numCx,
-    cy: POD_L.numCy - 0.01,
-    maxW: 0.085,
-    maxH: 0.17,
-    angle: oL.angle,
-    flipX: oL.flipX,
-  };
-  const hashSpecR: TextSpec = { ...hashSpecL, cx: 1 - POD_L.numCx, angle: oR.angle, flipX: oR.flipX };
-  out.push(...limeWord('left', hashSpecL, '#ZEVENT flanc G.', '#ZEVENT'));
-  out.push(...limeWord('right', hashSpecR, '#ZEVENT flanc D.', '#ZEVENT'));
-
-  const assoL: TextSpec = {
-    cx: POD_L.numCx,
-    cy: 0.445,
-    maxW: 0.075,
-    maxH: 0.1,
-    angle: oL.angle,
-    flipX: oL.flipX,
-  };
-  const assoR: TextSpec = { ...assoL, cx: 1 - POD_L.numCx, angle: oR.angle, flipX: oR.flipX };
-  out.push(...whiteWord('left', assoL, '22 ASSOS G.', '22 ASSOS'));
-  out.push(...whiteWord('right', assoR, '22 ASSOS D.', '22 ASSOS'));
-  out.push(
-    ...limeWord(
-      'left',
-      { cx: POD_L.numCx, cy: 0.72, maxW: 0.07, maxH: 0.09, angle: oL.angle, flipX: oL.flipX },
-      '10e flanc G.',
-      '10e',
-    ),
-  );
-  out.push(
-    ...limeWord(
-      'right',
-      { cx: 1 - POD_L.numCx, cy: 0.72, maxW: 0.07, maxH: 0.09, angle: oR.angle, flipX: oR.flipX },
-      '10e flanc D.',
-      '10e',
-    ),
-  );
-
-  const oSillL = getRegionOrientation('sillL');
-  const oSillR = getRegionOrientation('sillR');
-  out.push(
-    ...whiteWord(
-      'sillL',
-      { cx: 0.942, cy: 0.26, maxW: 0.05, maxH: 0.24, angle: oSillL.angle, flipX: oSillL.flipX },
-      'ZERATOR seuil',
-      'ZERATOR',
-    ),
-  );
-  out.push(
-    ...limeWord(
-      'sillL',
-      { cx: 0.968, cy: 0.5, maxW: 0.03, maxH: 0.2, angle: oSillL.angle, flipX: oSillL.flipX },
-      'Dates seuil G.',
-      '3-6 SEPT',
-    ),
-  );
-  out.push(
-    ...whiteWord(
-      'sillR',
-      { cx: 0.058, cy: 0.26, maxW: 0.05, maxH: 0.2, angle: oSillR.angle, flipX: oSillR.flipX },
-      'DACH seuil',
-      'DACH',
-    ),
-  );
-  out.push(
-    ...limeWord(
-      'sillR',
-      { cx: 0.032, cy: 0.5, maxW: 0.03, maxH: 0.16, angle: oSillR.angle, flipX: oSillR.flipX },
-      'Hashtag seuil D.',
-      '#ZEVENT',
-    ),
-  );
-
-  out.push(
-    ...limeWord('shoulderL', { cx: 0.76, cy: 0.328, maxW: 0.09, maxH: 0.042, angle: 0, flipX: false }, '26 épaule G.', '26'),
-  );
-  out.push(
-    ...limeWord('shoulderR', { cx: 0.24, cy: 0.328, maxW: 0.09, maxH: 0.042, angle: 0, flipX: false }, '26 épaule D.', '26'),
-  );
-
-  const oSp = getRegionOrientation('spoiler');
-  out.push(
-    ...whiteWord(
-      'spoiler',
-      { cx: 0.73, cy: 0.81, maxW: 0.12, maxH: 0.04, angle: oSp.angle, flipX: oSp.flipX },
-      'ZEVENT aileron',
-      'ZEVENT',
-    ),
-  );
-
-  const oLow = getRegionOrientation('rearLow');
-  out.push(
-    ...whiteWord(
-      'rearLow',
-      { cx: 0.211, cy: 0.81, maxW: 0.2, maxH: 0.04, angle: oLow.angle, flipX: oLow.flipX },
-      '32,9 M€ diffuseur',
-      '32,9 M€',
-    ),
-  );
-
-  const pictoSites: { key: string; cx: number; cy: number; s: number }[] = [
-    { key: 'top', cx: 0.34 + jitter(), cy: 0.69, s: hs * 0.9 },
-    { key: 'top', cx: 0.66 + jitter(), cy: 0.69, s: hs * 0.9 },
-    { key: 'top', cx: 0.36 + jitter(), cy: 0.52, s: hs * 0.7 },
-    { key: 'top', cx: 0.64 + jitter(), cy: 0.52, s: hs * 0.7 },
-    { key: 'left', cx: 0.848 + jitter(), cy: 0.52, s: hs * 1.15 },
-    { key: 'left', cx: 0.848 + jitter(), cy: 0.78, s: hs },
-    { key: 'right', cx: 0.152 + jitter(), cy: 0.52, s: hs * 1.15 },
-    { key: 'right', cx: 0.152 + jitter(), cy: 0.78, s: hs },
-    { key: 'spoiler', cx: 0.7, cy: 0.86, s: hs * 0.9 },
-    { key: 'spoiler', cx: 0.78, cy: 0.86, s: hs * 0.75 },
-    { key: 'rear', cx: REAR_BUMPER.cx - 0.12, cy: 0.925, s: hs * 0.8 },
-    { key: 'rear', cx: REAR_BUMPER.cx + 0.12, cy: 0.925, s: hs * 0.8 },
-    { key: 'sillL', cx: 0.94 + jitter(), cy: 0.68, s: hs * 0.7 },
-    { key: 'sillR', cx: 0.06 + jitter(), cy: 0.68, s: hs * 0.7 },
-    { key: 'shoulderL', cx: 0.82, cy: 0.36, s: hs * 0.7 },
-    { key: 'shoulderR', cx: 0.18, cy: 0.36, s: hs * 0.7 },
-    { key: 'rearSideL', cx: 0.93, cy: 0.86, s: hs * 0.65 },
-    { key: 'rearSideL', cx: 0.96, cy: 0.9, s: hs * 0.55 },
-    { key: 'front', cx: 0.43, cy: 0.86, s: hs * 0.7 },
-    { key: 'front', cx: 0.57, cy: 0.86, s: hs * 0.7 },
-  ];
-  pictoSites.forEach((site, i) => {
-    const color = i % 3 === 1 ? ink : lime;
-    out.push(...zeventPicto(kinds[i % kinds.length], site.key, site.cx, site.cy, site.s, 'deco', color, S));
-  });
-
-  out.push(...heartOn('archL', 0.181, 0.123, 0.05, 'deco', p.dark, 'Cœur jante av.', S));
-  out.push(...plusOn('archL', 0.181, 0.123, 0.028, 'accent', lime, '+ jante av.', S));
-  out.push(...heartOn('archR', 0.814, 0.13, 0.055, 'deco', p.dark, 'Cœur jante ar.', S));
-  const oArchR = getRegionOrientation('archR');
-  out.push(
-    ...limeWord(
-      'archR',
-      { cx: 0.814, cy: 0.13, maxW: 0.07, maxH: 0.045, angle: oArchR.angle, flipX: oArchR.flipX, scale: 0.9 },
-      '26 jante ar.',
-      '26',
-    ),
-  );
-  return out;
-}
-
-/** Néon lime (Details_I) : filets fins + pastilles — souligne, ne recouvre pas. */
-function makeZeventNeon(S: number, glow: string): FabricObject[] {
-  const fill = glow;
-  const out: FabricObject[] = [];
-  const bars = [
-    { y: 0.18, h: 0.018, w: 0.62 },
-    { y: 0.5, h: 0.016, w: 0.48 },
-    { y: 0.82, h: 0.018, w: 0.7 },
-  ];
-  for (const b of bars) {
-    const w = b.w * S;
-    const h = b.h * S;
-    out.push(
-      name(
-        new Rect({
-          left: (S - w) / 2,
-          top: b.y * S - h / 2,
-          width: w,
-          height: h,
-          fill,
-          originX: 'left',
-          originY: 'top',
-        }),
-        'Néon ZEvent',
-      ),
-    );
-  }
-  for (const [cx, cy, r] of [
-    [0.28, 0.22, 0.035],
-    [0.72, 0.5, 0.03],
-    [0.32, 0.78, 0.032],
-    [0.68, 0.84, 0.028],
-  ] as const) {
-    out.push(
-      name(
-        new Ellipse({
-          left: cx * S,
-          top: cy * S,
-          originX: 'center',
-          originY: 'center',
-          rx: r * S,
-          ry: r * S,
-          fill,
-        }),
-        'Halo ZEvent',
-      ),
-    );
-  }
-  return out;
-}
-
-/**
- * Numéros de course, orientés « voiture » :
- *  - nose   : sur la partie large du nez, lisible de face ;
- *  - hood   : sur le capot devant le pare-brise (cocarde / plaque optionnelle), lisible de face ;
- *  - flanks : sur l'avant des pontets, lisible de profil (rotation ±90°).
- * `mono` (Skin_R / Skin_CoatR) supprime le contour coloré (matériau uniforme).
- */
 function makeRaceNumbers(
   rng: Rng,
   S: number,
@@ -2076,6 +1192,7 @@ function makeRaceNumbers(
   flankBg?: string,
   /** Couleur imposée du glyphe (ex. ton sur ton pour le thème furtif). */
   numberColor?: string,
+  numberOutline?: string,
 ): DesignShape[] {
   const num = value.trim() || String(Math.floor(rand(rng, 10, 100)));
   const [, , baseL] = hexToHsl(p.base);
@@ -2095,7 +1212,7 @@ function makeRaceNumbers(
       'number',
       color,
       label,
-      (fill, mono) => fittedText(num, spec, fill, mono ? undefined : p.accent1, S),
+      (fill, mono) => fittedText(num, spec, fill, mono ? fill : numberOutline ?? (color === p.dark ? p.light : p.dark), S),
       S,
     );
 
@@ -2139,35 +1256,39 @@ function makeRaceNumbers(
     out.push(...text({ cx: HOOD.cx, cy: HOOD.cy, maxW, maxH, angle: 0, flipX: false }, color, 'top', `${nameNum} · capot`));
   }
 
+  if (placements.includes('roof')) {
+    out.push(...text({ cx: .5, cy: .183, maxW: .168, maxH: .090, angle: 180, flipX: false, fontStyle: 'italic', strokeScale: .05 }, p.light, 'top', `${nameNum} · capot moteur`));
+  }
+
   if (placements.includes('flanks')) {
     const bg = flankBg ?? p.base;
     const [, , bgL] = hexToHsl(bg);
     let color = numberColor ?? (bgL > 55 ? p.dark : p.light);
     const specL: TextSpec = {
-      cx: POD_L.numCx,
-      cy: POD_L.numCy,
-      maxW: 0.10,
-      maxH: 0.155,
+      cx: .7715,
+      cy: .333,
+      maxW: .031,
+      maxH: .061,
       angle: getRegionOrientation('left').angle,
       flipX: getRegionOrientation('left').flipX,
     };
     const specR: TextSpec = {
       ...specL,
-      cx: 1 - POD_L.numCx,
+      cx: 1 - specL.cx,
       angle: getRegionOrientation('right').angle,
       flipX: getRegionOrientation('right').flipX,
     };
     if (plate === 'plate') {
       // Plaque rectangulaire (rotation ±90° : largeur = hauteur du pontet).
-      const pw = 0.115;
-      const ph = 0.17;
+      const pw = .037;
+      const ph = .076;
       const plateL: UVRect = { x: specL.cx - pw / 2, y: specL.cy - ph / 2, w: pw, h: ph };
-      out.push(...rectOn('left', plateL, 'accent', p.light, 'Plaque flanc G.', S, { rx: 0.01 * S, ry: 0.01 * S }));
-      out.push(...rectOn('right', mirrorRect(plateL), 'accent', p.light, 'Plaque flanc D.', S, { rx: 0.01 * S, ry: 0.01 * S }));
+      out.push(...rectOn('shoulderL', plateL, 'decal', p.light, 'Plaque flanc G.', S, { rx: .002 * S, ry: .002 * S }));
+      out.push(...rectOn('shoulderR', mirrorRect(plateL), 'decal', p.light, 'Plaque flanc D.', S, { rx: .002 * S, ry: .002 * S }));
       color = p.dark;
     }
-    out.push(...text(specL, color, 'left', `${nameNum} · flanc G.`));
-    out.push(...text(specR, color, 'right', `${nameNum} · flanc D.`));
+    out.push(...text(specL, color, 'shoulderL', `${nameNum} · flanc G.`));
+    out.push(...text(specR, color, 'shoulderR', `${nameNum} · flanc D.`));
   }
   return out;
 }
@@ -2177,7 +1298,7 @@ function makeRims(S: number, p: Palette, style: RimStyle, ring: string): DesignS
   if (style === 'none') return [];
   const [bh, bs] = hexToHsl(p.base);
   const disc =
-    style === 'dark' ? '#1c1e22' : style === 'accent' ? p.accent1 : style === 'light' ? p.light : hsl(bh, bs, 30);
+    style === 'dark' ? '#1c1e22' : style === 'chrome' ? '#c7d1d8' : style === 'bronze' ? '#a88b52' : style === 'accent' ? p.accent1 : style === 'light' ? p.light : hsl(bh, bs, 30);
   const out: DesignShape[] = [];
   for (const key of ['archL', 'archR']) {
     const polys = islandPolys(key);
@@ -2188,323 +1309,520 @@ function makeRims(S: number, p: Palette, style: RimStyle, ring: string): DesignS
       out.push(shape('trim', ring, 'Jante · anneau', (fill) => new Polygon(inner.map((q) => ({ x: q.x * S, y: q.y * S })), { fill, objectCaching: false })));
     }
   }
+  return out.map((part) => ({ ...part, material: style === 'chrome' ? 'chrome' : part.role === 'trim' || style === 'bronze' || style === 'accent' ? 'metallic' : style === 'dark' ? 'satin' : 'gloss' }));
+}
+
+/** A compound UV shape keeps each named detail editable without hundreds of tiny layers. */
+function uvPath(polys: UVPoint[][], S: number) {
+  return polys.filter((poly) => poly.length >= 3).map((poly) => `M ${poly.map((p) => `${p.x * S} ${p.y * S}`).join(' L ')} Z`).join(' ');
+}
+function regionDesign(key: string, role: ShapeRole, color: string, label: string, S: number): DesignShape[] {
+  const path = uvPath(islandPolys(key), S);
+  return path ? [shape(role, color, label, (fill) => new Path(path, { fill, objectCaching: false }))] : [];
+}
+/** Actual competition typography: a lead partner, equipment suppliers and small service labels. */
+const IDENTITIES: Record<CuratedTheme, { title: string; line: string; suppliers: string[] }> = {
+  endurance: { title: 'AURUM', line: 'ENDURANCE / 24', suppliers: ['HELIX', 'FERRO', 'RACE SYSTEMS'] },
+  heritage: { title: 'SUMMIT', line: 'WORLD RALLY TEAM', suppliers: ['TERRA', 'FORGE', 'RALLY SPORT'] },
+  touring: { title: 'VECTOR', line: 'GRAND PRIX ENGINEERING', suppliers: ['NEXUS', 'ION', 'APEX FUELS'] },
+  rallyRaid: { title: 'NORTHLINE', line: 'FACTORY RALLY TEAM', suppliers: ['TORQ', 'GRIP', 'RALLY SYSTEMS'] },
+  trackday: { title: 'OCTANE', line: 'PERFORMANCE FUELS', suppliers: ['VOLT', 'RACE OIL', 'PRO BRAKE'] },
+  streetArt: { title: 'KAZE', line: 'CUSTOM CULTURE / 2002', suppliers: ['BOOST', 'FORGED', 'RACE OIL'] },
+  drift: { title: 'VOLT', line: 'AFTER HOURS / CUSTOM', suppliers: ['BOOST LAB', 'FORGED', 'GRIP UNION'] },
+  nightRun: { title: 'SHUTO', line: 'TURBO ENGINEERING', suppliers: ['TURBO', 'FORGED', 'SPORT'] },
+  fantasy: { title: '', line: '', suppliers: [] },
+};
+
+/** A restrained twill on exposed composite; one editable vector layer per panel. */
+function carbonPanel(key: string, r: UVRect, label: string, S: number): DesignShape[] {
+  const out = rectOn(key, r, 'panel', '#1c2228', label, S);
+  const segments: string[] = [];
+  const step = .006;
+  for (let y = r.y; y < r.y + r.h - step; y += step) {
+    for (let x = r.x; x < r.x + r.w - step; x += step * 2) {
+      const shift = Math.round(y / step) % 2 ? step : 0;
+      if (x + shift + step > r.x + r.w) continue;
+      segments.push(`M ${(x+shift)*S} ${y*S} l ${step*.65*S} 0 l ${step*.3*S} ${step*.65*S} l ${-step*.65*S} 0 Z`);
+    }
+  }
+  out.push(...onIsland(key, r, 'panel', '#323a42', `${label} · tissage`, (fill, mono) => mono
+    ? new Rect({left:r.x*S,top:r.y*S,width:r.w*S,height:r.h*S,originX:'left',originY:'top',fill})
+    : new Path(segments.join(' '), { fill, opacity: .52, objectCaching: false }), S));
   return out;
 }
 
-/** Néon des détails : quelques fines bandes lumineuses (calques éditables), jamais un aplat plein. */
-function makeNeonStrips(rng: Rng, S: number, glow: string): FabricObject[] {
-  const fill = glow;
-  const out: FabricObject[] = [];
-  // Bandes horizontales fines, largeur ~60-92 %, réparties verticalement.
-  const bars = 2 + Math.floor(rng() * 2); // 2 ou 3
-  const ys = [0.12, 0.5, 0.86];
-  for (let i = 0; i < bars; i++) {
-    const cy = ys[i] ?? rand(rng, 0.2, 0.8);
-    const h = rand(rng, 0.02, 0.035) * S;
-    const wf = rand(rng, 0.6, 0.92);
-    const w = wf * S;
-    const left = (S - w) / 2 + rand(rng, -0.04, 0.04) * S;
-    out.push(
-      name(
-        new Rect({
-          left: clamp(left, 0, S - w),
-          top: clamp(cy * S - h / 2, 0, S - h),
-          width: w,
-          height: h,
-          fill,
-          originX: 'left',
-          originY: 'top',
-        }),
-        'Néon détails',
-      ),
-    );
+function identity(S: number, p: Palette, id: CuratedTheme, complexity: number): DesignShape[] {
+  const out: DesignShape[] = [];
+  if(id==='fantasy') return out;
+  const identity = IDENTITIES[id];
+  const contrast = (color: string) => {
+    const [r,g,b]=[1,3,5].map(i=>parseInt(color.slice(i,i+2),16)/255);
+    return .2126*r+.7152*g+.0722*b>.56?p.dark:p.light;
+  };
+  if (['streetArt','drift','nightRun'].includes(id)) {
+    // Small period-style equipment decals let the large illustrated vinyl
+    // remain the main subject. No racing plate over a dragon or a flame.
+    out.push(...rectOn('top',{x:.451,y:.655,w:.098,h:.064},'decal',p.dark,'Cartouche préparateur tuning',S));
+    out.push(...labelOn('top',{cx:.5,cy:.681,maxW:.087,maxH:.029,angle:0,flipX:false,fontStyle:'italic'},'decal',p.light,'Sponsor principal · capot',identity.title,S));
+    out.push(...labelOn('top',{cx:.5,cy:.707,maxW:.086,maxH:.009,angle:0,flipX:false,fontWeight:700},'decal',p.light,'Signature préparateur · capot',identity.line,S));
+    for(const left of [true,false]) for(let i=0;i<Math.min(3,1+Math.floor(complexity/25));i++) {
+      const cx=left?.602+i*.014:.398-i*.014;
+      const angle=left?275:85;
+      out.push(...labelOn('top',{cx,cy:.373,maxW:.011,maxH:.072,angle,flipX:false,fontStyle:i%2?'normal':'italic',fontWeight:900},'decal',p.light,'Équipementier tuning '+i+' · '+(left?'gauche':'droite'),identity.suppliers[i],S,p.dark));
+    }
+    if(complexity>=45) out.push(...labelOn('top',{cx:.5,cy:.118,maxW:.13,maxH:.025,angle:180,flipX:false,fontStyle:'italic'},'decal',p.light,'Préparation routière · emblème',identity.title,S,p.dark));
+    if(complexity>=70) for(let i=0;i<2;i++) {
+      const y=.033+i*.031;
+      out.push(...rectOn('top',{x:.451,y,w:.098,h:.023},'decal',p.dark,'Cartouche équipementier tuning',S));
+      out.push(...labelOn('top',{cx:.5,cy:y+.0115,maxW:.088,maxH:.017,angle:180,flipX:false,fontStyle:'italic'},'decal',p.light,'Partenaire tuning · série',identity.suppliers[i],S));
+    }
+    return out;
+  }
+  const street = id === 'nightRun';
+  const topColor = id === 'endurance' ? p.dark : contrast(id==='trackday'?p.accent1:p.base);
+  const topY = street ? .723 : .688;
+  // The Stadium nose rolls down sharply outside u=.445..555. Keeping the
+  // complete wordmark on that crown makes it readable from either 3/4 view.
+  const titleSpec = { cx: .5, cy: topY, maxW: .105, maxH: street ? .032 : .044,
+    angle: 0, flipX: false, fontStyle: 'italic' as const, charSpacing: id === 'endurance' ? 70 : -25 };
+  if (id === 'trackday') {
+    out.push(...onIsland('top', { x: .434, y: .647, w: .132, h: .086 }, 'decal', p.light, 'Emblème sponsor · fond',
+      (fill) => new Ellipse({ left: .5*S, top: .69*S, originX: 'center', originY: 'center', rx: .064*S, ry: .041*S, fill }), S));
+    out.push(...onIsland('top', { x: .439, y: .653, w: .122, h: .074 }, 'decal', p.accent1, 'Emblème sponsor · centre',
+      (fill) => new Ellipse({ left: .5*S, top: .69*S, originX: 'center', originY: 'center', rx: .059*S, ry: .035*S, fill }), S));
+  }
+  out.push(...labelOn('top', titleSpec, 'decal', topColor, 'Sponsor principal · capot', identity.title, S));
+  out.push(...labelOn('top', { cx: .5, cy: topY + .027, maxW: .10, maxH: .011, angle: 0, flipX: false, charSpacing: 90, fontWeight: 700 }, 'decal', topColor, 'Signature préparateur · capot', identity.line, S));
+
+  // Long upper sidepod faces: measured local frames, visible from both quarters.
+  for (const left of [true, false]) {
+    const color = p.light;
+    const angle = left ? 275 : 85;
+    const cx=left?.611:.389;
+    // The backing follows the same local frame as the sponsor, retaining
+    // contrast when a random bright stripe passes underneath it.
+    out.push(...onIsland('top',{x:cx-.022,y:.292,w:.044,h:.151},'decal',p.dark,'Cartouche sponsor ponton',
+      fill=>new Rect({left:cx*S,top:.3675*S,width:.036*S,height:.139*S,angle:left?5:-5,originX:'center',originY:'center',rx:.003*S,ry:.003*S,fill}),S));
+    out.push(...labelOn('top', { cx: left ? .611 : .389, cy: .3675, maxW: street ? .018 : .029, maxH: street ? .09 : .122, angle, flipX: false, fontStyle: 'italic', charSpacing: -25 }, 'decal', color, 'Sponsor ponton supérieur · ' + (left ? 'gauche' : 'droite'), identity.title, S,p.dark));
+    if (!street) out.push(...labelOn('top', { cx: left ? .634 : .366, cy: .3675, maxW: .008, maxH: .106, angle, flipX: false, fontWeight: 700, charSpacing: 80 }, 'decal', color, 'Préparateur ponton supérieur', identity.line, S,p.dark));
+  }
+
+  // The outer sidepod surface is shoulderL/R. Its vertical window uses a
+  // quarter-turn; the general shoulder orientation averages horizontal faces.
+  for (const key of street ? ['shoulderL', 'shoulderR'] : []) {
+    const left = key === 'shoulderL';
+    const cx = left ? .7715 : .2285;
+    const angle = left ? 271 : 89;
+    const color = id === 'heritage' ? p.accent1 : id === 'nightRun' ? p.accent2 : p.light;
+    if (!street) out.push(...rectOn(key, { x: cx-.0195, y: .293, w: .039, h: .080 }, 'decal', p.dark, 'Cartouche flanc extérieur', S));
+    out.push(...labelOn(key, { cx, cy: .333, maxW: .033, maxH: .072, angle, flipX: false, fontStyle: 'italic', charSpacing: -20 }, 'decal', color, 'Signature équipe · ' + (left ? 'gauche' : 'droite'), street ? identity.title : identity.suppliers[1], S));
+  }
+  // Secondary sponsor on the lower/rear body panel, away from the side number.
+  for (const key of ['left', 'right']) {
+    const left = key === 'left'; const cx = left ? .8 : .2;
+    const orientation = getRegionOrientation(key);
+    if (!street) {
+      out.push(...rectOn(key, { x: cx - .026, y: .406, w: .052, h: .105 }, 'decal', p.dark, 'Bandeau équipementier', S));
+      out.push(...labelOn(key, { cx, cy: .459, maxW: .032, maxH: .091, ...orientation, fontStyle: 'italic' }, 'decal', p.light, 'Équipementier · ' + key, identity.suppliers[0], S));
+    }
+    if (complexity >= 30) out.push(...labelOn(key, { cx: left ? .862 : .138, cy: .715, maxW: .013, maxH: .044, ...orientation, fontWeight: 700 }, 'decal', street ? p.accent2 : p.light, 'Marquage atelier', street ? '2.0 TURBO' : 'RACE USE', S));
+  }
+  if (!street && complexity >= 20) {
+    // The engine-cover strip is reserved for smaller equipment decals.
+    const count = Math.min(3, 1 + Math.floor(complexity / 34));
+    for (let i = 0; i < count; i++) {
+      const y = .04 + i*.031;
+      out.push(...rectOn('top', { x: .451, y, w: .098, h: .023 }, 'decal', p.light, 'Cartouche partenaire', S));
+      out.push(...labelOn('top', { cx: .5, cy: y+.0115, maxW: .088, maxH: .017, angle: 180, flipX: false, fontStyle: i % 2 ? 'normal' : 'italic' }, 'decal', p.dark, 'Partenaire technique', identity.suppliers[i], S));
+    }
+    if (complexity >= 45) {
+      // Small safety and scrutineering decals: limited to the rear cowling.
+      for (const x of [.405, .584]) {
+        out.push(...rectOn('top', { x, y: .096, w: .014, h: .030 }, 'decal', '#e13932', 'Coupe-circuit · adhésif', S));
+        out.push(...labelOn('top', { cx: x+.007, cy: .111, maxW: .010, maxH: .021, angle: 180, flipX: false }, 'decal', '#ffffff', 'Coupe-circuit · E', 'E', S));
+      }
+    }
+    if (complexity >= 70) {
+      out.push(...labelOn('top', { cx: .5, cy: .584, maxW: .17, maxH: .017, angle: 0, flipX: false, fontWeight: 700, charSpacing: 120 }, 'decal', topColor, 'Homologation · série', id === 'streetArt' ? 'UNLIMITED / JAPAN' : 'FACTORY COMPETITION', S));
+    }
+  }
+  if (street && complexity >= 65) {
+    out.push(...labelOn('top', { cx: .5, cy: .104, maxW: .11, maxH: .022, angle: 180, flipX: false, fontStyle: 'italic', charSpacing: 110 }, 'decal', p.accent1, 'Préparation routière · emblème', 'SHUTO', S));
+    out.push(...labelOn('top', { cx: .5, cy: .075, maxW: .085, maxH: .014, angle: 180, flipX: false, fontWeight: 700 }, 'decal', p.accent1, 'Préparation routière · spécification', 'TWIN CAM 16V', S));
   }
   return out;
 }
 
-// ---------------------------------------------------------------- génération
+function surfaceDesign(polys: MotifPolygon[], plane: 'side'|'top', color: string, label: string, S: number): DesignShape[] {
+  const uv=projectSurfacePolygons(polys,{plane,side:'both'});
+  return uv.length ? [shape('trim',color,label,fill=>new Path(uvPath(uv,S),{fill,strokeWidth:0,objectCaching:false}))] : [];
+}
 
+function fantasyVeins(S: number,p: Palette,variant: number): DesignShape[] {
+  const top: MotifPolygon[]=[];
+  for(let i=0;i<3;i++) {
+    const t=.24+i*.24;
+    if(variant===1) {
+      const curve=Array.from({length:25},(_,j)=>({x:-.85+j*.071,y:t+Math.sin(j/24*Math.PI*2)*.055}));
+      top.push(ribbon(curve,.009));
+    } else top.push(ribbon([{x:-.9,y:t},{x:-.4,y:t+.055},{x:0,y:t-.03},{x:.38,y:t+.045},{x:.9,y:t-.02}],variant===2?.014:.007));
+  }
+  const side=ribbon([{x:.23,y:.34},{x:.44,y:.47},{x:.55,y:.36},{x:.72,y:.69},{x:.92,y:.58}],.018);
+  return [...surfaceDesign(top,'top',p.accent1,'Veines de lumière · couronne',S),...surfaceDesign([side],'side',p.accent1,'Veines de lumière · flancs',S)];
+}
+
+function decorativeLights(S:number,p:Palette,id:CuratedTheme,variant:number, colorOverride?:string): {shapes:DesignShape[];role:IllumRole}[] {
+  const tuning=['streetArt','drift','nightRun'].includes(id);
+  if(!tuning && id!=='fantasy') return [];
+  const [h]=hexToHsl(tuning?p.base:p.accent1);
+  const neon=colorOverride??hsl(h,95,65);
+  const nightStrip=ribbon([{x:.31,y:.20},{x:.48,y:.24},{x:.74,y:.24},{x:.94,y:.32}],.022);
+  const marker=ribbon([{x:.64,y:.27},{x:.81,y:.27},{x:.9,y:.32}],.009);
+  const brakes:MotifPolygon[]=[];
+  for(const sign of [-1,1]) for(let i=0;i<3;i++) {
+    const x=sign*(.38+i*.12);
+    brakes.push([{x:x-.025,y:.87},{x:x+.025,y:.87},{x:x+.025,y:.925},{x:x-.025,y:.925}]);
+  }
+  return [
+    {shapes:id==='fantasy'?fantasyVeins(S,colorOverride?{...p,accent1:colorOverride}:p,variant):surfaceDesign([marker],'side',neon,'Veilleuse décorative tuning',S),role:'always'},
+    {shapes:surfaceDesign([nightStrip],'side',neon,id==='fantasy'?'Halo nocturne minéral':'Néon de bas de caisse',S),role:'head'},
+    {shapes:surfaceDesign(brakes,'top','#ff3856',id==='fantasy'?'Cristaux réactifs au freinage':'Signature arrière au freinage',S),role:'brake'},
+  ];
+}
+
+function curatedBody(_rng: Rng, S: number, p: Palette, id: CuratedTheme, complexity: number, variant: number): DesignShape[] {
+  const out: DesignShape[] = [];
+  const tuning = ['streetArt', 'drift', 'nightRun'].includes(id);
+  // All large artwork is drawn ON THE CAR, then unwrapped through the real
+  // FBX triangles. A motif crossing a UV seam keeps its physical position.
+  const project = (polys: MotifPolygon[], plane: 'top' | 'side', color: string, label: string, role: ShapeRole = 'stripe', material?: Material) => {
+    const uv = projectSurfacePolygons(polys, { plane, side: 'both' });
+    if (!uv.length) return;
+    const d = shape(role, color, label, (fill) => new Path(uvPath(uv, S), { fill, strokeWidth: 0, objectCaching: false }));
+    if (material) d.material = material;
+    out.push(d);
+  };
+  const rect = (x: number, y: number, w: number, h: number): MotifPolygon => [{x,y},{x:x+w,y},{x:x+w,y:y+h},{x,y:y+h}];
+  const top = (polys: MotifPolygon[], color: string, label: string, role: ShapeRole = 'stripe', material?: Material) => project(polys,'top',color,label,role,material);
+  const side = (polys: MotifPolygon[], color: string, label: string, role: ShapeRole = 'stripe', material?: Material) => project(polys,'side',color,label,role,material);
+  const line = (ys: number[], width: number) => ribbon(ys.map((y,i)=>({x:.12+i*.80/(ys.length-1),y})), width);
+  const keylined = (polys: MotifPolygon[], color: string, label: string, chrome = false) => {
+    // Parallel artwork in the same world frame; no independent UV offsets.
+    side(transformMotif(polys, q=>({x:q.x,y:q.y-.018})), p.dark, label+' · ombre');
+    side(transformMotif(polys, q=>({x:q.x,y:q.y+.009})), p.light, label+' · filet');
+    side(polys,color,label,'stripe',chrome?'chrome':undefined);
+  };
+  for (const key of ['sillL','sillR','rearLow']) out.push(...regionDesign(key,'panel','#20252a','Protection carbone',S));
+
+  if (id === 'endurance') {
+    const center = variant === 2 ? -.24 : 0;
+    const bands = variant === 1 ? [rect(-.25,0,.17,1),rect(.08,0,.17,1)] : [rect(center-.15,0,.30,1)];
+    const borders = variant === 1 ? [rect(-.28,0,.025,1),rect(.255,0,.025,1)] : [rect(center-.19,0,.025,1),rect(center+.165,0,.025,1)];
+    top(borders,p.accent2,'Filets endurance · raccord 3D');
+    top(bands,p.accent1,'Bandes endurance · raccord 3D');
+    side([line(variant===2?[.24,.28,.47,.47]:[.24,.30,.34,.34],.115)],p.accent1,'Ceinture de prototype');
+    side([line(variant===2?[.33,.37,.56,.56]:[.33,.39,.43,.43],.018)],p.accent2,'Filet de classe');
+    out.push(...rectOn('top',{x:.446,y:.650,w:.108,h:.079},'decal',p.light,'Cartouche endurance',S));
+    out.push(...rectOn('top',{x:.460,y:.152,w:.080,h:.034},'decal',p.light,'Classe endurance · fond',S));
+    out.push(...labelOn('top',{cx:.5,cy:.169,maxW:.065,maxH:.021,angle:180,flipX:false},'decal',p.dark,'Classe endurance','HYPER',S));
+  } else if (id === 'heritage') {
+    if (variant === 2) {
+      for (let i=0;i<3;i++) {
+        side([[{x:.38+i*.12,y:.12},{x:.46+i*.12,y:.12},{x:.68+i*.10,y:.94},{x:.59+i*.10,y:.94}]],i===1?p.accent2:p.accent1,'Bloc Groupe B '+i);
+        top([rect(-1,.60+i*.095,2,.065)],i===1?p.accent2:p.accent1,'Bande transversale Groupe B '+i);
+      }
+    } else {
+      for(let i=0;i<3;i++) {
+        const ys = variant===0 ? [.30+i*.10,.40+i*.10,.65+i*.06,.75+i*.04] : [.69-i*.10,.59-i*.10,.31+i*.04,.44+i*.10];
+        side([line(ys,.042)],i===1&&variant===1?p.accent2:p.accent1,'Ruban rallye '+i);
+      }
+      top([rect(-.61,.18,.075,.66),rect(.535,.18,.075,.66)],p.accent1,'Filets rallye continus');
+    }
+  } else if (id === 'touring') {
+    side([rect(.20,.0,.80,.68)],'#1b2229','Flancs de monoplace carbone','panel');
+    const ys = variant===0 ? [.30,.42,.66,.73] : variant===1 ? [.53,.53,.62,.62] : [.25,.37,.78,.58];
+    side([line(ys,.15)],p.base,'Panneau de monoplace','body');
+    side([line(ys.map(y=>y+.105),.027)],p.accent1,'Filet Grand Prix');
+    const edge = variant===1 ? .50 : .63;
+    top([rect(-1,0,1-edge,1),rect(edge,0,1-edge,1)],'#20272d','Bords de coque carbone','panel');
+    if(variant===2) top([[{x:0,y:.10},{x:-.22,y:.44},{x:0,y:.30},{x:.22,y:.44}]],p.accent1,'Flèche Grand Prix');
+    else top([rect(-.045,0,.09,1)],p.accent1,'Filet axial Grand Prix');
+    out.push(...regionDesign('spoiler','panel','#20262c','Aileron carbone',S));
+  } else if (id === 'rallyRaid') {
+    if(variant===0) {
+      side([[{x:.28,y:0},{x:.47,y:0},{x:.83,y:1},{x:.66,y:1}]],p.accent1,'Diagonale usine continue');
+      side([[{x:.50,y:0},{x:.55,y:0},{x:.92,y:1},{x:.87,y:1}]],p.accent2,'Filet usine continu');
+      top([[{x:-1,y:.55},{x:-.28,y:.80},{x:.28,y:.80},{x:1,y:.55},{x:1,y:.70},{x:.28,y:.91},{x:-.28,y:.91},{x:-1,y:.70}]],p.accent1,'Chevron arrière usine');
+    } else if(variant===1) {
+      for(let i=0;i<3;i++) side([line([.20+i*.12,.26+i*.12,.71+i*.06,.60+i*.08],.065)],i===1?p.accent2:p.accent1,'Ruban de spéciale '+i);
+      top([rect(-.34,.02,.12,.38),rect(.22,.02,.12,.38)],p.accent1,'Bandes rallye avant');
+    } else {
+      side([rect(.25,.14,.75,.31)],p.accent2,'Protection équipe usine','body');
+      side([[{x:.37,y:.45},{x:.57,y:.45},{x:.85,y:.91},{x:.64,y:.91}]],p.accent1,'Panneau rallye');
+      top([rect(-1,.58,2,.19)],p.accent1,'Bande arrière équipe usine');
+    }
+  } else if (id === 'trackday') {
+    top([rect(-1,0,2,.40)],p.accent1,'Capot publicitaire stock-car','body');
+    if(variant===1) keylined(flameMotif(0),p.accent1,'Flammes de speedway');
+    else if(variant===0) keylined([[{x:.19,y:.32},{x:.48,y:.61},{x:.59,y:.49},{x:.91,y:.86},{x:.67,y:.48},{x:.57,y:.33},{x:.43,y:.46}]],p.accent1,'Éclair stock-car');
+    else side([rect(.30,.20,.68,.47)],p.accent1,'Panneau sponsor latéral','body');
+    top([rect(-.59,.40,.04,.60),rect(.55,.40,.04,.60)],p.accent1,'Filets stock-car');
+  } else if (id==='fantasy') {
+    if(variant===0) {
+      const facets: MotifPolygon[][] = [[],[],[],[]];
+      for(let row=0;row<6;row++) for(let col=0;col<6;col++) {
+        const x=-1+col/3, y=row/6, dx=1/3, dy=1/6;
+        facets[(row+col)%4].push([{x,y},{x:x+dx,y},{x:x+dx,y:y+dy}]);
+        facets[(row+col+2)%4].push([{x,y},{x:x+dx,y:y+dy},{x,y:y+dy}]);
+      }
+      const colors=[p.base,shade(p.base,12),shade(p.accent2,-18),shade(p.base,-8)];
+      facets.forEach((polys,i)=>top(polys,colors[i],'Facettes astrales '+i,'body',i%2?'metallic':'satin'));
+      for(let i=0;i<5;i++) side([[{x:.26+i*.13,y:.16},{x:.44+i*.10,y:.50},{x:.30+i*.12,y:.86}]],colors[i%4],'Cristal latéral '+i,'body','metallic');
+    } else if(variant===1) {
+      for(let band=0;band<4;band++) {
+        const pts: MotifPolygon=[];
+        for(let i=0;i<=40;i++){const a=i/40*Math.PI*2;pts.push({x:Math.cos(a)*(.26+band*.13),y:.55+Math.sin(a)*(.12+band*.045)});}
+        const inner=pts.map(q=>({x:q.x*.92,y:.55+(q.y-.55)*.92})).reverse();
+        top([[...pts,...inner]],band%2?p.accent2:p.accent1,'Orbite de nébuleuse '+band,'body',band%2?'metallic':'satin');
+      }
+      side([line([.26,.43,.72,.53],.22)],p.accent2,'Nébuleuse latérale','body','metallic');
+    } else {
+      top([rect(-.62,.08,.20,.80),rect(.42,.08,.20,.80)],shade(p.base,10),'Plaques arcanes','body','metallic');
+      for(let row=0;row<4;row++) for(const sign of [-1,1]) {
+        const t=.16+row*.19;
+        top([[{x:.10*sign,y:t},{x:.25*sign,y:t+.06},{x:.40*sign,y:t+.06},{x:.53*sign,y:t+.14},{x:.49*sign,y:t+.14},{x:.37*sign,y:t+.075},{x:.23*sign,y:t+.075}]],p.accent2,'Circuit arcanique '+row+' '+sign,'trim','metallic');
+      }
+      side([line([.28,.28,.64,.64],.16)],shade(p.base,18),'Circuit latéral · plaque','body','metallic');
+    }
+    out.push(...fantasyVeins(S,p,variant));
+    const stars=3+Math.floor(complexity/12);
+    for(let i=0;i<stars;i++) {
+      const x=Math.sin(i*2.7)*.52,y=.12+(i%7)*.115,r=.018+(i%3)*.006;
+      top([[{x,y:y-r},{x:x+r,y},{x,y:y+r},{x:x-r,y}]],i%2?p.accent2:p.light,'Éclat astral '+i,'trim','chrome');
+    }
+  } else if (tuning) {
+    const carbonHood = id!=='drift' || variant===1;
+    if(carbonHood) out.push(...carbonPanel('top',{x:.365,y:.548,w:.27,h:.265},'Capot carbone tuning',S));
+    out.push(...regionDesign('spoiler','panel','#1b2228','Aileron composite tuning',S));
+    if(id==='streetArt') {
+      const motifs=tribalMotif(variant);
+      keylined(motifs,p.accent1,LIVERY_COMPOSITIONS[id][variant]);
+      if(variant===1) {
+        side([[{x:.242,y:.65},{x:.274,y:.663},{x:.260,y:.628}]],p.accent2,'Œil du dragon');
+        side([[{x:.146,y:.526},{x:.195,y:.57},{x:.185,y:.534}]],p.light,'Croc du dragon');
+      }
+      // Smaller related blades on the crown; flanks carry the hero artwork.
+      for(const sign of [-1,1]) top([[{x:.08*sign,y:.13},{x:.27*sign,y:.23},{x:.17*sign,y:.39},{x:.39*sign,y:.54},{x:.30*sign,y:.30},{x:.43*sign,y:.16},{x:.21*sign,y:.21}]],p.accent1,'Tribal capot '+sign);
+    } else if(id==='drift') {
+      const motifs=variant===0?tornMotif(0):variant===1?flameMotif(2):tribalMotif(2);
+      // Chrome wraps deliberately differ from the matte sponsor stickers.
+      keylined(motifs,p.accent1,LIVERY_COMPOSITIONS[id][variant],variant!==1);
+      if(variant===2) top([rect(-1,.62,2,.38)],p.accent1,'Bicolore showcar','body','metallic');
+      const crown = transformMotif(variant===0?tornMotif(2):flameMotif(1),q=>({x:(q.y-.53)*1.45,y:.02+q.x*.45}));
+      top(crown,p.accent1,'Vinyle capot showcar','stripe',variant===0?'chrome':undefined);
+    } else {
+      if(variant===0) {
+        top([rect(-.41,0,.22,1),rect(-.14,0,.055,1)],p.accent1,'Double bande de préparateur');
+        side([line([.30,.39,.48,.50],.18)],p.accent2,'Bande basse street');
+        side([line([.39,.48,.57,.59],.025)],p.accent1,'Filet street');
+      } else if(variant===1) {
+        keylined(tornMotif(1),p.accent1,'Griffures préparateur');
+        top([rect(-.50,0,.09,1),rect(.41,0,.09,1)],p.accent1,'Bandes de capot');
+      } else {
+        keylined(tribalMotif(2),p.accent1,'Éclairs street');
+        top([[{x:-.68,y:.11},{x:-.29,y:.26},{x:.07,y:.18},{x:.34,y:.47},{x:.14,y:.12},{x:-.25,y:.19}]],p.accent1,'Éclair de capot');
+      }
+    }
+  }
+  return out.concat(identity(S,p,id,complexity));
+}
+
+function bodyWear(rng: Rng, S: number, amount: number): DesignShape[] {
+  if (!amount) return [];
+  const out: DesignShape[] = [];
+  for (const key of ['sillL', 'sillR', 'rearLow', 'front']) {
+    const poly = largestPoly(key); if (!poly) continue;
+    const bounds = polyBBox(poly); const segments: string[] = [];
+    for (let i = 0; i < 3 + Math.round(amount / 8); i++) {
+      const x = rand(rng, bounds.x, bounds.x + bounds.w); const y = rand(rng, bounds.y, bounds.y + bounds.h);
+      segments.push(`M ${x*S} ${y*S} l ${rand(rng,.001,.004)*S} ${rand(rng,.002,.008)*S}`);
+    }
+    out.push(...onIsland(key, bounds, 'deco', '#878e8c', 'Patine · impacts', (fill) => new Path(segments.join(' '), { fill: '', stroke: fill, strokeWidth: 1.1, opacity: Math.min(.65, .12 + amount / 170), objectCaching: false }), S));
+  }
+  return out;
+}
+function makeDetails(S: number, p: Palette, accent: boolean): DesignShape[] {
+  const out: DesignShape[] = [];
+  for (const key of ['d_wing', 'd_floor', 'd_cockpit']) out.push(...regionDesign(key, 'panel', '#24292d', 'Composite · ' + key, S));
+  // Weave is one vector layer per component; every tooth is bounded to its UV contour.
+  const weave: string[] = [];
+  for (let y = 0; y < S; y += 24) for (let x = 0; x < S; x += 48) {
+    const shift = Math.round(y / 24) % 2 ? 24 : 0;
+    weave.push(`M ${x+shift} ${y} l 18 0 l 6 10 l -18 0 Z`);
+  }
+  for (const key of ['d_wing', 'd_floor']) {
+    const path = uvPath(islandPolys(key), S);
+    out.push(shape('panel', '#343b40', 'Tissage carbone · ' + key, (fill, mono) => {
+      // The weave changes the albedo, not the material value: storing all its
+      // teeth again in R only bloats editable projects with identical pixels.
+      if(mono) return new Path(path,{fill,objectCaching:false});
+      const obj = new Path(weave.join(' '), { fill, opacity: .42, objectCaching: false });
+      obj.clipPath = new Path(path, { absolutePositioned: true, objectCaching: false }); return obj;
+    }));
+  }
+  for (const key of ['d_front', 'd_rear']) out.push(...regionDesign(key, 'trim', '#6c7275', 'Mécanique · ' + key, S));
+  if (accent) out.push(...regionDesign('d_side_r', 'accent', shade(p.accent1, -12), 'Cache latéral contrasté', S));
+  return out;
+}
+function makeTyres(rng: Rng, S: number, tire: Exclude<Tire, 'auto'>, wear: number, accent: string): DesignShape[] {
+  const out: DesignShape[] = [];
+  for (const x of [.102, .893]) out.push(...rectOn('tyres', { x, y: 0, w: .014, h: 1 }, 'accent', accent, 'Anneau de flanc', S));
+  out.push(...rectOn('tyres', { x: .201, y: 0, w: .611, h: 1 }, 'body', '#2c3032', 'Gomme · bande de roulement', S));
+  const groove: string[] = [];
+  if (tire !== 'slick') {
+    for (const x of tire === 'rally' ? [.40,.61] : tire === 'wet' ? [.28,.41,.60,.73] : [.29,.48,.68]) groove.push(`M ${x*S} 0 V ${S}`);
+    const step = tire === 'rally' ? .040 : tire === 'wet' ? .024 : .055;
+    for (let y = 0; y < 1; y += step) {
+      if (tire === 'rally') { groove.push(`M ${.214*S} ${y*S} L ${.40*S} ${(y+.013)*S} L ${.51*S} ${(y+.013)*S} M ${.51*S} ${(y+.033)*S} L ${.61*S} ${(y+.033)*S} L ${.795*S} ${(y+.020)*S}`); }
+      else groove.push(`M ${.214*S} ${y*S} l ${.11*S} ${.016*S} M ${.795*S} ${y*S} l ${-.12*S} ${.016*S}`);
+    }
+    out.push(...onIsland('tyres', { x: .201, y: 0, w: .611, h: 1 }, 'panel', '#121619', 'Sculpture · ' + tire, (fill) => new Path(groove.join(' '), { fill: '', stroke: fill, strokeWidth: tire === 'rally' ? 5 : 2.8, objectCaching: false }), S));
+  }
+  const grain: string[] = [];
+  for (let i = 0; i < 150; i++) { const x = rand(rng,.205,.807)*S; const y = rand(rng,0,1)*S; grain.push(`M ${x} ${y} l ${rand(rng,1,2.5)} ${rand(rng,1,3.5)}`); }
+  out.push(...onIsland('tyres', { x: .201, y: 0, w: .611, h: 1 }, 'deco', '#434746', 'Grain de gomme', (fill) => new Path(grain.join(' '), { fill: '', stroke: fill, strokeWidth: 1, opacity: .22 + wear/230, objectCaching: false }), S));
+  for (let turn = 0; turn < 2; turn++) {
+    out.push(...labelOn('tyres', { cx: .948, cy: (turn + .5)/2, maxW: .05, maxH: .20, angle: 90, flipX: false, fontStyle: 'italic' }, 'number', '#d3d1c7', 'Marquage pneu', 'APEX', S));
+    out.push(...labelOn('tyres', { cx: .983, cy: (turn + .5)/2, maxW: .016, maxH: .18, angle: 90, flipX: false, fontWeight: 700 }, 'number', '#8b9291', 'Spécification pneu', { slick: 'SLICK / SOFT', semiSlick: 'SPORT / 200', wet: 'RAIN / W01', rally: 'GRAVEL / G04' }[tire], S));
+  }
+  if (wear > 0) {
+    out.push(...rectOn('tyres', { x: .28, y: 0, w: .45, h: 1 }, 'deco', '#747470', 'Usure · gomme polie', S, { opacity: wear/500 }));
+  }
+  return out;
+}
+function mapLights(editor: EditorCore, id: MapId, opts: GeneratorOptions, designs: { shapes: DesignShape[]; role: IllumRole }[]) {
+  editor.batch(id, { clear: opts.clearExisting }, (canvas) => {
+    canvas.backgroundColor = '#000000';
+    for (const { shapes, role } of designs) for (const design of shapes) {
+      const obj = design.make(design.color, false) as FabricObject & { illumRole?: IllumRole }; obj.illumRole = role; canvas.add(obj);
+    }
+  });
+}
 export interface GenerationSummary {
   theme: Theme;
   pattern: Exclude<Pattern, 'auto'>;
   finish: Exclude<Finish, 'auto'>;
   palette: Palette;
   seed: number;
+  tire: Exclude<Tire, 'auto'>;
+  lights: Exclude<Lights, 'auto'>;
+  layers: number;
+  stockTyres: boolean;
+  composition: string;
+  paletteName: string;
+  inspiration: string;
 }
-
-const coatGray = (coat: Exclude<Coat, 'auto'>): number =>
-  ({ none: 8, light: 120, full: 235 })[coat];
+const coatGray = (coat: Exclude<Coat, 'auto'>): number => ({ none: 0, light: 120, full: 235 })[coat];
 
 export function generateSkin(editor: EditorCore, opts: GeneratorOptions): GenerationSummary {
+  const enums: [unknown, readonly string[]][] = [
+    [opts.theme, ['random', ...CURATED_THEMES]], [opts.pattern, ['auto', ...Object.keys(PATTERN_LABELS)]],
+    [opts.finish, ['auto', ...Object.keys(FINISH_LABELS)]], [opts.coat, ['auto','none','light','full']],
+    [opts.harmony, ['auto','mono','complementary','analogous','triadic']],
+    [opts.wheels, ['auto','dark','accent','base']], [opts.details, ['auto','dark','accent']],
+    [opts.neon, ['auto','none','accent','base']], [opts.neonRole, ['always','head','brake']],
+    [opts.tire, ['auto','slick','semiSlick','wet','rally']], [opts.lights, ['auto','brake','endurance','street','none']],
+  ];
+  if (enums.some(([value, allowed]) => typeof value !== 'string' || !allowed.includes(value)) ||
+      [opts.raceNumber, opts.randomBaseHue, opts.randomAccent, opts.clearExisting].some((value) => typeof value !== 'boolean') ||
+      typeof opts.seed !== 'string' || !/^\d{0,12}$/.test(opts.seed)) throw new Error('Réglages de génération invalides.');
+  if (![opts.complexity, opts.dirt, opts.wear].every((value) => Number.isFinite(value) && value >= 0 && value <= 100) ||
+      !/^#[0-9a-f]{6}$/i.test(opts.baseColor) || !/^#[0-9a-f]{6}$/i.test(opts.accentColor) || !/^\d{0,3}$/.test(opts.raceNumberValue)) throw new Error('Réglages de génération invalides.');
   const S = MAP_BY_ID.Skin_B.workRes;
   const parsedSeed = Number(opts.seed.trim());
-  const seed =
-    opts.seed.trim() && Number.isFinite(parsedSeed)
-      ? Math.abs(Math.floor(parsedSeed))
-      : Math.floor(Math.random() * 1_000_000_000);
+  const seed = opts.seed.trim() && Number.isFinite(parsedSeed) ? Math.abs(Math.floor(parsedSeed)) >>> 0 : Math.floor(Math.random() * 1_000_000_000);
   const rng = mulberry32(seed);
-
-  const { id: themeId, spec } = resolveTheme(rng, opts.theme);
-  const palette = themeId === 'zevent' ? zeventPalette(rng, opts) : buildPalette(rng, opts, spec.palette);
-
-  // Résolution des choix : l'utilisateur (valeur ≠ « auto ») prime sur le thème.
-  const pattern: Exclude<Pattern, 'auto'> = opts.pattern === 'auto' ? spec.pattern : opts.pattern;
-  const finish: Exclude<Finish, 'auto'> = opts.finish === 'auto' ? spec.finish : opts.finish;
-  const coat: Exclude<Coat, 'auto'> = opts.coat === 'auto' ? spec.coat : opts.coat;
-  const wheels: Exclude<WheelStyle, 'auto'> = opts.wheels === 'auto' ? spec.wheels : opts.wheels;
-  const details: Exclude<DetailStyle, 'auto'> = opts.details === 'auto' ? spec.details : opts.details;
-  const neonSrc: Exclude<Neon, 'auto'> = opts.neon === 'auto' ? spec.neon : opts.neon;
-
-  // La finition explicite pilote le matériau de la carrosserie ; les rôles de
-  // dessin gardent le schéma matériau du thème.
-  const bodyMaterial: Material =
-    opts.finish === 'auto' ? spec.materials.body : finishToMaterial[opts.finish];
-  const scheme: MaterialScheme = { ...spec.materials, body: bodyMaterial };
-  const materialForRole = (role: ShapeRole): Material => scheme[role];
-
-  // Furtif : motif ton sur ton (à peine plus clair que la base) ; le relief
-  // vient du matériau (brillant sur mat), pas de la couleur.
-  const drawPalette: Palette =
-    themeId === 'stealth'
-      ? { ...palette, accent1: shade(palette.base, 7), accent2: shade(palette.base, 12) }
-      : palette;
-
-  // ---- Construction du DESSIN (partagé Skin_B / Skin_R / Skin_CoatR) -------
-  let design: DesignShape[] = [];
-  let gradientOverlay = false;
-  const zeventLocked = themeId === 'zevent' && opts.pattern === 'auto';
-  if (zeventLocked) {
-    design = makeZeventBody(rng, S, drawPalette, opts.complexity);
-  } else {
-    switch (pattern) {
-      case 'stripes':
-        design = makeStripes(rng, S, drawPalette, opts.complexity);
-        break;
-      case 'chevrons':
-        design = makeChevrons(rng, S, drawPalette, opts.complexity);
-        break;
-      case 'swoosh':
-        design = makeSwoosh(rng, S, drawPalette, opts.complexity);
-        break;
-      case 'split':
-        design = makeSplit(rng, S, drawPalette, opts.complexity);
-        break;
-      case 'hex':
-        design = makeHex(rng, S, drawPalette, opts.complexity);
-        break;
-      case 'camo':
-        design = makeCamo(rng, S, drawPalette, opts.complexity);
-        break;
-      case 'geo':
-        design = makeGeo(rng, S, drawPalette, opts.complexity);
-        break;
-      case 'splatter':
-        design = makeSplatter(rng, S, drawPalette, opts.complexity);
-        break;
-      case 'gradient':
-        gradientOverlay = true;
-        break;
-      case 'solid':
-        break;
-    }
+  const { id, spec } = resolveTheme(rng, opts.theme);
+  // Independent streams: editing a material, number or dirt amount must not
+  // silently move the design. The seed describes the whole art direction.
+  const directionRng = mulberry32(seed ^ 0x6a09e667);
+  const variant = Math.floor(directionRng() * 3);
+  const paletteIndex = Math.floor(directionRng() * LIVERY_PALETTES[id].length);
+  const palette = themePalette(mulberry32(seed ^ 0xbb67ae85), opts, id, spec, paletteIndex);
+  const tuning = ['streetArt', 'drift', 'nightRun'].includes(id);
+  const pattern = opts.pattern === 'auto' ? spec.pattern : opts.pattern;
+  const finish = opts.finish === 'auto' ? pick(directionRng, tuning || id==='fantasy' ? ['metallic', 'gloss'] as const : ['gloss', 'gloss', 'satin'] as const) : opts.finish;
+  const coat = opts.coat === 'auto' ? spec.coat : opts.coat;
+  const coatScale = coatGray(coat) / 235;
+  const tire = opts.tire === 'auto' ? ['heritage','rallyRaid'].includes(id) ? 'rally' : tuning ? 'semiSlick' : 'slick' : opts.tire;
+  const lights = opts.neon === 'none' ? 'none' : opts.lights === 'auto' ? tuning || id==='fantasy' ? 'street' : ['endurance','rallyRaid'].includes(id) ? 'endurance' : 'brake' : opts.lights;
+  const scheme = { ...spec.materials, body: finishToMaterial[finish] };
+  let design: DesignShape[];
+  if (opts.pattern === 'auto') design = curatedBody(rng, S, palette, id, opts.complexity, variant);
+  else {
+    const builders = { stripes: makeStripes, chevrons: makeChevrons, swoosh: makeSwoosh, split: makeSplit, hex: makeHex, camo: makeCamo, geo: makeGeo, splatter: makeSplatter };
+    design = pattern in builders ? builders[pattern as keyof typeof builders](rng, S, palette, opts.complexity) : [];
+    design.push(...identity(S, palette, id, opts.complexity));
   }
-  // Jantes (disques archL/archR) : sous les numéros, au-dessus du motif.
-  design = design.concat(makeRims(S, palette, spec.rims, spec.rims === 'accent' ? palette.dark : palette.accent1));
-  if (themeId === 'zevent') {
-    design = design.concat(makeZeventMarks(rng, S, drawPalette));
-  }
-  if (opts.raceNumber && themeId !== 'zevent') {
-    const placements = spec.numbers.length ? spec.numbers : (['nose'] as NumberPlacement[]);
-    // En bicolore, les flancs sont peints dans la teinte sombre : contraste adapté.
-    const flankBg = pattern === 'split' ? palette.accent2 : undefined;
-    // Furtif : numéro ton sur ton (le matériau laqué le révèle).
-    const numberColor = themeId === 'stealth' ? shade(palette.base, 10) : undefined;
-    design = design.concat(
-      makeRaceNumbers(rng, S, palette, opts.raceNumberValue, placements, spec.plate, flankBg, numberColor),
-    );
-  }
-
-  // ---- Skin_B : couleur -----------------------------------------------------
-  editor.batch('Skin_B', { clear: opts.clearExisting }, (c) => {
-    c.backgroundColor = palette.base;
-    if (gradientOverlay) {
-      const diag = rng() < 0.5;
-      const grad = new Gradient({
-        type: 'linear',
-        coords: diag ? { x1: 0, y1: 0, x2: S, y2: S } : { x1: 0, y1: 0, x2: 0, y2: S },
-        colorStops: [
-          { offset: 0, color: palette.accent1 },
-          { offset: 0.5, color: palette.base },
-          { offset: 1, color: palette.accent2 },
-        ],
-      });
-      c.add(
-        name(new Rect({ left: 0, top: 0, width: S, height: S, fill: grad, originX: 'left', originY: 'top' }), 'Dégradé de fond'),
-      );
-    }
-    design.forEach((d) => c.add(d.make(d.color, false)));
-  });
-
-  // ---- Skin_R : matériau (R = rugosité, G = métal), MÊME géométrie ----------
-  editor.batch('Skin_R', { clear: opts.clearExisting }, (c) => {
-    c.backgroundColor = materialColor(bodyMaterial);
-    design.forEach((d) => {
-      const mat = materialForRole(d.role);
-      c.add(name(d.make(materialColor(mat), true), `${d.label} · matériau`));
-    });
-  });
-
-  // ---- Skin_CoatR : vernis (gris), MÊME géométrie : la laque suit le dessin -
-  editor.batch('Skin_CoatR', { clear: opts.clearExisting }, (c) => {
-    const bodyV = coatGray(coat);
-    c.backgroundColor = rgb(bodyV, bodyV, bodyV);
-    design.forEach((d) => {
-      const v = MATERIAL_VARNISH[materialForRole(d.role)];
-      c.add(name(d.make(rgb(v, v, v), true), `${d.label} · vernis`));
-    });
-  });
-
-  // ---- Saleté ---------------------------------------------------------------
-  const dirtV = Math.round((opts.dirt / 100) * 255);
-  for (const id of DIRT_MASK_IDS) editor.batch(id, { clear: opts.clearExisting }, (c) => {
-    c.backgroundColor = rgb(dirtV, dirtV, dirtV);
-  });
-
-  // ---- Roues ----------------------------------------------------------------
-  const [bh, bs] = hexToHsl(palette.base);
-  const [a1h, a1s] = hexToHsl(palette.accent1);
-  const SW = MAP_BY_ID.Wheels_B.workRes;
-  editor.batch('Wheels_B', { clear: opts.clearExisting }, (c) => {
-    // Le pneu reste toujours sombre (une gomme colorée rend mal en 3D) ; le
-    // style ne joue que sur une légère teinte et sur le liseré du flanc.
-    c.backgroundColor = {
-      dark: '#212328',
-      accent: hsl(a1h, Math.min(a1s, 40), 13),
-      base: hsl(bh, Math.min(bs, 40), 13),
-    }[wheels];
-    c.add(
-      name(
-        new Rect({
-          left: 0,
-          top: 0.46 * SW,
-          width: SW,
-          height: 0.08 * SW,
-          fill: wheels === 'base' ? palette.base : palette.accent1,
-          originX: 'left',
-          originY: 'top',
-        }),
-        'Liseré pneus',
-      ),
-    );
-  });
-  editor.batch('Wheels_R', { clear: opts.clearExisting }, (c) => {
-    c.backgroundColor = materialColor(spec.wheelMaterial);
-  });
-
-  // ---- Détails --------------------------------------------------------------
-  const [a2h, a2s] = hexToHsl(palette.accent2);
-  editor.batch('Details_B', { clear: opts.clearExisting }, (c) => {
-    c.backgroundColor = themeId === 'zevent' ? '#0d1a10' : details === 'dark' ? '#3a3d42' : hsl(a2h, a2s, 36);
-    if (themeId === 'zevent') {
-      c.add(
-        name(
-          new Rect({
-            left: 0,
-            top: 0.46 * S,
-            width: S,
-            height: 0.045 * S,
-            fill: palette.accent1,
-            originX: 'left',
-            originY: 'top',
-          }),
-          'Liseré lime détails',
-        ),
-      );
-      c.add(
-        name(
-          new Rect({
-            left: 0.12 * S,
-            top: 0.18 * S,
-            width: 0.76 * S,
-            height: 0.018 * S,
-            fill: palette.accent1,
-            originX: 'left',
-            originY: 'top',
-          }),
-          'Filet détails haut',
-        ),
-      );
-      c.add(
-        name(
-          new Rect({
-            left: 0.08 * S,
-            top: 0.8 * S,
-            width: 0.84 * S,
-            height: 0.018 * S,
-            fill: palette.light,
-            originX: 'left',
-            originY: 'top',
-          }),
-          'Filet détails bas',
-        ),
-      );
-      for (const [cx, cy] of [
-        [0.22, 0.3],
-        [0.5, 0.3],
-        [0.78, 0.3],
-        [0.22, 0.68],
-        [0.78, 0.68],
-      ] as const) {
-        c.add(
-          name(
-            new Ellipse({
-              left: cx * S,
-              top: cy * S,
-              originX: 'center',
-              originY: 'center',
-              rx: 0.028 * S,
-              ry: 0.028 * S,
-              fill: palette.accent1,
-            }),
-            'Pastille détails',
-          ),
-        );
+  const rimStyle = opts.wheels === 'auto' ? pick(directionRng, tuning ? ['chrome','bronze','dark'] as const : id==='fantasy'?['chrome','accent','chrome'] as const : id === 'heritage' ? ['accent','light','bronze'] as const : [spec.rims,'dark','light'] as const) : opts.wheels;
+  design.push(...makeRims(S, palette, rimStyle, palette.accent1));
+  if (opts.raceNumber) design.push(...makeRaceNumbers(rng, S, palette, opts.raceNumberValue, spec.numbers, spec.plate, undefined, id === 'endurance' ? palette.dark : undefined, id === 'trackday' ? palette.dark : undefined));
+  const wear = bodyWear(rng, S, opts.wear);
+  const detailDesign = makeDetails(S, palette, (opts.details === 'auto' ? spec.details : opts.details) === 'accent');
+  const tyreAccent = opts.wheels === 'base' ? palette.base : opts.wheels === 'dark' ? '#626768' : palette.accent1;
+  const stockTyres = editor.getGuideIslands('wheels').some((island) => island.key === 'tyres');
+  const tyreDesign = stockTyres ? makeTyres(rng, S, tire, opts.wear, tyreAccent) : [];
+  let layers = 0;
+  function draw(id: MapId, background: string, shapes: DesignShape[], channel: 'color' | 'material' | 'coat' = 'color') {
+    editor.batch(id, { clear: opts.clearExisting }, (canvas) => {
+      canvas.backgroundColor = background;
+      if (id === 'Skin_B' && pattern === 'gradient' && opts.pattern !== 'auto') canvas.add(name(new Rect({ left: 0, top: 0, originX: 'left', originY: 'top', width: S, height: S, fill: new Gradient({ type: 'linear', coords: { x1: 0, y1: 0, x2: S, y2: S }, colorStops: [{ offset: 0, color: palette.base }, { offset: 1, color: palette.accent1 }] }) }), 'Laque dégradée'));
+      for (const d of shapes) {
+        const mat = id === 'Wheels_R' ? 'matte' : d.material ?? scheme[d.role];
+        const varnish = Math.round(MATERIAL_VARNISH[mat] * coatScale);
+        const value = channel === 'color' ? d.color : channel === 'material' ? id === 'Wheels_R' ? rgb(d.role === 'panel' ? 235 : d.role === 'number' ? 185 : 220, 0, 0) : materialColor(mat) : rgb(varnish, varnish, varnish);
+        canvas.add(name(d.make(value, channel !== 'color'), d.label + (channel === 'material' ? ' · matière' : channel === 'coat' ? ' · vernis' : ''))); layers++;
       }
-    }
-  });
-  editor.batch('Details_R', { clear: opts.clearExisting }, (c) => {
-    // Matériau des détails (aileron, châssis…) + liseré métallique/chromé.
-    c.backgroundColor = materialColor(spec.detailMaterial);
-    const trimMat = materialColor(scheme.trim);
-    c.add(
-      name(
-        new Rect({
-          left: 0,
-          top: 0.46 * S,
-          width: S,
-          height: 0.06 * S,
-          fill: trimMat,
-          originX: 'left',
-          originY: 'top',
-        }),
-        'Liseré métal détails',
-      ),
-    );
-  });
-
-  // ---- Néon des détails (Details_I) : couleur peinte = zone qui brille -------
-  editor.batch('Details_I', { clear: opts.clearExisting }, (c) => {
-    c.backgroundColor = '#000000';
-    if (neonSrc !== 'none') {
-      const glow = neonSrc === 'accent' ? palette.accent1 : palette.base;
-      const strips = themeId === 'zevent' ? makeZeventNeon(S, glow) : makeNeonStrips(rng, S, glow);
-      strips.forEach((o) => {
-        (o as FabricObject & { illumRole?: IllumRole }).illumRole = opts.neonRole;
-        c.add(o);
-      });
-    }
-  });
-
-  editor.flushTexture();
-  return { theme: themeId, pattern, finish, palette, seed };
+    });
+  }
+  draw('Skin_B', palette.base, [...design, ...wear]);
+  draw('Skin_R', materialColor(scheme.body), [...design, ...wear], 'material');
+  const v = coatGray(coat); draw('Skin_CoatR', rgb(v,v,v), [...design, ...wear], 'coat');
+  draw('Details_B', '#343a40', detailDesign);
+  draw('Details_R', materialColor(spec.detailMaterial), detailDesign, 'material');
+  if (stockTyres) draw('Wheels_B', '#222629', tyreDesign);
+  // Tyres are dielectric rubber; a colored marking does not turn them into metal.
+  if (stockTyres) draw('Wheels_R', rgb(Math.round(225 - opts.wear*.45),0,0), tyreDesign, 'material');
+  const dirt = opts.dirt/100;
+  for (const map of ['Skin_DirtMask','Details_DirtMask','Wheels_DirtMask'] as const) {
+    if (map === 'Wheels_DirtMask' && !stockTyres) continue;
+    const base = Math.round(dirt * (map === 'Wheels_DirtMask' ? 255 : 120));
+    const keys = map === 'Skin_DirtMask' ? ['sillL','sillR','rearLow','front'] : map === 'Details_DirtMask' ? ['d_floor','d_front'] : ['tyres'];
+    const shapes = keys.flatMap((key) => regionDesign(key, 'deco', rgb(Math.round(dirt*255),Math.round(dirt*255),Math.round(dirt*255)), 'Saleté · zone exposée', S));
+    draw(map, rgb(base,base,base), shapes);
+  }
+  const red = '#ff352c';
+  const brake = lights === 'none' ? [] : BRAKE_LIGHT_ZONES.map((bounds, index) => shape(
+    'accent', red, `Feu stop ${index === 0 ? 'gauche' : 'droit'}`,
+    (fill) => new Rect({ left: bounds.x*S, top: bounds.y*S, originX: 'left', originY: 'top',
+      width: bounds.w*S, height: bounds.h*S, rx: .002*S, ry: .004*S, strokeWidth: 0, fill }),
+    [{ x: bounds.x, y: bounds.y }, { x: bounds.x + bounds.w, y: bounds.y },
+      { x: bounds.x + bounds.w, y: bounds.y + bounds.h }, { x: bounds.x, y: bounds.y + bounds.h }], S,
+  ));
+  const head = lights === 'endurance' || lights === 'street' ? onIsland('d_head', { x: .957, y: .605, w: .022, h: .112 }, 'accent', '#dcebe9', 'Phare de nuit', (fill) => new Rect({ left: .957*S, top: .605*S, originX: 'left', originY: 'top', width: .022*S, height: .112*S, fill }), S) : [];
+  mapLights(editor, 'Details_I', opts, [{ shapes: brake, role: 'brake' }, { shapes: head, role: 'head' }]);
+  const decorative = lights==='street'?decorativeLights(S,palette,id,variant,opts.neon==='base'?palette.base:opts.neon==='accent'?palette.accent1:undefined):[];
+  const luminous = lights === 'street' && !decorative.length ? ['sillL','sillR'].flatMap((key) => {
+    const poly = largestPoly(key); if (!poly) return []; const b = polyBBox(poly);
+    return rectOn(key, { x: b.x + b.w*.46, y: b.y + b.h*.08, w: Math.max(.002,b.w*.06), h: b.h*.82 }, 'trim', opts.neon === 'base' ? palette.base : palette.accent1, 'Signature de nuit', S);
+  }) : [];
+  mapLights(editor, 'Skin_I', opts, [{ shapes: luminous, role: 'head' },...decorative]);
+  if (stockTyres) mapLights(editor, 'Wheels_I', opts, []);
+  editor.setSpeedLightColor('#ffffff');
+  editor.flushTexture(true);
+  const selectedPalette = LIVERY_PALETTES[id][paletteIndex];
+  return { theme: id, pattern, finish, palette, seed, tire, lights, layers: layers + brake.length + head.length + luminous.length+decorative.reduce((n,d)=>n+d.shapes.length,0), stockTyres,
+    composition: opts.pattern === 'auto' ? LIVERY_COMPOSITIONS[id][variant] : PATTERN_LABELS[pattern],
+    paletteName: opts.randomBaseHue && opts.randomAccent && opts.harmony === 'auto' ? selectedPalette.name : 'Palette personnalisée',
+    inspiration: selectedPalette.inspiration };
 }

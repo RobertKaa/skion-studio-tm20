@@ -3,26 +3,18 @@
  * (localStorage, clé versionnée). Le parsing est défensif : toute valeur
  * absente ou invalide retombe sur la valeur par défaut, champ par champ.
  */
-import { DEFAULT_OPTIONS, type GeneratorOptions } from './generator';
+import { DEFAULT_OPTIONS, THEME_CATALOG, type GeneratorOptions } from './generator';
 import { ILLUM_ROLES } from './maps';
 
-const STORAGE_KEY = 'tmskin.randomPrefs.v1';
+const STORAGE_KEY = 'tmskin.randomPrefs.v2';
+const LEGACY_STORAGE_KEY = 'tmskin.randomPrefs.v1';
 
-const THEMES = new Set<string>([
-  'random',
-  'racingGT',
-  'retro',
-  'arrow',
-  'wave',
-  'chrome',
-  'stealth',
-  'cyber',
-  'rally',
-  'drift',
-  'esport',
-  'zevent',
-  'full',
-]);
+const THEMES = new Set<string>(['random', ...THEME_CATALOG.map((entry) => entry.id)]);
+const LEGACY_THEMES: Record<string, GeneratorOptions['theme']> = {
+  racingGT: 'endurance', retro: 'heritage', rally: 'rallyRaid', stealth: 'trackday',
+  cyber: 'nightRun', esport: 'touring', arrow: 'endurance', wave: 'drift', chrome: 'nightRun',
+  full: 'random', zevent: 'random',
+};
 const HARMONIES = new Set<string>(['auto', 'mono', 'complementary', 'analogous', 'triadic']);
 const PATTERNS = new Set<string>([
   'auto',
@@ -37,12 +29,14 @@ const PATTERNS = new Set<string>([
   'gradient',
   'solid',
 ]);
-const FINISHES = new Set<string>(['auto', 'matte', 'gloss', 'metallic', 'chrome']);
+const FINISHES = new Set<string>(['auto', 'matte', 'satin', 'gloss', 'metallic', 'chrome']);
 const COATS = new Set<string>(['auto', 'none', 'light', 'full']);
 const WHEELS = new Set<string>(['auto', 'dark', 'accent', 'base']);
 const DETAILS = new Set<string>(['auto', 'dark', 'accent']);
 const NEONS = new Set<string>(['auto', 'none', 'accent', 'base']);
 const NEON_ROLES = new Set<string>(ILLUM_ROLES.map((r) => r.id));
+const TIRES = new Set<string>(['auto', 'slick', 'semiSlick', 'wet', 'rally']);
+const LIGHTS = new Set<string>(['auto', 'brake', 'endurance', 'street', 'none']);
 
 const isHex = (v: unknown): v is string => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
 const isDigits = (v: unknown): v is string => typeof v === 'string' && /^\d*$/.test(v);
@@ -65,7 +59,7 @@ export function sanitizeRandomOptions(raw: unknown): GeneratorOptions {
   if (!raw || typeof raw !== 'object') return { ...d };
   const r = raw as Record<string, unknown>;
   return {
-    theme: pickEnum(r.theme, THEMES, d.theme),
+    theme: pickEnum(typeof r.theme === 'string' && Object.hasOwn(LEGACY_THEMES, r.theme) ? LEGACY_THEMES[r.theme] : r.theme, THEMES, d.theme),
     baseColor: isHex(r.baseColor) ? r.baseColor : d.baseColor,
     randomBaseHue: pickBool(r.randomBaseHue, d.randomBaseHue),
     accentColor: isHex(r.accentColor) ? r.accentColor : d.accentColor,
@@ -78,6 +72,9 @@ export function sanitizeRandomOptions(raw: unknown): GeneratorOptions {
     finish: pickEnum(r.finish, FINISHES, d.finish),
     coat: pickEnum(r.coat, COATS, d.coat),
     dirt: pickPercent(r.dirt, d.dirt),
+    tire: pickEnum(r.tire, TIRES, d.tire),
+    wear: pickPercent(r.wear, d.wear),
+    lights: pickEnum(r.lights, LIGHTS, d.lights),
     wheels: pickEnum(r.wheels, WHEELS, d.wheels),
     details: pickEnum(r.details, DETAILS, d.details),
     neon: pickEnum(r.neon, NEONS, d.neon),
@@ -90,7 +87,7 @@ export function sanitizeRandomOptions(raw: unknown): GeneratorOptions {
 /** Dernière configuration enregistrée, ou les valeurs par défaut. */
 export function loadRandomPrefs(): GeneratorOptions {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(STORAGE_KEY) ?? window.localStorage.getItem(LEGACY_STORAGE_KEY);
     if (!raw) return { ...DEFAULT_OPTIONS };
     return sanitizeRandomOptions(JSON.parse(raw));
   } catch {
@@ -100,7 +97,7 @@ export function loadRandomPrefs(): GeneratorOptions {
 
 export function saveRandomPrefs(opts: GeneratorOptions) {
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(opts));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizeRandomOptions(opts)));
   } catch {
     // Stockage indisponible (mode privé, quota) : la config vit le temps de la session.
   }

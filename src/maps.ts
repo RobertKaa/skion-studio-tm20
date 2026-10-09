@@ -1,3 +1,5 @@
+import { TEXTURE_RESOLUTION } from './editor/resolution';
+
 export type MapId =
   | 'Skin_B'
   | 'Skin_R'
@@ -48,8 +50,8 @@ export const MAPS: MapDef[] = [
     format: 'BC1',
     kind: 'basecolor',
     group: 'skin',
-    workRes: 1024,
-    exportRes: 2048,
+    workRes: TEXTURE_RESOLUTION,
+    exportRes: TEXTURE_RESOLUTION,
     defaultFill: '#c4c8cc',
     description: 'Couleur de base de la carrosserie (RVB).',
   },
@@ -60,17 +62,15 @@ export const MAPS: MapDef[] = [
     format: 'BC5',
     kind: 'roughmetal',
     group: 'skin',
-    workRes: 1024,
-    // Rugosité/métal = données basse fréquence : 1024 est visuellement identique
-    // à 2048 sur la voiture, pour 4× moins de VRAM à (re)charger au respawn.
-    exportRes: 1024,
+    workRes: TEXTURE_RESOLUTION,
+    exportRes: TEXTURE_RESOLUTION,
     defaultFill: '#5a3c00',
     description:
       'Réglez la brillance et l’aspect métallique de la carrosserie. Une faible rugosité donne des reflets nets ; une forte rugosité donne un aspect mat.',
   },
   {
     id: 'Skin_I', label: 'Carrosserie néon / feux', fileName: 'Skin_I.dds',
-    format: 'BC3', kind: 'illum', group: 'skin', workRes: 1024, exportRes: 2048,
+    format: 'BC3', kind: 'illum', group: 'skin', workRes: TEXTURE_RESOLUTION, exportRes: TEXTURE_RESOLUTION,
     defaultFill: '#000000',
     description: 'Lumière de la carrosserie. Ajoutez une image ou peignez sur les pièces ; noir = éteint. Chaque élément possède son propre comportement.',
   },
@@ -81,9 +81,8 @@ export const MAPS: MapDef[] = [
     format: 'BC4',
     kind: 'grayscale',
     group: 'skin',
-    workRes: 1024,
-    // Masque de vernis basse fréquence : 1024 suffit largement (4× moins lourd).
-    exportRes: 1024,
+    workRes: TEXTURE_RESOLUTION,
+    exportRes: TEXTURE_RESOLUTION,
     defaultFill: '#000000',
     description:
       'Niveaux de gris : blanc = vernis brillant / peinture pailletée, noir = aucun vernis. Peignez en blanc les zones à vernir.',
@@ -95,9 +94,8 @@ export const MAPS: MapDef[] = [
     format: 'BC4',
     kind: 'grayscale',
     group: 'skin',
-    workRes: 1024,
-    // Masque de saleté basse fréquence : 1024 suffit largement (4× moins lourd).
-    exportRes: 1024,
+    workRes: TEXTURE_RESOLUTION,
+    exportRes: TEXTURE_RESOLUTION,
     defaultFill: '#000000',
     description:
       'Masque de saleté de la carrosserie : 0 % (noir) protège la peinture ; 100 % (blanc) autorise la saleté. Les gris dosent son effet, sans changer la couleur du skin.',
@@ -109,8 +107,8 @@ export const MAPS: MapDef[] = [
     format: 'BC1',
     kind: 'basecolor',
     group: 'details',
-    workRes: 1024,
-    exportRes: 1024,
+    workRes: TEXTURE_RESOLUTION,
+    exportRes: TEXTURE_RESOLUTION,
     defaultFill: '#7a7d80',
     description: 'Couleur des éléments de détail (aileron, châssis, intérieur…).',
   },
@@ -121,8 +119,8 @@ export const MAPS: MapDef[] = [
     format: 'BC5',
     kind: 'roughmetal',
     group: 'details',
-    workRes: 1024,
-    exportRes: 1024,
+    workRes: TEXTURE_RESOLUTION,
+    exportRes: TEXTURE_RESOLUTION,
     defaultFill: '#8c5a00',
     description:
       'Brillance et aspect métallique de l’aileron, du châssis et des autres détails. Les finitions peuvent être différentes sur chaque élément.',
@@ -134,15 +132,15 @@ export const MAPS: MapDef[] = [
     format: 'BC3',
     kind: 'illum',
     group: 'details',
-    workRes: 1024,
-    exportRes: 1024,
+    workRes: TEXTURE_RESOLUTION,
+    exportRes: TEXTURE_RESOLUTION,
     defaultFill: '#000000',
     description:
       'Peignez les zones qui émettent de la lumière. Noir = éteint. Chaque calque peut être un néon permanent, un phare de nuit ou un feu de frein. Le compteur a sa propre couleur.',
   },
   {
     id: 'Details_DirtMask', label: 'Détails · masque de saleté', fileName: 'Details_DirtMask.dds',
-    format: 'BC4', kind: 'grayscale', group: 'details', workRes: 1024, exportRes: 1024,
+    format: 'BC4', kind: 'grayscale', group: 'details', workRes: TEXTURE_RESOLUTION, exportRes: TEXTURE_RESOLUTION,
     defaultFill: '#000000', description: 'Masque de saleté des détails : 0 % protège les pièces ; 100 % autorise la saleté. Peignez les zones séparément pour doser l’effet.',
   },
   {
@@ -152,11 +150,11 @@ export const MAPS: MapDef[] = [
     format: 'BC1',
     kind: 'basecolor',
     group: 'wheels',
-    workRes: 1024,
-    exportRes: 1024,
+    workRes: TEXTURE_RESOLUTION,
+    exportRes: TEXTURE_RESOLUTION,
     defaultFill: '#2b2d30',
     description:
-      'Couleur des jantes et pneus. La jante (flanc de roue) et le pneu occupent des îlots UV distincts — voir le repère « côté de la roue ».',
+      'Couleur des pièces utilisant la texture Roues, généralement les pneus. Les zones JANTES AV./AR. du guide Stadium s’éditent dans Carrosserie.',
   },
   {
     id: 'Wheels_R',
@@ -165,20 +163,20 @@ export const MAPS: MapDef[] = [
     format: 'BC5',
     kind: 'roughmetal',
     group: 'wheels',
-    workRes: 1024,
-    exportRes: 1024,
+    workRes: TEXTURE_RESOLUTION,
+    exportRes: TEXTURE_RESOLUTION,
     defaultFill: '#d91a00',
     description:
-      'Brillance et aspect métallique des roues. Pour une jante en chrome ou en alu, augmentez le métal et réduisez la rugosité. Le pneu peut garder une finition mate.',
+      'Finition des pièces de la surface Roues. Pour des pneus mats, augmentez la rugosité et laissez Métal à 0 %. Les jantes du guide Stadium se règlent dans Carrosserie → Matière.',
   },
   {
     id: 'Wheels_I', label: 'Roues néon / feux', fileName: 'Wheels_I.dds',
-    format: 'BC3', kind: 'illum', group: 'wheels', workRes: 1024, exportRes: 1024,
+    format: 'BC3', kind: 'illum', group: 'wheels', workRes: TEXTURE_RESOLUTION, exportRes: TEXTURE_RESOLUTION,
     defaultFill: '#000000', description: 'Lumière des roues. Images et dessins restent éditables séparément ; noir = éteint.',
   },
   {
     id: 'Wheels_DirtMask', label: 'Roues · masque de saleté', fileName: 'Wheels_DirtMask.dds',
-    format: 'BC4', kind: 'grayscale', group: 'wheels', workRes: 1024, exportRes: 1024,
+    format: 'BC4', kind: 'grayscale', group: 'wheels', workRes: TEXTURE_RESOLUTION, exportRes: TEXTURE_RESOLUTION,
     defaultFill: '#000000', description: 'Masque de saleté des roues : 0 % protège pneus et jantes ; 100 % autorise la saleté. Ce masque modifie uniquement l’apparence.',
   },
 ];
@@ -320,7 +318,7 @@ export function getRegionOrientation(key: string): RegionOrientation {
 
 /**
  * Îlots UV réels du mesh `Skin_01` du modèle Stadium Car TM2020, mesurés
- * directement sur le FBX (voir scripts/uv-islands.ts) : chaque rectangle est la
+ * directement sur le FBX officiel : chaque rectangle est la
  * bounding box d'un îlot UV, en fractions 0..1, origine en haut à gauche (repère
  * de l'éditeur, cohérent avec `flipY = true` de la CanvasTexture).
  *
@@ -329,7 +327,7 @@ export function getRegionOrientation(key: string): RegionOrientation {
  * gauche/droite. Peindre à l'intérieur d'un rectangle atteint donc la partie
  * correspondante de la voiture dans l'aperçu 3D.
  *
- * CONVENTION D'AXES VÉRIFIÉE (scripts/uv-orient.ts + scripts/uv-frontcheck.ts) :
+ * CONVENTION D'AXES VÉRIFIÉE SUR LE FBX :
  *   - +Z = AVANT (nez) : confirmé par l'effilement du nez côté +Z puis l'aile
  *     avant large à l'extrémité, et la verrière centrale.
  *   - +Y = HAUT.

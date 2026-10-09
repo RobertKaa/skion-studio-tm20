@@ -4,11 +4,13 @@
  */
 
 import JSZip from 'jszip';
+import { blenderPartsFromGlb, validateBlenderParts, type BlenderPart } from './blenderParts';
 import { decodeDDS, encodeDDS, encodeTGA, type RGBAImage } from './dds';
 import { ILLUM_ROLES, MAPS, isDirtMask, mapIdFromFileName, type IllumRole, type MapId } from './maps';
 import { UV_GUIDE_ISLANDS } from './uvGuideData';
 import {
   SKIN3D_MESH_FILE,
+  SKIN3D_PREVIEW_FILE,
   baseName,
   isGameZipPassthrough,
   isMainBodyMeshName,
@@ -348,8 +350,10 @@ export async function buildSkinZipFromImages(
     if (flat && rgba.width > FLAT_MAP_RES) {
       rgba = solidImage(FLAT_MAP_RES, flat);
     }
-    zip.file(def.fileName, encodeDDS(rgba, def.format));
+    zip.file(def.fileName, encodeDDS(rgba, def.format, { colorSpace: def.kind === 'basecolor' ? 'srgb' : 'linear' }));
   }
+  // Glass has no editable surface yet, but full-skin protection covers its dirt mask too.
+  if (opts.dirtEnabled === false) zip.file('Glass_DirtMask.dds', encodeDDS(solidImage(4, [0, 0, 0, 255]), 'BC4'));
   if (opts.iconTGA) {
     zip.file('Icon.tga', opts.iconTGA);
   }
@@ -366,7 +370,7 @@ export async function buildSkinZipFromImages(
     : '';
   zip.file(
     'ReadMe.txt',
-    `Skin "${opts.skinName}" généré par TM Skin Studio.\n` +
+    `Skin "${opts.skinName}" généré par Skion Studio.\n` +
       meshNote +
       `Placez ce fichier .zip dans Documents/Trackmania/Skins/Models/CarSport/\n` +
       `puis dans le jeu : Profil > Garage > Upload skin.\n`,
@@ -492,13 +496,22 @@ async function decodeBitmapEntry(blob: Blob): Promise<RGBAImage | null> {
  * Chaque entrée est isolée : une texture corrompue n'interrompt pas les autres.
  */
 export async function importSkinZipFromBuffer(buf: ArrayBuffer): Promise<ImportResult> {
+  if (buf.byteLength > 128 * 1024 * 1024) throw new Error('128 Mo maximum par fichier skin.');
   const zip = await JSZip.loadAsync(buf);
+  const entries = Object.values(zip.files).filter((entry) => !entry.dir);
+  if (entries.length > 512) throw new Error('Trop de fichiers dans ce skin.');
+  let expanded = 0;
+  for (const entry of entries) {
+    const size = (entry as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize;
+    if (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0 || size > 64 * 1024 * 1024 || (expanded += size) > 256 * 1024 * 1024) throw new Error('Archive skin trop volumineuse après décompression.');
+  }
   const result: ImportResult = { imported: [], skipped: [], failures: [], skin3d: null };
   /** Dernière texture gagnante par map (zip peut contenir des doublons). */
   const byId = new Map<MapId, { id: MapId; image: RGBAImage; path: string }>();
   let mesh: Uint8Array | null = null;
   let preview: ArrayBuffer | null = null;
   let metaName: string | null = null;
+  let parts: BlenderPart[] | undefined;
   const passthrough: Skin3DFile[] = [];
 
   for (const [path, entry] of Object.entries(zip.files)) {
@@ -514,10 +527,15 @@ export async function importSkinZipFromBuffer(buf: ArrayBuffer): Promise<ImportR
     }
     if (isSkin3DMetaName(file)) {
       try {
-        const parsed = JSON.parse(await entry.async('string')) as { name?: unknown };
+        const size = (entry as unknown as { _data: { uncompressedSize: number } })._data.uncompressedSize;
+        if (size > 4 * 1024 * 1024) throw new Error('Métadonnées Blender trop volumineuses.');
+        const metadata = await entry.async('string');
+        if (metadata.length > 4 * 1024 * 1024) throw new Error('Métadonnées Blender trop volumineuses.');
+        const parsed = JSON.parse(metadata) as { name?: unknown; parts?: unknown };
         if (typeof parsed.name === 'string' && parsed.name.trim()) metaName = parsed.name.trim();
+        if (parsed.parts !== undefined) { validateBlenderParts(parsed.parts); parts = parsed.parts; }
       } catch {
-        /* métadonnées illisibles : le mesh reste chargeable */
+        result.failures.push({ path, reason: 'Métadonnées des pièces illisibles : textures conservées.' });
       }
       continue;
     }
@@ -570,7 +588,11 @@ export async function importSkinZipFromBuffer(buf: ArrayBuffer): Promise<ImportR
 
   result.imported = [...byId.values()];
   if (mesh) {
-    result.skin3d = { mesh, preview, passthrough, name: metaName };
+    if (!parts && preview) {
+      try { parts = blenderPartsFromGlb(preview); }
+      catch (err) { result.failures.push({ path: SKIN3D_PREVIEW_FILE, reason: `Pièces non séparées : ${String(err)}` }); }
+    }
+    result.skin3d = { mesh, preview, passthrough, name: metaName, ...(parts?.length ? { parts } : {}) };
   }
   return result;
 }

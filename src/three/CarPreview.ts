@@ -8,9 +8,13 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+import { StudioEnvironment } from './StudioEnvironment';
+import { StadiumEnvironment } from './StadiumEnvironment';
+import { STUDIO_LIGHTING, lightingPreset, previewLighting, resolvePreviewEnvironment, type PreviewEnvironment } from '../previewEnvironment';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { embeddedGlbData } from '../blenderParts';
+import { VehicleRigPreview, REST_VEHICLE_POSE, poseIsActive, type VehiclePose } from './vehiclePose';
 import { MAPS, MAP_BY_ID, isDirtMask, type IllumRole, type MapId } from '../maps';
 import { previewDirtPixels } from '../dirt';
 import { speedLightMask } from '../skinZip';
@@ -19,8 +23,8 @@ import { continuousImageUV, imageIslandAt } from '../editor/imagePlacement';
 import { bakeProjection, type DecalProjection, type PixelSource, type ProjectionTriangle, type SurfaceAnchor, type Vec3 } from './decalProjection';
 
 /** Modèle servi statiquement depuis public/models/ (fiable en dev et prod). */
-const CAR_MODEL_URL = `${import.meta.env.BASE_URL}models/car/StadiumCAR2020_OffsetFix.fbx`;
-const CAR_MODEL_RESOURCE_PATH = `${import.meta.env.BASE_URL}models/car/`;
+const CAR_MODEL_RESOURCE_PATH = `${import.meta.env?.BASE_URL ?? '/'}models/car/`;
+const CAR_MODEL_URL = `${CAR_MODEL_RESOURCE_PATH}StadiumCAR2020_OffsetFix.fbx`;
 const CAR_MODEL_LOAD_TIMEOUT_MS = 45_000;
 const CAR_MODEL_MIN_BYTES = 100_000;
 
@@ -107,12 +111,18 @@ export class CarPreview {
   private emissiveIntensity = 1.4;
   private braking = false;
   private night = false;
+  private previewEnvironment: PreviewEnvironment = { venue: 'studio', mood: 'day' };
+  private studioRoot = new THREE.Group();
+  private studioEnvironment: StudioEnvironment;
+  private stadium: StadiumEnvironment | null = null;
   /** Rôle des zones peintes hors vitesse. Les feux arrière restent allumés. */
   private illumRole: IllumRole = 'always';
   private illumination = new Map<MapId, { source: HTMLCanvasElement; roles?: HTMLCanvasElement; canvas: HTMLCanvasElement; texture?: THREE.CanvasTexture }>();
   private carRoot = new THREE.Group();
   /** Racine du modèle courant (FBX officiel ou GLB custom), pour la remplacer. */
   private modelRoot: THREE.Object3D | null = null;
+  private vehicleRig: VehicleRigPreview | null = null;
+  private vehiclePose: VehiclePose = { ...REST_VEHICLE_POSE };
   private importedMaterials: THREE.Material[] = [];
   private loadingEl: HTMLDivElement;
   private loading = true;
@@ -121,6 +131,8 @@ export class CarPreview {
   private container: HTMLElement;
   private disposed = false;
   private loadGeneration = 0;
+  /** Keep the pristine FBX available when resetting an imported vehicle. */
+  private officialModelBuffer: ArrayBuffer | null = null;
 
   // ---- Édition directe sur la 3D ----
   private raycaster = new THREE.Raycaster();
@@ -194,10 +206,12 @@ export class CarPreview {
     container.appendChild(this.loadingEl);
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x111a20);
-    const pmrem = new THREE.PMREMGenerator(this.renderer);
-    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    this.scene.environmentIntensity = 0.9;
+    this.scene.background = new THREE.Color(STUDIO_LIGHTING.background);
+    this.studioEnvironment = new StudioEnvironment();
+    this.scene.add(this.studioEnvironment.root);
+    this.scene.environment = this.studioEnvironment.environmentMap(this.renderer);
+    this.scene.environmentIntensity = STUDIO_LIGHTING.environmentIntensity;
+    this.scene.add(this.studioRoot);
 
     // near volontairement petit pour pouvoir zoomer très près sans clipper.
     this.camera = new THREE.PerspectiveCamera(45, 1, 0.02, 200);
@@ -206,7 +220,7 @@ export class CarPreview {
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.target.set(0, 0.55, 0);
     this.controls.enableDamping = true;
-    this.controls.maxPolarAngle = Math.PI / 2 + 0.12;
+    this.controls.maxPolarAngle = Math.PI - 0.005;
     this.controls.minDistance = 3;
     this.controls.maxDistance = 18;
     // Déplacement latéral dans le plan écran (plus naturel pour « aller où on veut »).
@@ -227,17 +241,6 @@ export class CarPreview {
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('blur', this.onBlur);
-
-    const sun = new THREE.DirectionalLight(0xffffff, 2.2);
-    sun.position.set(4, 7, 3);
-    sun.castShadow = true;
-    sun.shadow.mapSize.set(2048, 2048);
-    sun.shadow.camera.left = -6;
-    sun.shadow.camera.right = 6;
-    sun.shadow.camera.top = 6;
-    sun.shadow.camera.bottom = -6;
-    this.scene.add(sun);
-    this.scene.add(new THREE.HemisphereLight(0x8899bb, 0x334422, 0.5));
 
     this.skinMat = new THREE.MeshPhysicalMaterial({
       color: 0xffffff,
@@ -280,18 +283,19 @@ export class CarPreview {
     );
     ground.rotation.x = -Math.PI / 2;
     ground.receiveShadow = true;
-    this.scene.add(ground);
+    this.studioRoot.add(ground);
 
     const grid = new THREE.GridHelper(18, 36, 0x2c313a, 0x22262d);
     grid.position.y = -0.005;
-    this.scene.add(grid);
+    this.studioRoot.add(grid);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
     this.resize();
     this.initDefaultRoughnessPack();
 
-    void this.loadCarModel();
+    // The loading overlay reports startup errors; explicit replacements must reject.
+    void this.loadCarModel().catch(() => {});
 
     const loop = (now: number) => {
       this.raf = requestAnimationFrame(loop);
@@ -299,24 +303,29 @@ export class CarPreview {
       this.lastFrame = now;
       this.applyKeyboardMove(dt);
       this.controls.update();
+      this.updateGroundVisibility();
       this.renderer.render(this.scene, this.camera);
       this.updateProjectionGuide();
     };
     this.raf = requestAnimationFrame(loop);
   }
 
-  private async loadCarModel() {
+  private async loadCarModel(): Promise<boolean> {
     const generation = ++this.loadGeneration;
     try {
-      const buffer = await this.fetchModelBuffer(CAR_MODEL_URL);
-      if (this.disposed || generation !== this.loadGeneration) return;
-      await this.installModel(buffer, 'fbx', generation);
+      const buffer = this.officialModelBuffer ?? await this.fetchModelBuffer(CAR_MODEL_URL);
+      this.officialModelBuffer = buffer;
+      if (this.disposed || generation !== this.loadGeneration) return false;
+      if (!await this.installModel(buffer, 'fbx', generation)) return false;
       this.hideLoadingOverlay();
+      return true;
     } catch (err) {
-      if (this.disposed || generation !== this.loadGeneration) return;
+      if (this.disposed || generation !== this.loadGeneration) return false;
+      this.officialModelBuffer = null;
       const message = err instanceof Error ? err.message : 'erreur inconnue';
       console.error('[CarPreview] Échec du chargement du modèle FBX :', err);
       this.showLoadingError(message);
+      throw err;
     }
   }
 
@@ -326,13 +335,14 @@ export class CarPreview {
    * atlas (le nom doit contenir skin / detail / wheel / glass).
    */
   async loadCustomPreview(buffer: ArrayBuffer): Promise<void> {
+    embeddedGlbData(buffer);
     const generation = ++this.loadGeneration;
-    await this.installModel(buffer, 'glb', generation);
+    if (!await this.installModel(buffer, 'glb', generation)) throw new Error('Le chargement du modèle personnalisé a été interrompu.');
   }
 
   /** Revient au FBX officiel (export texture seul, sans mesh custom). */
   async loadOfficialModel(): Promise<void> {
-    await this.loadCarModel();
+    if (!await this.loadCarModel()) throw new Error('Le chargement de la voiture officielle a été interrompu.');
   }
 
   private parseModel(buffer: ArrayBuffer, kind: 'fbx' | 'glb'): Promise<THREE.Object3D> {
@@ -354,7 +364,10 @@ export class CarPreview {
 
   private async installModel(buffer: ArrayBuffer, kind: 'fbx' | 'glb', generation: number) {
     const model = await this.parseModel(buffer, kind);
-    if (this.disposed || generation !== this.loadGeneration) return;
+    if (this.disposed || generation !== this.loadGeneration) return false;
+    let hasMesh = false;
+    model.traverse((obj) => { if (obj instanceof THREE.Mesh) hasMesh = true; });
+    if (!hasMesh) throw new Error('Le modèle ne contient aucun maillage de voiture.');
 
     this.detachModel();
     model.traverse((obj) => {
@@ -373,6 +386,9 @@ export class CarPreview {
     const span = fitModelToGround(model);
     this.modelRoot = model;
     this.carRoot.add(model);
+    this.vehicleRig = new VehicleRigPreview(model);
+    this.vehiclePose = { ...REST_VEHICLE_POSE };
+    this.scene.add(this.vehicleRig.guides);
     this.carBounds = new THREE.Box3().setFromObject(model);
     this.projectionTriangles = null;
     this.controls.minDistance = span * 0.12;
@@ -381,10 +397,12 @@ export class CarPreview {
     if (this.pendingView) this.restoreViewState(this.pendingView);
     this.hideLoadingOverlay();
     this.onModelReady?.();
+    return true;
   }
 
   private detachModel() {
     if (!this.modelRoot) return;
+    this.vehicleRig?.dispose(); this.vehicleRig = null;
     this.carRoot.remove(this.modelRoot);
     this.modelRoot.traverse((obj) => {
       if (obj instanceof THREE.Mesh) obj.geometry.dispose();
@@ -445,12 +463,14 @@ export class CarPreview {
     if (this.disposed) return;
     if (container !== this.container) {
       this.container = container;
-      container.appendChild(this.renderer.domElement);
       if (this.projectionGuide) container.appendChild(this.projectionGuide);
       if (this.loading) container.appendChild(this.loadingEl);
       this.resizeObserver.disconnect();
       this.resizeObserver.observe(container);
     }
+    // React can replace a host while hot-reloading the modal. Reattach the
+    // externally managed canvas even when the host reference itself survives.
+    if (this.renderer.domElement.parentElement !== container) container.appendChild(this.renderer.domElement);
     // Toujours resynchroniser (conteneur ré-affiché après repli du panneau, etc.).
     requestAnimationFrame(() => this.resize());
   }
@@ -563,11 +583,18 @@ export class CarPreview {
     }
     const canvas = this.dirtCanvases.get(id) ?? document.createElement('canvas');
     this.dirtCanvases.set(id, canvas);
-    canvas.width = source.width; canvas.height = source.height;
+    const scale = Math.min(1, mask.width / source.width, mask.height / source.height);
+    const width = Math.max(1, Math.round(source.width * scale));
+    const height = Math.max(1, Math.round(source.height * scale));
+    if (canvas.width !== width || canvas.height !== height) {
+      this.textures.get(id)?.dispose();
+      canvas.width = width; canvas.height = height;
+    }
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const maskCtx = mask.getContext('2d', { willReadFrequently: true });
     if (!ctx || !maskCtx) return;
-    ctx.drawImage(source, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
     const base = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const dirt = maskCtx.getImageData(0, 0, mask.width, mask.height);
     base.data.set(previewDirtPixels(base, dirt, this.dirtAmount));
@@ -613,8 +640,10 @@ export class CarPreview {
     const pack = this.rmPacks.get(id);
     if (!pack) return;
     const { canvas, texture } = pack;
-    canvas.width = source.width;
-    canvas.height = source.height;
+    if (canvas.width !== source.width || canvas.height !== source.height) {
+      texture.dispose(); // WebGL allocates immutable texture storage for each size.
+      canvas.width = source.width; canvas.height = source.height;
+    }
     const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
     ctx.drawImage(source, 0, 0);
     const img = ctx.getImageData(0, 0, source.width, source.height);
@@ -652,8 +681,10 @@ export class CarPreview {
     if (!source || source.width === 0 || source.height === 0) return;
     const w = source.width;
     const h = source.height;
-    if (canvas.width !== w) canvas.width = w;
-    if (canvas.height !== h) canvas.height = h;
+    if (canvas.width !== w || canvas.height !== h) {
+      state.texture?.dispose();
+      canvas.width = w; canvas.height = h;
+    }
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
     ctx.clearRect(0, 0, w, h);
@@ -711,16 +742,47 @@ export class CarPreview {
     this.applyEmissive();
   }
 
-  /** Dim the studio and enable only the zones assigned to headlights. */
+  /** Compatibility entry point for the former day/night toggle. */
   setNight(on: boolean) {
-    this.night = on;
-    this.scene.environmentIntensity = on ? 0.12 : 0.9;
-    this.scene.background = new THREE.Color(on ? 0x080c14 : 0x15181d);
-    this.scene.traverse((object) => {
-      if (object instanceof THREE.DirectionalLight) object.intensity = on ? 0.12 : 2.2;
-      if (object instanceof THREE.HemisphereLight) object.intensity = on ? 0.12 : 0.5;
-    });
+    this.setEnvironment({ ...this.previewEnvironment, venue: on ? 'stadium' : this.previewEnvironment.venue, mood: on ? 'night' : 'day' });
+  }
+
+  getEnvironment(): PreviewEnvironment { return { ...this.previewEnvironment }; }
+  getBraking(): boolean { return this.braking; }
+
+  setEnvironment(value: PreviewEnvironment) {
+    const next = resolvePreviewEnvironment(value);
+    const preset = lightingPreset(next.mood);
+    const lighting = previewLighting(next);
+    this.previewEnvironment = next;
+    this.night = lighting.headlights;
+    this.renderer.toneMappingExposure = lighting.exposure;
+    this.studioRoot.visible = next.venue === 'studio';
+    this.studioEnvironment.root.visible = next.venue === 'studio';
+    if (next.venue === 'stadium') {
+      if (!this.stadium) { this.stadium = new StadiumEnvironment(); this.scene.add(this.stadium.root); }
+      this.stadium.root.visible = true;
+      this.stadium.setMood(next.mood);
+      this.scene.background = null;
+      this.scene.environment = this.stadium.environmentMap(this.renderer, next.mood);
+      this.scene.environmentIntensity = preset.environmentIntensity;
+      this.scene.fog = new THREE.Fog(preset.horizon, 38, 100);
+    } else {
+      if (this.stadium) this.stadium.root.visible = false;
+      this.scene.environment = this.studioEnvironment.environmentMap(this.renderer);
+      this.scene.environmentIntensity = STUDIO_LIGHTING.environmentIntensity;
+      this.scene.background = new THREE.Color(STUDIO_LIGHTING.background);
+      this.scene.fog = null;
+    }
     this.syncIllumPreview();
+    this.updateGroundVisibility();
+  }
+
+  /** Remove only the ground when working below it; lighting and reflections stay intact. */
+  private updateGroundVisibility() {
+    const aboveGround = this.camera.position.y >= 0.02;
+    this.studioRoot.visible = this.previewEnvironment.venue === 'studio' && aboveGround;
+    this.stadium?.setGroundVisible(aboveGround);
   }
 
   // -------------------------------------------------- édition directe sur la 3D
@@ -835,11 +897,21 @@ export class CarPreview {
   }
 
   setInteraction(mode: Interaction3D) {
+    if (poseIsActive(this.vehiclePose)) mode = 'navigate';
     if (mode !== this.interaction) this.finishInteraction();
     this.interaction = mode;
     this.edit3dEnabled = mode !== 'navigate';
     this.renderer.domElement.style.cursor = mode === 'image' ? 'grab' : this.edit3dEnabled ? 'crosshair' : '';
     this.applyMouseButtons();
+    this.updateProjectionGuide();
+  }
+
+  hasVehicleRig() { return this.vehicleRig?.ready ?? false; }
+  setVehiclePose(pose: VehiclePose) {
+    this.vehiclePose = { ...pose };
+    if (poseIsActive(pose)) this.setInteraction('navigate');
+    this.vehicleRig?.apply(pose);
+    if (this.vehicleRig?.ready && !poseIsActive(pose)) this.projectionTriangles = null;
     this.updateProjectionGuide();
   }
 
@@ -1015,14 +1087,13 @@ export class CarPreview {
    * horizontal). La voiture remplit donc l'aperçu quelle que soit sa taille
    * (vignette de l'inspecteur ou grande vue 3D).
    */
-  private computeHome(): { position: THREE.Vector3; target: THREE.Vector3 } | null {
+  private computeHome(dir = CarPreview.HOME_DIR, targetHeight = 0.4): { position: THREE.Vector3; target: THREE.Vector3 } | null {
     const box = this.carBounds;
     if (!box || box.isEmpty()) return null;
     // Cible : centre de la boîte, un peu rabaissé (vue en plongée : la voiture se
     // projette sinon dans la moitié basse du cadre).
     const target = box.getCenter(new THREE.Vector3());
-    target.y = box.min.y + (box.max.y - box.min.y) * 0.4;
-    const dir = CarPreview.HOME_DIR;
+    target.y = box.min.y + (box.max.y - box.min.y) * targetHeight;
     // Repère caméra pour cette direction de visée.
     const forward = dir.clone().negate();
     const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
@@ -1057,6 +1128,7 @@ export class CarPreview {
     this.controls.target.copy(home.target);
     this.controls.update();
     this.userNavigated = false;
+    this.updateGroundVisibility();
   }
 
   /** Revient au cadrage initial (touche F ou bouton « Recadrer »). */
@@ -1071,6 +1143,13 @@ export class CarPreview {
     // la nouvelle pose (sinon l'amortissement ferait encore dériver).
     this.applyHomeFraming();
     this.controls.enableDamping = damping;
+  }
+
+  /** Look up at the chassis, with a slight tilt to keep camera orientation stable. */
+  viewUnderbody() {
+    const view = this.computeHome(new THREE.Vector3(0, -1, 0.08).normalize(), 0.5);
+    if (!view) return;
+    this.restoreViewState({ position: view.position.toArray() as Vec3, target: view.target.toArray() as Vec3 });
   }
 
   getViewState(): PreviewViewState {
@@ -1091,6 +1170,7 @@ export class CarPreview {
     this.controls.update();
     this.controls.enableDamping = damping;
     this.userNavigated = true;
+    this.updateGroundVisibility();
   }
 
   /** L'axe de projection suit le regard, plutôt que la normale d'un seul triangle du relief. */
@@ -1229,6 +1309,7 @@ export class CarPreview {
 
   /** Capture carrée de la vue courante (pour Icon.tga). */
   snapshot(size: number): HTMLCanvasElement {
+    this.updateGroundVisibility();
     this.renderer.render(this.scene, this.camera);
     const src = this.renderer.domElement;
     const out = document.createElement('canvas');
@@ -1241,6 +1322,7 @@ export class CarPreview {
   }
 
   dispose() {
+    this.vehicleRig?.dispose();
     this.projectionGuide?.remove();
     this.disposed = true;
     this.loadGeneration++;
@@ -1273,6 +1355,14 @@ export class CarPreview {
     for (const t of this.textures.values()) t.dispose();
     for (const state of this.illumination.values()) state.texture?.dispose();
     for (const { texture } of this.rmPacks.values()) texture.dispose();
+    this.stadium?.dispose();
+    this.studioEnvironment.dispose();
+    this.studioRoot.traverse((object) => {
+      if (object instanceof THREE.Mesh || object instanceof THREE.LineSegments) {
+        object.geometry.dispose();
+        for (const material of Array.isArray(object.material) ? object.material : [object.material]) material.dispose();
+      }
+    });
     this.renderer.dispose();
     this.renderer.domElement.remove();
     this.loadingEl.remove();

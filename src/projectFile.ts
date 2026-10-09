@@ -2,7 +2,10 @@ import JSZip from 'jszip';
 import { MAPS, MAP_BY_ID, type IllumRole, type MapId } from './maps';
 import type { PreviewViewState } from './three/CarPreview';
 import type { Skin3DProject } from './skin3d';
+import { validateBlenderParts, type BlenderPart } from './blenderParts';
 import { validIllumCodes } from './illumination';
+import { LEGACY_TEXTURE_RESOLUTION, TEXTURE_RESOLUTION, upgradeMapResolution } from './editor/resolution';
+import { isPreviewEnvironment, type PreviewEnvironment } from './previewEnvironment';
 
 export type ProjectMaps = Record<MapId, Record<string, unknown>>;
 export interface ProjectWorkspace {
@@ -11,18 +14,22 @@ export interface ProjectWorkspace {
   /** Global export protection; optional for projects saved before dirt controls existed. */
   dirtEnabled?: boolean;
   dirtPreview?: number;
+  /** Optional to retain compatibility with projects created before the test circuit. */
+  environment?: PreviewEnvironment;
 }
 export interface ProjectDocument {
-  format: 'tm-skin-studio'; version: 1; name: string;
+  format: 'tm-skin-studio'; version: 1 | 2; name: string;
   editor: { maps: ProjectMaps; speedColor: string; illumRole: IllumRole };
   workspace: ProjectWorkspace;
-  model: null | { mesh: string; preview: string | null; name: string | null; passthrough: { name: string; asset: string }[] };
+  model: null | { mesh: string; preview: string | null; name: string | null; parts?: BlenderPart[]; passthrough: { name: string; asset: string }[] };
 }
 export interface ProjectBundle { document: ProjectDocument; assets: Map<string, Blob | Uint8Array> }
 export const PROJECT_EXTENSION = '.tmskin';
 const MAX_FILE = 128 * 1024 * 1024;
 const MAX_EXPANDED = 256 * 1024 * 1024;
-const MAX_IMAGE_PIXELS = 64 * 1024 * 1024;
+// Native custom cars split the 2048² atlases into many independently editable
+// pieces. The sphere car alone needs ~300 million pixels before deduplication.
+const MAX_IMAGE_PIXELS = 384 * 1024 * 1024;
 const ROLES = new Set(['always', 'head', 'brake']);
 const OBJECT_TYPES = new Set(['rect', 'ellipse', 'circle', 'triangle', 'line', 'polygon', 'polyline', 'path', 'i-text', 'itext', 'text', 'textbox', 'group', 'image', 'linear', 'radial', 'layoutmanager', 'fit-content', 'fixed', 'clip-path']);
 const ASSET_PATH = /^assets\/(?:image-\d+\.png|mesh\.gbx|preview\.glb|extra-\d+\.bin)$/;
@@ -45,12 +52,15 @@ export function upgradeProjectMaps(value: unknown): unknown {
 
 /** Validation avant toute instanciation Fabric ou création d'URL. Aucune ressource externe admise. */
 export function validateProjectDocument(value: unknown, assets: Set<string>): asserts value is ProjectDocument {
-  if (!record(value) || value.format !== 'tm-skin-studio' || value.version !== 1) fail('format ou version non pris en charge.');
+  if (!record(value) || value.format !== 'tm-skin-studio' || value.version !== 1 && value.version !== 2) fail('format ou version non pris en charge.');
   if (typeof value.name !== 'string' || value.name.length > 120) fail('nom invalide.');
   if (!record(value.editor) || !record(value.editor.maps) || Object.keys(value.editor.maps).length !== MAPS.length) fail('textures manquantes.');
   const editor = value.editor as Record<string, unknown>;
   const maps = editor.maps as Record<string, unknown>;
   for (const def of MAPS) if (!record(maps[def.id]) || !Array.isArray((maps[def.id] as Record<string, unknown>).objects)) fail(`texture ${def.id} invalide.`);
+  for (const map of Object.values(maps) as Record<string, unknown>[]) {
+    if (map.workRes === undefined ? value.version === 2 : map.workRes !== LEGACY_TEXTURE_RESOLUTION && map.workRes !== TEXTURE_RESOLUTION) fail('résolution de texture invalide.');
+  }
   if (typeof editor.speedColor !== 'string' || !/^#[0-9a-f]{6}$/i.test(editor.speedColor) || !ROLES.has(String(editor.illumRole))) fail('réglages de lumière invalides.');
   const w = value.workspace;
   if (!record(w) || typeof w.activeMap !== 'string' || !Object.hasOwn(MAP_BY_ID, w.activeMap) || !['2d', 'split', '3d'].includes(String(w.view))) fail('espace de travail invalide.');
@@ -61,6 +71,7 @@ export function validateProjectDocument(value: unknown, assets: Set<string>): as
   })) fail('vue 3D invalide.');
   for (const [key, max] of [['coatIntensity', 1], ['neonIntensity', 4]] as const) if (typeof workspace[key] !== 'number' || (workspace[key] as number) < 0 || (workspace[key] as number) > max) fail('intensité invalide.');
   if (typeof workspace.night !== 'boolean' || typeof workspace.braking !== 'boolean') fail('simulation invalide.');
+  if (workspace.environment !== undefined && !isPreviewEnvironment(workspace.environment)) fail('environnement de test invalide.');
   if (workspace.dirtEnabled !== undefined && typeof workspace.dirtEnabled !== 'boolean') fail('protection de saleté invalide.');
   if (workspace.dirtPreview !== undefined && (typeof workspace.dirtPreview !== 'number' || !Number.isFinite(workspace.dirtPreview) || workspace.dirtPreview < 0 || workspace.dirtPreview > 1)) fail('aperçu de saleté invalide.');
   const asset = (path: unknown) => { if (typeof path !== 'string' || !ASSET_PATH.test(path) || !assets.has(path)) fail('image ou fichier lié absent.'); };
@@ -79,6 +90,8 @@ export function validateProjectDocument(value: unknown, assets: Set<string>): as
     if (node.filters !== undefined && (!Array.isArray(node.filters) || node.filters.length)) fail('filtre d’image non pris en charge.');
     if (node.illumRole !== undefined && !ROLES.has(String(node.illumRole))) fail('rôle lumineux invalide.');
     if (node.illumCodes !== undefined && !validIllumCodes(node.illumCodes)) fail('masque de comportement lumineux invalide.');
+    if (node.blenderPart !== undefined && (typeof node.blenderPart !== 'string' || !/^[\w:.-]{1,120}$/.test(node.blenderPart))) fail('référence de pièce invalide.');
+    if (node.partColor !== undefined && (typeof node.partColor !== 'string' || !/^#[\da-f]{6}$/i.test(node.partColor))) fail('couleur de pièce invalide.');
     if (node.imageLight !== undefined) {
       if (!record(node.imageLight) || !ROLES.has(String(node.imageLight.role)) || typeof node.imageLight.strength !== 'number' || !Number.isFinite(node.imageLight.strength) || node.imageLight.strength < 0 || node.imageLight.strength > 1) fail('lumière d’image invalide.');
     }
@@ -105,6 +118,7 @@ export function validateProjectDocument(value: unknown, assets: Set<string>): as
     const m = value.model;
     if (!record(m) || !Array.isArray(m.passthrough) || m.passthrough.length > 64) fail('modèle invalide.');
     const model = m as Record<string, unknown>;
+    if (model.parts !== undefined) validateBlenderParts(model.parts);
     if (model.mesh !== 'assets/mesh.gbx' || (model.preview !== null && model.preview !== 'assets/preview.glb')) fail('ressource du modèle invalide.');
     asset(model.mesh); if (model.preview !== null) asset(model.preview);
     if (model.name !== null && (typeof model.name !== 'string' || model.name.length > 120)) fail('nom du modèle invalide.');
@@ -129,19 +143,74 @@ export function projectLayerCount(document: ProjectDocument) {
   return Object.values(document.editor.maps).reduce((total, map) => total + (map.objects as Record<string, unknown>[]).filter((o) => !o.referenceOnly && o.name !== 'Vitesse').length, 0);
 }
 
+/** Called only after validation; originals and model/world coordinates are retained. */
+export function upgradeProjectResolution(document: ProjectDocument): ProjectDocument {
+  return { ...document, version: 2, editor: { ...document.editor,
+    maps: Object.fromEntries(MAPS.map((map) => [map.id, upgradeMapResolution(document.editor.maps[map.id])])) as ProjectMaps,
+  } };
+}
+
+/** Share byte-identical PNGs without merging layers or modifying the caller's document. */
+async function compactProjectImages(bundle: ProjectBundle): Promise<ProjectBundle> {
+  if (bundle.assets.size > 300) fail('projet trop volumineux.');
+  const assets = new Map<string, Uint8Array>();
+  const buckets = new Map<string, { path: string; bytes: Uint8Array }[]>();
+  const aliases = new Map<string, string>();
+  let imagePixels = 0; let totalBytes = 0;
+  for (const [path, content] of bundle.assets) {
+    if (!ASSET_PATH.test(path)) fail('chemin de ressource invalide.');
+    const bytes = content instanceof Blob ? new Uint8Array(await content.arrayBuffer()) : content;
+    if (bytes.length > 64 * 1024 * 1024 || (totalBytes += bytes.length) > MAX_EXPANDED) fail('projet trop volumineux.');
+    if (path.endsWith('.png')) {
+      const pixels = validateProjectPng(bytes);
+      // This hash only selects comparison candidates; full byte equality decides sharing.
+      let hash = 2166136261;
+      for (const byte of bytes) hash = Math.imul(hash ^ byte, 16777619);
+      const key = `${bytes.length}:${hash >>> 0}`;
+      const candidates = buckets.get(key) ?? [];
+      const match = candidates.find((entry) => entry.bytes.every((byte, index) => byte === bytes[index]));
+      if (match) { aliases.set(path, match.path); continue; }
+      if ((imagePixels += pixels) > MAX_IMAGE_PIXELS) fail('trop d’images en haute résolution dans ce projet.');
+      candidates.push({ path, bytes }); buckets.set(key, candidates);
+    }
+    assets.set(path, bytes);
+  }
+  if (!aliases.size) return { document: bundle.document, assets };
+  const document = structuredClone(bundle.document);
+  const walk = (node: unknown) => {
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (!record(node)) return;
+    if (typeof node.src === 'string') node.src = aliases.get(node.src) ?? node.src;
+    if (record(node.decal) && typeof node.decal.source === 'string') node.decal.source = aliases.get(node.decal.source) ?? node.decal.source;
+    Object.values(node).forEach(walk);
+  };
+  walk(document.editor.maps);
+  return { document, assets };
+}
+
 export async function writeProjectFile(bundle: ProjectBundle): Promise<Blob> {
+  try { return await serializeProjectFile(bundle); }
+  catch (error) {
+    if (error instanceof Error && error.message.startsWith('Projet non chargé :')) throw new Error(error.message.replace('Projet non chargé :', 'Projet non enregistré :'));
+    throw error;
+  }
+}
+
+async function serializeProjectFile(bundle: ProjectBundle): Promise<Blob> {
   validateProjectDocument(bundle.document, new Set(bundle.assets.keys()));
+  const compact = await compactProjectImages(bundle);
+  const document = upgradeProjectResolution(compact.document);
+  validateProjectDocument(document, new Set(compact.assets.keys()));
   const zip = new JSZip();
-  const manifest = JSON.stringify(bundle.document);
+  const manifest = JSON.stringify(document);
   const manifestBytes = new TextEncoder().encode(manifest).length;
-  if (manifestBytes > 8 * 1024 * 1024 || bundle.assets.size > 300) fail('projet trop volumineux.');
+  if (manifestBytes > 8 * 1024 * 1024 || compact.assets.size > 300) fail('projet trop volumineux.');
   zip.file('project.json', manifest);
-  let total = manifestBytes; let imagePixels = 0;
-  for (const [name, content] of bundle.assets) {
+  let total = manifestBytes;
+  for (const [name, content] of compact.assets) {
     if (!ASSET_PATH.test(name)) fail('chemin de ressource invalide.');
     const bytes = content instanceof Blob ? new Uint8Array(await content.arrayBuffer()) : content;
     if (bytes.length > 64 * 1024 * 1024 || (total += bytes.length) > MAX_EXPANDED) fail('projet trop volumineux.');
-    if (name.endsWith('.png') && (imagePixels += validateProjectPng(bytes)) > MAX_IMAGE_PIXELS) fail('images trop volumineuses.');
     zip.file(name, bytes);
   }
   const buffer = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE', compressionOptions: { level: 3 } });
@@ -164,13 +233,14 @@ export async function readProjectFile(file: Blob): Promise<ProjectBundle> {
   const paths = new Set(entries.filter((e) => e.name !== 'project.json').map((e) => e.name));
   validateProjectDocument(document, paths);
   const assets = new Map<string, Blob | Uint8Array>();
-  let imagePixels = 0;
   for (const path of paths) {
     const bytes = await zip.file(path)!.async('uint8array');
-    if (path.endsWith('.png') && (imagePixels += validateProjectPng(bytes)) > MAX_IMAGE_PIXELS) fail('images trop volumineuses.');
     assets.set(path, bytes);
   }
-  return { document, assets };
+  const compact = await compactProjectImages({ document, assets });
+  const upgraded = upgradeProjectResolution(compact.document);
+  validateProjectDocument(upgraded, new Set(compact.assets.keys()));
+  return { document: upgraded, assets: compact.assets };
 }
 
 /** Les références de l'archive sont remplacées uniquement par des URLs créées pour ses propres PNG. */
@@ -196,7 +266,7 @@ export function hydrateProject(bundle: ProjectBundle): { document: ProjectDocume
   };
   const m = document.model;
   const model: Skin3DProject | null = m ? { mesh: data(m.mesh), preview: m.preview ? data(m.preview).buffer as ArrayBuffer : null,
-    name: m.name, passthrough: m.passthrough.map((entry) => ({ name: entry.name, data: data(entry.asset) })) } : null;
+    name: m.name, ...(m.parts ? { parts: m.parts } : {}), passthrough: m.passthrough.map((entry) => ({ name: entry.name, data: data(entry.asset) })) } : null;
   return { document, model, urls };
 }
 

@@ -13,9 +13,52 @@ dist-ssr
 *.local
 scripts/3d-skin.local.json
 tools/
-templates/*.blend
-templates/*.blend1
 work/
+templates/
+__pycache__/
+*.pyc
+
+# Audits, visual checks and generated test artifacts (local only)
+/audit-evidence/
+/AUDIT*.md
+/docs/*audit*.md
+/docs/recherche-*.md
+/scripts/out/
+/coverage/
+/test-results/
+/playwright-report/
+/.nyc_output/
+/.pytest_cache/
+/.mypy_cache/
+/.ruff_cache/
+/skion-desktop-ux.patch
+
+# Local test suites and inspection utilities
+/scripts/test-*
+**/__tests__/
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+/scripts/create-*-audit-fixture.ts
+/scripts/check-orient.ts
+/scripts/dds-inspect.ts
+/scripts/gen-verify.ts
+/scripts/inspect-reference-lights.ts
+/scripts/size-report.ts
+/scripts/uv-*.ts
+/scripts/viewport-coords.ts
+
+# Blender sources and custom-skin construction tools (local only)
+/scripts/blender/
+/scripts/**/*.py
+/scripts/build-3d-skin.ps1
+/scripts/repack-skin-mesh.ts
+/scripts/pack-*.ts
+/scripts/render-livery-textures.ts
+/scripts/3d-skin.local*.json
+*.blend
+*.blend[0-9]*
 
 # Editor directories and files
 .vscode/*

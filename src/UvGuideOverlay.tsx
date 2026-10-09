@@ -7,6 +7,7 @@
  * Drop-in : `<UvGuideOverlay activeMap={activeMap} visible={showGuide} />`
  * à placer à l'intérieur de `.canvas-frame`, après `.canvas-host`.
  */
+import type { CSSProperties } from 'react';
 import { MAP_BY_ID, type MapId } from './maps';
 import { UV_GUIDE_BY_FAMILY, type UvGuideIsland } from './uvGuideData';
 import './uvGuideOverlay.css';
@@ -55,6 +56,11 @@ interface Props {
   visible: boolean;
   /** Îlot mis en avant en mode focus (carrosserie). */
   focusedRegion?: string | null;
+  islands?: UvGuideIsland[];
+  selectedRegion?: string | null;
+  onSelect?: (key: string) => void;
+  selectedElement?: UvGuideIsland | null;
+  zoom?: number;
 }
 
 function polyArea(poly: { x: number; y: number }[]): number {
@@ -114,36 +120,45 @@ function labelSpots(
   return out;
 }
 
-export function UvGuideOverlay({ activeMap, visible, focusedRegion = null }: Props) {
+export function UvGuideOverlay({ activeMap, visible, focusedRegion = null, islands: providedIslands, selectedRegion, selectedElement, onSelect, zoom = 1 }: Props) {
   if (!visible) return null;
   const mapDef = MAP_BY_ID[activeMap];
   const family = mapDef.group;
-  const islands = UV_GUIDE_BY_FAMILY[family];
+  const islands = providedIslands ?? UV_GUIDE_BY_FAMILY[family];
   if (!islands || islands.length === 0) return null;
   const lampsOnly = mapDef.kind === 'illum';
-  const spots = labelSpots(islands, lampsOnly);
+  const spots = labelSpots(islands, lampsOnly).filter((spot) => !focusedRegion || spot.key === focusedRegion);
 
   return (
     <svg
       className="uv-guide-overlay"
+      style={{ '--uv-guide-zoom': Number.isFinite(zoom) ? Math.max(.1, zoom) : 1 } as CSSProperties}
       viewBox={`0 0 ${VB} ${VB}`}
       preserveAspectRatio="none"
-      aria-hidden="true"
+      aria-hidden={onSelect ? undefined : true}
     >
       {islands.map((island) => {
         const color = COLORS[island.key] ?? FALLBACK;
-        const focused = focusedRegion === island.key;
+        const focused = focusedRegion === island.key || selectedRegion === island.key;
         const dimmed = focusedRegion != null && !focused;
         const quiet = lampsOnly && !LAMP_KEYS.has(island.key);
         const lamp = lampsOnly && LAMP_KEYS.has(island.key);
         return (
           <g
             key={island.key}
+            role={onSelect ? 'button' : undefined}
+            aria-label={onSelect ? `Sélectionner la zone ${island.label}` : undefined}
+            tabIndex={onSelect ? 0 : undefined}
+            onKeyDown={onSelect ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(island.key); } } : undefined}
             className={
               focused ? 'uv-guide-overlay__group--focused' : dimmed || quiet ? 'uv-guide-overlay__group--dimmed' : undefined
             }
           >
-            {island.polygons.map((poly, i) => (
+            {island.fillRule === 'evenodd' ? <path
+              className={`uv-guide-overlay__poly${focused ? ' uv-guide-overlay__poly--focused' : ''}`}
+              d={island.polygons.map((poly) => `M ${poly.map((p) => `${p.x * VB},${p.y * VB}`).join(' L ')} Z`).join(' ')}
+              fillRule="evenodd" stroke={color} fill={color}
+            /> : island.polygons.map((poly, i) => (
               <polygon
                 key={i}
                 className={`uv-guide-overlay__poly${focused ? ' uv-guide-overlay__poly--focused' : ''}${lamp ? ' uv-guide-overlay__poly--lamp' : ''}`}
@@ -155,6 +170,7 @@ export function UvGuideOverlay({ activeMap, visible, focusedRegion = null }: Pro
           </g>
         );
       })}
+      {selectedElement && <path className="uv-guide-overlay__element" fillRule={selectedElement.fillRule ?? 'nonzero'} d={selectedElement.polygons.map((poly) => `M ${poly.map((p) => `${p.x * VB},${p.y * VB}`).join(' L ')} Z`).join(' ')} />}
       {spots.map((spot, i) => (
         <text
           key={`${spot.key}-${i}`}

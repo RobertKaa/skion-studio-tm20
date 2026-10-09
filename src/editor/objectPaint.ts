@@ -6,7 +6,7 @@ export function paintLeaves(object: FabricObject): FabricObject[] {
 }
 
 const paintChannel = (object: FabricObject) =>
-  object.type === 'line' || object.type === 'path' ? 'stroke' : 'fill';
+  object.type === 'line' || (object.type === 'path' && (!object.fill || object.strokeWidth > 0)) ? 'stroke' : 'fill';
 
 export function readObjectPaint(object: FabricObject) {
   const colors = paintLeaves(object)

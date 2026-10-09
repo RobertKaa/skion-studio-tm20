@@ -12,9 +12,11 @@
  * avec flipY = true). Un îlot peut avoir plusieurs polygones.
  */
 
+import { WHEEL_UV_GUIDE } from './wheelUvGuide';
 export type UvGuideFamily = 'skin' | 'details' | 'wheels';
 
 export interface UvGuideIsland {
+  fillRule?: 'evenodd';
   /** Clé de pièce (identique aux clés de SKIN_REGIONS / DETAILS_REGIONS). */
   key: string;
   /** Libellé affiché (FR). */
@@ -506,6 +508,8 @@ export const UV_GUIDE_ISLANDS: UvGuideIsland[] = [
     ],
   },
 ];
+
+UV_GUIDE_ISLANDS.push(...WHEEL_UV_GUIDE);
 
 /** Îlots regroupés par famille de map. */
 export const UV_GUIDE_BY_FAMILY: Record<UvGuideFamily, UvGuideIsland[]> = {

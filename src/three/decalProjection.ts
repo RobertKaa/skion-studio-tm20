@@ -1,4 +1,5 @@
 import type { MapDef } from '../maps';
+import { TEXTURE_RESOLUTION } from '../editor/resolution';
 import type { SurfaceMaterial } from '../material';
 
 export type Vec3 = [number, number, number];
@@ -55,9 +56,9 @@ function walkTriangle(points: [number, number][], w: number, h: number, visit: (
 }
 
 /** Projection orthographique dans les atlas existants. Aucun nouveau mesh n'est requis par le jeu. */
-export function bakeProjection(triangles: ProjectionTriangle[], decal: DecalProjection, source: PixelSource, resolution = 1024): Map<DecalFamily, ProjectionBitmap> {
+export function bakeProjection(triangles: ProjectionTriangle[], decal: DecalProjection, source: PixelSource, resolution = TEXTURE_RESOLUTION): Map<DecalFamily, ProjectionBitmap> {
   const output = new Map<DecalFamily, ProjectionBitmap>();
-  if (!Number.isInteger(resolution) || resolution < 1 || resolution > 2048 ||
+  if (!Number.isInteger(resolution) || resolution < 1 || resolution > TEXTURE_RESOLUTION ||
     !Number.isInteger(source.width) || !Number.isInteger(source.height) || source.width < 1 || source.height < 1 ||
     source.width * source.height > 32 * 1024 * 1024 || source.data.length < source.width * source.height * 4) return output;
   if (![decal.width, decal.height, decal.depth, ...decal.center, ...decal.normal, ...decal.tangent, decal.angle].every(Number.isFinite) ||

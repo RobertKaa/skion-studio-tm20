@@ -13,6 +13,7 @@
  */
 
 import { MAPS } from './maps';
+import type { BlenderPart } from './blenderParts';
 
 /** Mesh que le jeu charge à la place du visuel Stadium Car. */
 export const SKIN3D_MESH_FILE = 'MainBody.Mesh.gbx';
@@ -31,12 +32,20 @@ export interface Skin3DFile {
 
 /** Projet 3D chargé depuis un zip (dossier projet ou skin déjà compilé). */
 export interface Skin3DProject {
+  parts?: BlenderPart[];
   mesh: Uint8Array;
   /** Absent si le zip ne contient que le mesh de jeu, sans aperçu. */
   preview: ArrayBuffer | null;
   passthrough: Skin3DFile[];
   /** Nom lu dans skin3d.json, s'il est présent. */
   name: string | null;
+}
+
+/** A rig update replaces geometry; auxiliary normals/shadows and game files survive. */
+export function replaceSkin3DGeometry(current: Skin3DProject, next: Skin3DProject): Skin3DProject {
+  const files = new Map(current.passthrough.map((entry) => [entry.name.toLowerCase(), entry]));
+  for (const entry of next.passthrough) files.set(entry.name.toLowerCase(), entry);
+  return { ...next, name: current.name, passthrough: [...files.values()] };
 }
 
 export function baseName(path: string): string {
