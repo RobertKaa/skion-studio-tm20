@@ -1,0 +1,27 @@
+.wheel-profile-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-0);
+}
+.wheel-profile-summary canvas {
+  display: block;
+  flex: 0 0 64px;
+  width: 64px;
+  height: 86px;
+  border-radius: 6px;
+  background: #15191c;
+}
+.wheel-profile-summary > div { min-width: 0; }
+.wheel-profile-summary strong { color: var(--fg); font-size: 12px; }
+.wheel-profile-summary p {
+  margin: 5px 0 0;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}

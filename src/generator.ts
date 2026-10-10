@@ -529,9 +529,10 @@ function shape(role: ShapeRole, color: string, label: string, build: Builder, cl
 }
 
 /**
- * Forme rognée sur l'îlot `key` : une copie par polygone de l'îlot dont la
- * bounding-box croise `bounds` (les îlots multi-polygones comme le capot
- * restent ainsi couverts sans XOR entre contours imbriqués).
+ * One editable motif, clipped to the union of all intersecting UV contours.
+ * Repeating the entire artwork for every tiny contour bloats projects and
+ * paints overlapping transparent motifs several times. Stock outlines have
+ * consistent winding, so a nonzero compound clip retains every surface.
  */
 function onIsland(
   key: string,
@@ -542,12 +543,15 @@ function onIsland(
   build: Builder,
   S: number,
 ): DesignShape[] {
-  const out: DesignShape[] = [];
-  for (const poly of islandPolys(key)) {
-    if (!rectsIntersect(polyBBox(poly), bounds)) continue;
-    out.push(shape(role, color, label, build, poly, S));
-  }
-  return out;
+  const polygons = islandPolys(key).filter((poly) => rectsIntersect(polyBBox(poly), bounds));
+  if (!polygons.length) return [];
+  if (polygons.length === 1) return [shape(role, color, label, build, polygons[0], S)];
+  const path = uvPath(polygons, S);
+  return [shape(role, color, label, (fill, mono) => {
+    const object = build(fill, mono);
+    object.clipPath = new Path(path, { absolutePositioned: true, objectCaching: false, fillRule: 'nonzero' });
+    return object;
+  })];
 }
 
 /** Rectangle (fractions UV) rogné sur un îlot. */

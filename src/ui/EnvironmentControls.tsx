@@ -9,7 +9,7 @@ export function EnvironmentControls({ value, braking, onChange, onBraking }: {
   const simulated = value.venue === 'stadium';
   return <section className="environment-controls" aria-label="Environnement de test du skin">
     <div className="environment-heading">
-      <span><Icon name="sun" size={15} /><strong>Environnement</strong><small>{simulated ? 'Aperçu simulé' : 'Éclairage neutre'}</small></span>
+      <span><Icon name="sun" size={15} /><strong>Environnement</strong><small title="Le rendu final dépend aussi de la carte et des réglages du jeu.">{simulated ? 'Éclairage estimé' : 'Éclairage neutre'}</small></span>
       <div className="environment-venues" role="group" aria-label="Décor de l’aperçu">
         <button type="button" aria-pressed={value.venue === 'studio'} onClick={() => onChange({ ...value, venue: 'studio' })}>Studio</button>
         <button type="button" aria-pressed={simulated} onClick={() => onChange({ ...value, venue: 'stadium' })}>Simulation</button>

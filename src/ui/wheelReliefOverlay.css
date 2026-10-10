@@ -1,0 +1,12 @@
+.wheel-relief-overlay {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  pointer-events: none;
+  opacity: .85;
+}
+/* Readable values on roughness, light and dirt channels remain the priority. */
+.wheel-relief-overlay--technical { opacity: .4; }

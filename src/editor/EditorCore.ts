@@ -756,15 +756,20 @@ export class EditorCore {
   /** Zoom centré sur un point écran (clientX/Y) ou au centre du cadre. */
   zoomAt(factor: number, clientX?: number, clientY?: number) {
     const c = this.canvas;
-    const frame = this.viewportFrame;
-    const rect = frame?.getBoundingClientRect();
-    const px =
-      clientX ?? (rect ? rect.left + rect.width / 2 : c.width! / 2);
-    const py =
-      clientY ?? (rect ? rect.top + rect.height / 2 : c.height! / 2);
-    const before = c.getScenePoint({ clientX: px, clientY: py } as MouseEvent);
     const next = this.clampZoom(c.getZoom() * factor);
-    c.zoomToPoint(before, next);
+    if (next === c.getZoom()) return;
+    let point = new Point(c.width / 2, c.height / 2);
+    if (clientX !== undefined || clientY !== undefined) {
+      const rect = c.upperCanvasEl.getBoundingClientRect();
+      // zoomToPoint already inverts the viewport. Supply a viewport point,
+      // not a scene point: Fabric handles CSS size, retina and page scrolling.
+      point = c.getViewportPoint({
+        clientX: clientX ?? rect.left + rect.width / 2,
+        clientY: clientY ?? rect.top + rect.height / 2,
+        target: c.upperCanvasEl,
+      } as unknown as MouseEvent);
+    }
+    c.zoomToPoint(point, next);
     c.calcOffset();
     c.requestRenderAll();
     this.saveViewport(this.activeMap);
@@ -980,18 +985,10 @@ export class EditorCore {
       this.adjustBrushSize(this.wheelBrushStep(e));
       return;
     }
+    if (e.deltaY === 0) return;
     e.preventDefault();
     e.stopPropagation();
-    const c = this.canvas;
-    const point = c.getScenePoint(e);
-    const delta = e.deltaY;
-    const factor = delta < 0 ? ZOOM_WHEEL_FACTOR : 1 / ZOOM_WHEEL_FACTOR;
-    const next = this.clampZoom(c.getZoom() * factor);
-    c.zoomToPoint(point, next);
-    c.calcOffset();
-    c.requestRenderAll();
-    this.saveViewport(this.activeMap);
-    this.emitViewport();
+    this.zoomAt(e.deltaY < 0 ? ZOOM_WHEEL_FACTOR : 1 / ZOOM_WHEEL_FACTOR, e.clientX, e.clientY);
   }
 
   private onPanDown(e: MouseEvent) {
@@ -2929,8 +2926,9 @@ export class EditorCore {
 
   /**
    * Construit un clipPath fabric épousant l'îlot UV `key`, en coordonnées
-   * absolues du canvas. Un Path evenodd (multi-polygones) évite les bugs fabric
-   * avec Group + FabricImage lors de l'isolation de pièce.
+   * absolues du canvas. Un Path composé évite les bugs fabric avec Group +
+   * FabricImage. Les pièces stock utilisent l'union ; seuls les modèles qui
+   * déclarent des trous utilisent la règle evenodd.
    */
   private buildIslandClip(key: string, mapId: MapId, mirror = false): FabricObject | null {
     const island = this.findIsland(key);
@@ -2958,7 +2956,7 @@ export class EditorCore {
     return new Path(d.trim(), {
       absolutePositioned: true,
       fill: 'black',
-      fillRule: 'evenodd',
+      fillRule: island.fillRule ?? 'nonzero',
     });
   }
 

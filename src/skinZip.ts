@@ -8,6 +8,7 @@ import { blenderPartsFromGlb, validateBlenderParts, type BlenderPart } from './b
 import { decodeDDS, encodeDDS, encodeTGA, type RGBAImage } from './dds';
 import { ILLUM_ROLES, MAPS, isDirtMask, mapIdFromFileName, type IllumRole, type MapId } from './maps';
 import { UV_GUIDE_ISLANDS } from './uvGuideData';
+import { ambientOcclusionFile, decodeAmbientOcclusion } from './three/previewAmbientOcclusion';
 import {
   SKIN3D_MESH_FILE,
   SKIN3D_PREVIEW_FILE,
@@ -350,7 +351,10 @@ export async function buildSkinZipFromImages(
     if (flat && rgba.width > FLAT_MAP_RES) {
       rgba = solidImage(FLAT_MAP_RES, flat);
     }
-    zip.file(def.fileName, encodeDDS(rgba, def.format, { colorSpace: def.kind === 'basecolor' ? 'srgb' : 'linear' }));
+    zip.file(def.fileName, encodeDDS(rgba, def.format, {
+      colorSpace: def.kind === 'basecolor' ? 'srgb' : 'linear',
+      mipmapAlpha: def.kind === 'illum' ? 'illumination-role' : 'average',
+    }));
   }
   // Glass has no editable surface yet, but full-skin protection covers its dirt mask too.
   if (opts.dirtEnabled === false) zip.file('Glass_DirtMask.dds', encodeDDS(solidImage(4, [0, 0, 0, 255]), 'BC4'));
@@ -432,6 +436,7 @@ export interface ImportResult {
   failures: ImportFailure[];
   /** Présent si le zip contient MainBody.Mesh.gbx. */
   skin3d: Skin3DProject | null;
+  surfaceTextures?: Skin3DFile[];
 }
 
 const MAX_IMPORT_DIM = 8192;
@@ -540,7 +545,21 @@ export async function importSkinZipFromBuffer(buf: ArrayBuffer): Promise<ImportR
       continue;
     }
     if (isGameZipPassthrough(file)) {
-      passthrough.push({ name: file, data: new Uint8Array(await entry.async('arraybuffer')) });
+      const data = new Uint8Array(await entry.async('arraybuffer'));
+      if (ambientOcclusionFile(file) && !decodeAmbientOcclusion(data.buffer)) {
+        result.skipped.push(path);
+        result.failures.push({ path, reason: `${path} : texture d’ombrage DDS non reconnue, trop grande ou tronquée` });
+        continue;
+      }
+      if (/^(Details|Wheels)_N\.dds$/i.test(file)) {
+        const normal = decodeDDS(data.buffer);
+        if (!normal || !isValidRGBA(normal)) {
+          result.skipped.push(path);
+          result.failures.push({ path, reason: `${path} : texture de relief DDS non reconnue ou tronquée` });
+          continue;
+        }
+      }
+      passthrough.push({ name: file, data });
       continue;
     }
     const id = mapIdFromFileName(path);
@@ -587,12 +606,14 @@ export async function importSkinZipFromBuffer(buf: ArrayBuffer): Promise<ImportR
   }
 
   result.imported = [...byId.values()];
+  const uniquePassthrough = [...new Map(passthrough.map((entry) => [entry.name.toLowerCase(), entry])).values()];
+  result.surfaceTextures = uniquePassthrough.filter((entry) => /^(Details|Wheels)_N\.dds$/i.test(entry.name) || ambientOcclusionFile(entry.name));
   if (mesh) {
     if (!parts && preview) {
       try { parts = blenderPartsFromGlb(preview); }
       catch (err) { result.failures.push({ path: SKIN3D_PREVIEW_FILE, reason: `Pièces non séparées : ${String(err)}` }); }
     }
-    result.skin3d = { mesh, preview, passthrough, name: metaName, ...(parts?.length ? { parts } : {}) };
+    result.skin3d = { mesh, preview, passthrough: uniquePassthrough, name: metaName, ...(parts?.length ? { parts } : {}) };
   }
   return result;
 }

@@ -21,6 +21,13 @@ import { speedLightMask } from '../skinZip';
 import { lightIsOn, roleFromAlpha } from '../illumination';
 import { continuousImageUV, imageIslandAt } from '../editor/imagePlacement';
 import { bakeProjection, type DecalProjection, type PixelSource, type ProjectionTriangle, type SurfaceAnchor, type Vec3 } from './decalProjection';
+import { PreviewSurfaceTextures } from './previewSurfaceTextures';
+import { PreviewAmbientOcclusion } from './previewAmbientOcclusion';
+import { PlayerDisplay } from './playerDisplay';
+import { ExportColorPreview, type ExportMaterialImage } from './ExportColorPreview';
+import { decodeSurfaceMaterial } from '../material';
+import type { WheelSurfaceSettings } from '../wheelSurface';
+import type { Skin3DFile } from '../skin3d';
 
 /** Modèle servi statiquement depuis public/models/ (fiable en dev et prod). */
 const CAR_MODEL_RESOURCE_PATH = `${import.meta.env?.BASE_URL ?? '/'}models/car/`;
@@ -107,6 +114,11 @@ export class CarPreview {
   private detailsMat: THREE.MeshStandardMaterial;
   private wheelsMat: THREE.MeshStandardMaterial;
   private glassMat: THREE.MeshPhysicalMaterial;
+  private surfaceTextures: PreviewSurfaceTextures;
+  private ambientOcclusion: PreviewAmbientOcclusion;
+  private exportColorPreview: ExportColorPreview;
+  private exportPreviewActive = false;
+  private playerDisplay: PlayerDisplay | null = null;
   private coatIntensity = 1;
   private emissiveIntensity = 1.4;
   private braking = false;
@@ -196,8 +208,9 @@ export class CarPreview {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);
 
     this.loadingEl = document.createElement('div');
@@ -274,6 +287,20 @@ export class CarPreview {
       transparent: true,
       opacity: 0.72,
     });
+    this.surfaceTextures = new PreviewSurfaceTextures(
+      { details: this.detailsMat, wheels: this.wheelsMat },
+      this.renderer.capabilities.getMaxAnisotropy(),
+    );
+    void this.surfaceTextures.loadNativeTextures();
+    this.ambientOcclusion = new PreviewAmbientOcclusion(
+      { skin: this.skinMat, details: this.detailsMat, wheels: this.wheelsMat },
+      this.renderer.capabilities.getMaxAnisotropy(),
+    );
+    void this.ambientOcclusion.loadNativeTextures();
+    this.exportColorPreview = new ExportColorPreview(
+      { Skin_B: this.skinMat, Details_B: this.detailsMat, Wheels_B: this.wheelsMat },
+      this.renderer.capabilities.getMaxAnisotropy(),
+    );
 
     this.scene.add(this.carRoot);
 
@@ -384,12 +411,15 @@ export class CarPreview {
     });
 
     const span = fitModelToGround(model);
+    this.surfaceTextures?.setOfficialModel(kind === 'fbx');
+    this.ambientOcclusion?.setOfficialModel(kind === 'fbx');
     this.modelRoot = model;
     this.carRoot.add(model);
     this.vehicleRig = new VehicleRigPreview(model);
     this.vehiclePose = { ...REST_VEHICLE_POSE };
     this.scene.add(this.vehicleRig.guides);
     this.carBounds = new THREE.Box3().setFromObject(model);
+    this.playerDisplay = PlayerDisplay.attach(model, kind === 'fbx', this.renderer.capabilities.getMaxAnisotropy());
     this.projectionTriangles = null;
     this.controls.minDistance = span * 0.12;
     this.controls.maxDistance = span * 6;
@@ -402,6 +432,7 @@ export class CarPreview {
 
   private detachModel() {
     if (!this.modelRoot) return;
+    this.playerDisplay?.dispose(); this.playerDisplay = null;
     this.vehicleRig?.dispose(); this.vehicleRig = null;
     this.carRoot.remove(this.modelRoot);
     this.modelRoot.traverse((obj) => {
@@ -498,19 +529,21 @@ export class CarPreview {
   /** Roughness/metalness neutres avant import des maps _R (évite un rendu noir). */
   private initDefaultRoughnessPack() {
     // three lit la rugosité dans le canal G et le métal dans le canal B.
-    const seed: { id: MapId; g: number; b: number; mat: THREE.MeshStandardMaterial }[] = [
-      { id: 'Skin_R', g: 140, b: 255, mat: this.skinMat },
-      { id: 'Details_R', g: 140, b: 90, mat: this.detailsMat },
-      { id: 'Wheels_R', g: 217, b: 26, mat: this.wheelsMat },
+    const seed: { id: MapId; mat: THREE.MeshStandardMaterial }[] = [
+      { id: 'Skin_R', mat: this.skinMat },
+      { id: 'Details_R', mat: this.detailsMat },
+      { id: 'Wheels_R', mat: this.wheelsMat },
     ];
-    for (const { id, g, b, mat } of seed) {
+    for (const { id, mat } of seed) {
+      const { roughness, metalness } = decodeSurfaceMaterial(MAP_BY_ID[id].defaultFill);
       const canvas = document.createElement('canvas');
       canvas.width = 4;
       canvas.height = 4;
       const ctx = canvas.getContext('2d')!;
-      ctx.fillStyle = `rgb(255, ${g}, ${b})`;
+      ctx.fillStyle = `rgb(255, ${roughness}, ${metalness})`;
       ctx.fillRect(0, 0, 4, 4);
       const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.NoColorSpace;
       texture.flipY = true;
       this.rmPacks.set(id, { canvas, texture });
       mat.roughnessMap = texture;
@@ -536,6 +569,30 @@ export class CarPreview {
   private onControlsStart = () => {
     this.userNavigated = true;
   };
+
+  /** Relie les normales supplémentaires du skin importé, sans modifier ses DDS. */
+  setSurfaceTextures(files: readonly Skin3DFile[]) {
+    this.surfaceTextures.setFiles(files);
+    this.ambientOcclusion.setFiles(files);
+  }
+
+  setWheelSurface(value: WheelSurfaceSettings) {
+    this.surfaceTextures.setWheelSurface(value);
+    this.ambientOcclusion.setWheelSurface(value);
+  }
+
+  setExportColorPreview(images: readonly ExportMaterialImage[]) {
+    this.exportColorPreview.set(images);
+    this.exportPreviewActive = true;
+    // This multiplier belongs only to workshop inspection, never to the ZIP.
+    this.skinMat.clearcoat = 1;
+  }
+
+  clearExportColorPreview() {
+    this.exportColorPreview.clear();
+    this.exportPreviewActive = false;
+    this.skinMat.clearcoat = this.coatIntensity;
+  }
 
   /** Branche/rafraîchit un canvas source comme texture d'une map. */
   setMapCanvas(id: MapId, source: HTMLCanvasElement, roles?: HTMLCanvasElement) {
@@ -725,7 +782,7 @@ export class CarPreview {
   /** Intensité du vernis (clearcoat) sur la carrosserie (0..1). */
   setCoatIntensity(v: number) {
     this.coatIntensity = Math.max(0, Math.min(1, v));
-    this.skinMat.clearcoat = this.coatIntensity;
+    this.skinMat.clearcoat = this.exportPreviewActive ? 1 : this.coatIntensity;
     this.skinMat.needsUpdate = true;
   }
 
@@ -1342,6 +1399,7 @@ export class CarPreview {
     window.removeEventListener('blur', this.onBlur);
     this.controls.removeEventListener('start', this.onControlsStart);
     this.controls.dispose();
+    this.playerDisplay?.dispose(); this.playerDisplay = null;
     this.carRoot.traverse((obj) => {
       if (obj instanceof THREE.Mesh) {
         obj.geometry.dispose();
@@ -1352,6 +1410,9 @@ export class CarPreview {
     this.detailsMat.dispose();
     this.wheelsMat.dispose();
     this.glassMat.dispose();
+    this.surfaceTextures?.dispose();
+    this.ambientOcclusion?.dispose();
+    this.exportColorPreview.dispose();
     for (const t of this.textures.values()) t.dispose();
     for (const state of this.illumination.values()) state.texture?.dispose();
     for (const { texture } of this.rmPacks.values()) texture.dispose();

@@ -20,6 +20,8 @@ export interface RGBAImage {
 export interface DDSEncodeOptions {
   /** Color mipmaps average light in linear space; material data stays linear. */
   colorSpace?: 'linear' | 'srgb';
+  /** BC3 light maps store a behaviour code in alpha, never transparency. */
+  mipmapAlpha?: 'average' | 'illumination-role';
 }
 const SRGB_TO_LINEAR = Float64Array.from({ length: 256 }, (_, value) => {
   const x = value / 255; return x <= .04045 ? x / 12.92 : ((x + .055) / 1.055) ** 2.4;
@@ -28,35 +30,59 @@ const LINEAR_TO_SRGB = Uint8Array.from({ length: 8193 }, (_, value) => {
   const x = value / 8192; return Math.round(255 * (x <= .0031308 ? x * 12.92 : 1.055 * x ** (1 / 2.4) - .055));
 });
 
-function downsample(img: RGBAImage, srgb: boolean): RGBAImage {
+function downsample(img: RGBAImage, srgb: boolean, illuminationRoles: boolean): RGBAImage {
   const w = Math.max(1, img.width >> 1);
   const h = Math.max(1, img.height >> 1);
   const out = new Uint8ClampedArray(w * h * 4);
+  const offsets = new Uint32Array(4);
+  const weights = new Uint16Array(4);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const sx = Math.min(x * 2, img.width - 1);
       const sy = Math.min(y * 2, img.height - 1);
       const sx1 = Math.min(sx + 1, img.width - 1);
       const sy1 = Math.min(sy + 1, img.height - 1);
-      for (let c = 0; c < 4; c++) {
-        const a = img.data[(sy * img.width + sx) * 4 + c];
-        const b = img.data[(sy * img.width + sx1) * 4 + c];
-        const cc = img.data[(sy1 * img.width + sx) * 4 + c];
-        const d = img.data[(sy1 * img.width + sx1) * 4 + c];
-        out[(y * w + x) * 4 + c] = srgb && c < 3
+      offsets[0] = (sy * img.width + sx) * 4;
+      offsets[1] = (sy * img.width + sx1) * 4;
+      offsets[2] = (sy1 * img.width + sx) * 4;
+      offsets[3] = (sy1 * img.width + sx1) * 4;
+      const target = (y * w + x) * 4;
+      for (let c = 0; c < (illuminationRoles ? 3 : 4); c++) {
+        const a = img.data[offsets[0] + c];
+        const b = img.data[offsets[1] + c];
+        const cc = img.data[offsets[2] + c];
+        const d = img.data[offsets[3] + c];
+        out[target + c] = srgb && c < 3
           ? LINEAR_TO_SRGB[Math.round((SRGB_TO_LINEAR[a] + SRGB_TO_LINEAR[b] + SRGB_TO_LINEAR[cc] + SRGB_TO_LINEAR[d]) * 2048)]
           : (a + b + cc + d + 2) >> 2;
+      }
+      if (illuminationRoles) {
+        // Black background (alpha 255) must not turn a distant brake into a
+        // headlight. Keep the code receiving the most emission, including 97
+        // for the speed panel, rather than inventing a code by averaging them.
+        for (let i = 0; i < 4; i++) {
+          const offset = offsets[i];
+          weights[i] = Math.max(img.data[offset], img.data[offset + 1], img.data[offset + 2]);
+        }
+        let role = 255, strongest = 0;
+        for (let i = 0; i < 4; i++) {
+          const candidate = img.data[offsets[i] + 3];
+          let weight = 0;
+          for (let j = 0; j < 4; j++) if (img.data[offsets[j] + 3] === candidate) weight += weights[j];
+          if (weight > strongest) { strongest = weight; role = candidate; }
+        }
+        out[target + 3] = role;
       }
     }
   }
   return { width: w, height: h, data: out };
 }
 
-function mipChain(img: RGBAImage, srgb: boolean): RGBAImage[] {
+function mipChain(img: RGBAImage, srgb: boolean, illuminationRoles: boolean): RGBAImage[] {
   const chain = [img];
   let cur = img;
   while (cur.width > 1 || cur.height > 1) {
-    cur = downsample(cur, srgb);
+    cur = downsample(cur, srgb, illuminationRoles);
     chain.push(cur);
   }
   return chain;
@@ -94,6 +120,7 @@ function from565(c: number): [number, number, number] {
 
 interface BC1Fit {
   palette: Int16Array;
+  clusters: Float64Array;
   c0: number; c1: number; bits: number; error: number;
   best0: number; best1: number; bestBits: number; bestError: number;
 }
@@ -108,11 +135,14 @@ function nearest565(r: number, g: number, b: number): number {
 function fitBC1Candidate(block: Uint8Array, c0: number, c1: number, fit: BC1Fit) {
   if (c0 < c1) [c0, c1] = [c1, c0];
   const p = fit.palette;
-  const a = from565(c0), b = from565(c1);
+  // Reuse the palette storage: exports evaluate millions of candidates.
+  const r0 = c0 >>> 11, g0 = (c0 >>> 5) & 63, b0 = c0 & 31;
+  const r1 = c1 >>> 11, g1 = (c1 >>> 5) & 63, b1 = c1 & 31;
+  p[0] = (r0 << 3) | (r0 >>> 2); p[1] = (g0 << 2) | (g0 >>> 4); p[2] = (b0 << 3) | (b0 >>> 2);
+  p[3] = (r1 << 3) | (r1 >>> 2); p[4] = (g1 << 2) | (g1 >>> 4); p[5] = (b1 << 3) | (b1 >>> 2);
   for (let k = 0; k < 3; k++) {
-    p[k] = a[k]; p[3 + k] = b[k];
-    p[6 + k] = Math.round((2 * a[k] + b[k]) / 3);
-    p[9 + k] = Math.round((a[k] + 2 * b[k]) / 3);
+    p[6 + k] = Math.round((2 * p[k] + p[3 + k]) / 3);
+    p[9 + k] = Math.round((p[k] + 2 * p[3 + k]) / 3);
   }
   let bits = 0, error = 0;
   for (let i = 0; i < 16; i++) {
@@ -147,6 +177,55 @@ function refineBC1(block: Uint8Array, fit: BC1Fit) {
     const previousError = fit.error;
     fitBC1Candidate(block, c0, c1, fit);
     if (fit.error >= previousError) break;
+  }
+}
+
+/**
+ * The least-squares fit above is continuous, but RGB565 is a discrete grid.
+ * Optimize the six quantized channels against the actual interpolated palette.
+ * Cluster sufficient statistics keep this bounded: only nine pairs per channel,
+ * at most two passes, without another full pixel search for each pair.
+ */
+function refineQuantizedBC1(block: Uint8Array, fit: BC1Fit) {
+  if (fit.bestError <= 16) return;
+  const clusters = fit.clusters;
+  for (let pass = 0; pass < 2; pass++) {
+    clusters.fill(0);
+    for (let i = 0; i < 16; i++) {
+      const cluster = ((fit.bestBits >>> (i * 2)) & 3) * 7;
+      clusters[cluster]++;
+      for (let channel = 0; channel < 3; channel++) {
+        const value = block[i * 4 + channel];
+        clusters[cluster + 1 + channel] += value;
+        clusters[cluster + 4 + channel] += value * value;
+      }
+    }
+    let optimized0 = 0, optimized1 = 0;
+    for (let channel = 0; channel < 3; channel++) {
+      const shift = channel === 0 ? 11 : channel === 1 ? 5 : 0;
+      const max = channel === 1 ? 63 : 31;
+      const center0 = (fit.best0 >>> shift) & max, center1 = (fit.best1 >>> shift) & max;
+      let endpoint0 = center0, endpoint1 = center1, best = Infinity;
+      for (let a = Math.max(0, center0 - 1); a <= Math.min(max, center0 + 1); a++) {
+        const p0 = channel === 1 ? (a << 2) | (a >> 4) : (a << 3) | (a >> 2);
+        for (let b = Math.max(0, center1 - 1); b <= Math.min(max, center1 + 1); b++) {
+          const p1 = channel === 1 ? (b << 2) | (b >> 4) : (b << 3) | (b >> 2);
+          let error = 0;
+          for (let index = 0; index < 4; index++) {
+            const palette = index === 0 ? p0 : index === 1 ? p1
+              : index === 2 ? Math.round((2 * p0 + p1) / 3) : Math.round((p0 + 2 * p1) / 3);
+            const cluster = index * 7;
+            error += clusters[cluster] * palette * palette - 2 * palette * clusters[cluster + 1 + channel]
+              + clusters[cluster + 4 + channel];
+          }
+          if (error < best) { best = error; endpoint0 = a; endpoint1 = b; }
+        }
+      }
+      optimized0 |= endpoint0 << shift; optimized1 |= endpoint1 << shift;
+    }
+    const previous = fit.bestError;
+    fitBC1Candidate(block, optimized0, optimized1, fit);
+    if (fit.bestError >= previous) break;
   }
 }
 
@@ -226,6 +305,7 @@ function encodeBlockBC1(block: Uint8Array, out: DataView, offset: number, fit: B
   }
   fitBC1Candidate(block, nearest565(block[maxI * 4], block[maxI * 4 + 1], block[maxI * 4 + 2]), nearest565(block[minI * 4], block[minI * 4 + 1], block[minI * 4 + 2]), fit);
   refineBC1(block, fit);
+  refineQuantizedBC1(block, fit);
   out.setUint16(offset, fit.best0, true); out.setUint16(offset + 2, fit.best1, true); out.setUint32(offset + 4, fit.bestBits, true);
 }
 
@@ -310,7 +390,8 @@ const FORMAT_INFO: Record<BCFormat, { fourcc: string; blockBytes: number }> = {
 /** Encode une image RGBA en DDS compressé avec chaîne de mipmaps complète. */
 export function encodeDDS(img: RGBAImage, format: BCFormat, options: DDSEncodeOptions = {}): ArrayBuffer {
   const info = FORMAT_INFO[format];
-  const mips = mipChain(img, options.colorSpace === 'srgb' && (format === 'BC1' || format === 'BC3'));
+  const mips = mipChain(img, options.colorSpace === 'srgb' && (format === 'BC1' || format === 'BC3'),
+    format === 'BC3' && options.mipmapAlpha === 'illumination-role');
   let dataSize = 0;
   for (const m of mips) {
     dataSize +=
@@ -344,7 +425,7 @@ export function encodeDDS(img: RGBAImage, format: BCFormat, options: DDSEncodeOp
   dv.setUint32(108, DDSCAPS_COMPLEX | DDSCAPS_TEXTURE | DDSCAPS_MIPMAP, true);
 
   const block = new Uint8Array(64);
-  const colorFit: BC1Fit = { palette: new Int16Array(12), c0: 0, c1: 0, bits: 0, error: 0, best0: 0, best1: 0, bestBits: 0, bestError: Infinity };
+  const colorFit: BC1Fit = { palette: new Int16Array(12), clusters: new Float64Array(28), c0: 0, c1: 0, bits: 0, error: 0, best0: 0, best1: 0, bestBits: 0, bestError: Infinity };
   let offset = 128;
   for (const m of mips) {
     const bw = Math.max(1, Math.ceil(m.width / 4));

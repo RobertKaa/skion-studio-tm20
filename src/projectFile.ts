@@ -1,7 +1,8 @@
 import JSZip from 'jszip';
 import { MAPS, MAP_BY_ID, type IllumRole, type MapId } from './maps';
 import type { PreviewViewState } from './three/CarPreview';
-import type { Skin3DProject } from './skin3d';
+import type { Skin3DFile, Skin3DProject } from './skin3d';
+import { isWheelSurfaceMode, type WheelSurfaceSettings } from './wheelSurface';
 import { validateBlenderParts, type BlenderPart } from './blenderParts';
 import { validIllumCodes } from './illumination';
 import { LEGACY_TEXTURE_RESOLUTION, TEXTURE_RESOLUTION, upgradeMapResolution } from './editor/resolution';
@@ -16,12 +17,15 @@ export interface ProjectWorkspace {
   dirtPreview?: number;
   /** Optional to retain compatibility with projects created before the test circuit. */
   environment?: PreviewEnvironment;
+  wheelSurface?: WheelSurfaceSettings;
 }
 export interface ProjectDocument {
   format: 'tm-skin-studio'; version: 1 | 2; name: string;
   editor: { maps: ProjectMaps; speedColor: string; illumRole: IllumRole };
   workspace: ProjectWorkspace;
   model: null | { mesh: string; preview: string | null; name: string | null; parts?: BlenderPart[]; passthrough: { name: string; asset: string }[] };
+  /** Normal/prelight maps also belong to texture-only skins, without a custom mesh. */
+  surfaceTextures?: { name: string; asset: string }[];
 }
 export interface ProjectBundle { document: ProjectDocument; assets: Map<string, Blob | Uint8Array> }
 export const PROJECT_EXTENSION = '.tmskin';
@@ -74,7 +78,20 @@ export function validateProjectDocument(value: unknown, assets: Set<string>): as
   if (workspace.environment !== undefined && !isPreviewEnvironment(workspace.environment)) fail('environnement de test invalide.');
   if (workspace.dirtEnabled !== undefined && typeof workspace.dirtEnabled !== 'boolean') fail('protection de saleté invalide.');
   if (workspace.dirtPreview !== undefined && (typeof workspace.dirtPreview !== 'number' || !Number.isFinite(workspace.dirtPreview) || workspace.dirtPreview < 0 || workspace.dirtPreview > 1)) fail('aperçu de saleté invalide.');
+  if (workspace.wheelSurface !== undefined) {
+    const surface = workspace.wheelSurface;
+    if (!record(surface) || !isWheelSurfaceMode(surface.mode) || typeof surface.strength !== 'number' || !Number.isFinite(surface.strength) || surface.strength < 0 || surface.strength > 1) fail('relief des pneus invalide.');
+  }
   const asset = (path: unknown) => { if (typeof path !== 'string' || !ASSET_PATH.test(path) || !assets.has(path)) fail('image ou fichier lié absent.'); };
+  if (value.surfaceTextures !== undefined) {
+    if (!Array.isArray(value.surfaceTextures) || value.surfaceTextures.length > 5) fail('textures de surface invalides.');
+    const names = new Set<string>();
+    for (const entry of value.surfaceTextures) {
+      if (!record(entry) || typeof entry.name !== 'string' || !/^(?:(?:Details|Wheels)_N|(?:Skin|Details|Wheels)_AO)\.dds$/i.test(entry.name) || names.has(entry.name.toLowerCase())) fail('texture de surface invalide.');
+      names.add(entry.name.toLowerCase()); asset(entry.asset);
+      if (!/^assets\/extra-\d+\.bin$/.test(String(entry.asset))) fail('ressource de surface invalide.');
+    }
+  }
   const image = (path: unknown) => { asset(path); if (typeof path !== 'string' || !/^assets\/image-\d+\.png$/.test(path)) fail('ressource image invalide.'); };
   let nodes = 0; let objects = 0;
   const walk = (node: unknown, depth: number) => {
@@ -244,7 +261,7 @@ export async function readProjectFile(file: Blob): Promise<ProjectBundle> {
 }
 
 /** Les références de l'archive sont remplacées uniquement par des URLs créées pour ses propres PNG. */
-export function hydrateProject(bundle: ProjectBundle): { document: ProjectDocument; model: Skin3DProject | null; urls: string[] } {
+export function hydrateProject(bundle: ProjectBundle): { document: ProjectDocument; model: Skin3DProject | null; surfaceTextures: Skin3DFile[]; urls: string[] } {
   const document = structuredClone(bundle.document); const urls: string[] = [];
   const images = new Map<string, string>();
   for (const [path, value] of bundle.assets) if (path.endsWith('.png')) {
@@ -267,7 +284,8 @@ export function hydrateProject(bundle: ProjectBundle): { document: ProjectDocume
   const m = document.model;
   const model: Skin3DProject | null = m ? { mesh: data(m.mesh), preview: m.preview ? data(m.preview).buffer as ArrayBuffer : null,
     name: m.name, ...(m.parts ? { parts: m.parts } : {}), passthrough: m.passthrough.map((entry) => ({ name: entry.name, data: data(entry.asset) })) } : null;
-  return { document, model, urls };
+  const surfaceTextures = (document.surfaceTextures ?? []).map((entry) => ({ name: entry.name, data: data(entry.asset) }));
+  return { document, model, surfaceTextures, urls };
 }
 
 export function projectError(error: unknown) {
