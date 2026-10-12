@@ -35,6 +35,7 @@ import { decodeSurfaceMaterial, type SurfaceMaterial } from '../material';
 import type { ProjectMaps } from '../projectFile';
 import { TEXTURE_RESOLUTION, upgradeMapResolution, upgradeResolutionSnapshot } from './resolution';
 import { AdaptivePreview } from './adaptivePreview';
+import { createTextureBackground, readTextureBackground, syncTextureBackgroundCanvas, textureBackgroundName, updateTextureBackground, type BackgroundFit } from './textureBackground';
 
 // Keep full-atlas groups/clips at native precision. Fabric's default cache budget
 // would downsample a 2048² object to roughly 1448² before rendering the texture.
@@ -112,7 +113,7 @@ const DEFAULT_VPT: TMat2D = [1, 0, 0, 1, 0, 0];
  * `mirrorOf` lie deux calques en miroir (symétrie) : l'un suit l'autre tant
  * que le mode symétrie est actif.
  */
-const CUSTOM_PROPS = ['id', 'name', 'selectable', 'evented', 'visible', 'mirrorOf', 'referenceOnly', 'illumRole', 'illumCodes', 'decal', 'linkedImageId', 'linkedImageKind', 'imageMaterial', 'imageMaterialEnabled', 'imageOrder', 'imageLight', 'imageLightEnabled', 'blenderPart', 'partColor'];
+const CUSTOM_PROPS = ['id', 'name', 'selectable', 'evented', 'visible', 'mirrorOf', 'referenceOnly', 'illumRole', 'illumCodes', 'decal', 'linkedImageId', 'linkedImageKind', 'imageMaterial', 'imageMaterialEnabled', 'imageOrder', 'imageLight', 'imageLightEnabled', 'blenderPart', 'partColor', 'textureBackground'];
 
 /** Calque verrouillé des feux arrière : seule sa couleur se règle. */
 const SPEED_LIGHT_NAME = 'Vitesse';
@@ -490,21 +491,15 @@ export class EditorCore {
         ctx.clearRect(0, 0, res, res);
         ctx.save();
         try {
+          ctx.imageSmoothingEnabled = c.imageSmoothingEnabled;
+          (ctx as CanvasRenderingContext2D & { patternQuality: string }).patternQuality = c.patternQuality;
           ctx.scale(scale, scale);
           const bg = c.backgroundColor;
           if (typeof bg === 'string' && bg) {
             ctx.fillStyle = bg;
             ctx.fillRect(0, 0, c.width, c.height);
           }
-          const bgImg = c.backgroundImage as FabricImage | undefined;
-          const bgEl = bgImg?.getElement?.();
-          if (bgImg && bgEl && bgEl.width > 0 && bgEl.height > 0) {
-            const sx = bgImg.scaleX ?? 1;
-            const sy = bgImg.scaleY ?? 1;
-            const dw = (bgImg.width ?? bgEl.width) * sx;
-            const dh = (bgImg.height ?? bgEl.height) * sy;
-            ctx.drawImage(bgEl, bgImg.left ?? 0, bgImg.top ?? 0, dw, dh);
-          }
+          c.backgroundImage?.render(ctx);
           for (const obj of c.getObjects()) {
             if (!obj.visible) continue;
             obj.render(ctx);
@@ -1520,6 +1515,7 @@ export class EditorCore {
   setBackgroundColor(color: string, coalesce?: string) {
     const c = this.canvas;
     c.backgroundColor = color;
+    updateTextureBackground(c);
     c.requestRenderAll();
     this.pushHistory(this.activeMap, coalesce);
   }
@@ -1534,6 +1530,7 @@ export class EditorCore {
     try {
       for (const object of c.getObjects()) if (!this.paintPart(object, color)) applyObjectPaint(object, color);
       c.backgroundColor = color;
+      updateTextureBackground(c);
       c.requestRenderAll();
     } finally {
       st.suspendHistory = wasSuspended;
@@ -1546,6 +1543,51 @@ export class EditorCore {
 
   getBackgroundColor(): string {
     return (this.canvas.backgroundColor as string) || '#000000';
+  }
+
+  getTextureBackground() { return readTextureBackground(this.canvas); }
+
+  async setTextureBackgroundFromFile(file: File, mapId: MapId = this.activeMap) {
+    const image = await this.loadEditableImage(file);
+    const c = this.maps.get(mapId)!.canvas;
+    const previous = readTextureBackground(c);
+    const name = textureBackgroundName(file.name);
+    const background = createTextureBackground(image, c.width, c.height, c.backgroundColor as string, {
+      name, fit: previous?.fit ?? 'cover', colorOpacity: previous?.colorOpacity ?? 0,
+    });
+    c.backgroundImage?.dispose();
+    c.backgroundImage = background;
+    syncTextureBackgroundCanvas(c);
+    c.requestRenderAll();
+    this.pushHistory(mapId);
+    this.emit('layers');
+    this.flushTexture();
+  }
+
+  setTextureBackgroundFit(fit: BackgroundFit) {
+    if (!this.getTextureBackground()) return;
+    this.endHistoryCoalescing();
+    updateTextureBackground(this.canvas, { fit });
+    this.canvas.requestRenderAll();
+    this.pushHistory(this.activeMap);
+  }
+
+  setBackgroundColorOpacity(opacity: number) {
+    if (!this.getTextureBackground() || !Number.isFinite(opacity)) return;
+    updateTextureBackground(this.canvas, { colorOpacity: Math.max(0, Math.min(1, opacity)) });
+    this.canvas.requestRenderAll();
+    this.pushHistory(this.activeMap, 'background-opacity');
+  }
+
+  removeTextureBackground() {
+    const c = this.canvas;
+    if (!c.backgroundImage) return;
+    c.backgroundImage.dispose(); c.backgroundImage = undefined;
+    syncTextureBackgroundCanvas(c);
+    c.requestRenderAll();
+    this.pushHistory(this.activeMap);
+    this.emit('layers');
+    this.flushTexture();
   }
 
   /**
@@ -2195,6 +2237,7 @@ export class EditorCore {
       if (c.backgroundImage) {
         c.backgroundImage.dispose();
         c.backgroundImage = undefined;
+        syncTextureBackgroundCanvas(c);
       }
       for (const img of [...images].reverse()) {
         c.add(img);
@@ -2701,6 +2744,7 @@ export class EditorCore {
         c.backgroundImage = undefined;
       }
       fn(c);
+      syncTextureBackgroundCanvas(c);
       if (id === 'Details_I') this.ensureSpeedLight(st);
       c.requestRenderAll();
     } finally {
@@ -3297,6 +3341,7 @@ export class EditorCore {
           canvas.discardActiveObject(); canvas.clear();
           canvas.backgroundColor = temporary.backgroundColor;
           canvas.backgroundImage = temporary.backgroundImage; temporary.backgroundImage = undefined;
+          syncTextureBackgroundCanvas(canvas);
           const objects = temporary.getObjects(); temporary.remove(...objects); canvas.add(...objects);
           if (MAP_BY_ID[id].kind === 'illum') (canvas as LightCanvas).illumRole = (maps[id].illumRole as IllumRole | undefined) ?? 'always';
           if (id === 'Details_I') { (canvas as LightCanvas).illumRole = globals.illumRole; this.ensureSpeedLight(state); }
@@ -3489,6 +3534,7 @@ export class EditorCore {
     try {
       const json = upgradeMapResolution(JSON.parse(snap));
       await c.loadFromJSON(json);
+      syncTextureBackgroundCanvas(c);
       if (typeof json.illumRole === 'string' && ['always', 'head', 'brake'].includes(json.illumRole)) (c as LightCanvas).illumRole = json.illumRole as IllumRole;
       for (const o of c.getObjects()) o.setCoords();
       for (const { image } of this.imageOwners()) {
@@ -3545,6 +3591,7 @@ export class EditorCore {
       c.remove(...c.getObjects().filter((object) => !(object as EditorObject).linkedImageId));
       c.backgroundImage = undefined;
       c.backgroundColor = MAP_BY_ID[this.activeMap].defaultFill;
+      syncTextureBackgroundCanvas(c);
       if (this.activeMap === 'Details_I') this.ensureSpeedLight(state);
     } finally {
       state.suspendHistory = false;

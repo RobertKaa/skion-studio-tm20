@@ -53,9 +53,11 @@ export type IconName =
   | 'pen'
   | 'move'
   | 'save'
+  | 'volume'
   | 'folder';
 
 const PATHS: Record<IconName, string[]> = {
+  volume: ['M11 5 6 9H3v6h3l5 4V5z', 'M15 8a5 5 0 0 1 0 8', 'M18 5a9 9 0 0 1 0 14'],
   save: ['M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12l4 4v12a2 2 0 0 1-2 2z', 'M7 3v6h10V3', 'M7 21v-8h10v8'],
   folder: ['M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z'],
   select: ['M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z', 'M13 13l6 6'],

@@ -7,6 +7,8 @@ import { validateBlenderParts, type BlenderPart } from './blenderParts';
 import { validIllumCodes } from './illumination';
 import { LEGACY_TEXTURE_RESOLUTION, TEXTURE_RESOLUTION, upgradeMapResolution } from './editor/resolution';
 import { isPreviewEnvironment, type PreviewEnvironment } from './previewEnvironment';
+import { HORN_ASSET_PATH, MAX_HORN_BYTES, hornDuration, hornSourceName, type SkinHorn } from './horn';
+import { validTextureBackgroundSettings } from './editor/textureBackground';
 
 export type ProjectMaps = Record<MapId, Record<string, unknown>>;
 export interface ProjectWorkspace {
@@ -26,6 +28,8 @@ export interface ProjectDocument {
   model: null | { mesh: string; preview: string | null; name: string | null; parts?: BlenderPart[]; passthrough: { name: string; asset: string }[] };
   /** Normal/prelight maps also belong to texture-only skins, without a custom mesh. */
   surfaceTextures?: { name: string; asset: string }[];
+  /** Optional for older projects. The audio is embedded, never an external URL. */
+  horn?: { name: string; asset: string };
 }
 export interface ProjectBundle { document: ProjectDocument; assets: Map<string, Blob | Uint8Array> }
 export const PROJECT_EXTENSION = '.tmskin';
@@ -36,7 +40,7 @@ const MAX_EXPANDED = 256 * 1024 * 1024;
 const MAX_IMAGE_PIXELS = 384 * 1024 * 1024;
 const ROLES = new Set(['always', 'head', 'brake']);
 const OBJECT_TYPES = new Set(['rect', 'ellipse', 'circle', 'triangle', 'line', 'polygon', 'polyline', 'path', 'i-text', 'itext', 'text', 'textbox', 'group', 'image', 'linear', 'radial', 'layoutmanager', 'fit-content', 'fixed', 'clip-path']);
-const ASSET_PATH = /^assets\/(?:image-\d+\.png|mesh\.gbx|preview\.glb|extra-\d+\.bin)$/;
+const ASSET_PATH = /^assets\/(?:image-\d+\.png|mesh\.gbx|preview\.glb|extra-\d+\.bin|horn\.wav)$/;
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 function fail(message: string): never { throw new Error(`Projet non chargé : ${message}`); }
 
@@ -83,6 +87,10 @@ export function validateProjectDocument(value: unknown, assets: Set<string>): as
     if (!record(surface) || !isWheelSurfaceMode(surface.mode) || typeof surface.strength !== 'number' || !Number.isFinite(surface.strength) || surface.strength < 0 || surface.strength > 1) fail('relief des pneus invalide.');
   }
   const asset = (path: unknown) => { if (typeof path !== 'string' || !ASSET_PATH.test(path) || !assets.has(path)) fail('image ou fichier lié absent.'); };
+  if (value.horn !== undefined) {
+    if (!record(value.horn) || typeof value.horn.name !== 'string' || !value.horn.name || value.horn.name !== hornSourceName(value.horn.name) || value.horn.asset !== HORN_ASSET_PATH) fail('klaxon invalide.');
+    asset(value.horn.asset);
+  }
   if (value.surfaceTextures !== undefined) {
     if (!Array.isArray(value.surfaceTextures) || value.surfaceTextures.length > 5) fail('textures de surface invalides.');
     const names = new Set<string>();
@@ -105,6 +113,10 @@ export function validateProjectDocument(value: unknown, assets: Set<string>): as
     if (node.src !== undefined) image(node.src);
     if (node.linkedImageId) fail('un fragment ne peut pas remplacer son image maîtresse.');
     if (node.filters !== undefined && (!Array.isArray(node.filters) || node.filters.length)) fail('filtre d’image non pris en charge.');
+    if (node.textureBackground !== undefined && (!validTextureBackgroundSettings(node.textureBackground) ||
+      String(node.type).toLowerCase() !== 'group' || !Array.isArray(node.objects) || node.objects.length !== 2 ||
+      !record(node.objects[0]) || String(node.objects[0].type).toLowerCase() !== 'image' ||
+      !record(node.objects[1]) || String(node.objects[1].type).toLowerCase() !== 'rect')) fail('image de fond invalide.');
     if (node.illumRole !== undefined && !ROLES.has(String(node.illumRole))) fail('rôle lumineux invalide.');
     if (node.illumCodes !== undefined && !validIllumCodes(node.illumCodes)) fail('masque de comportement lumineux invalide.');
     if (node.blenderPart !== undefined && (typeof node.blenderPart !== 'string' || !/^[\w:.-]{1,120}$/.test(node.blenderPart))) fail('référence de pièce invalide.');
@@ -178,6 +190,9 @@ async function compactProjectImages(bundle: ProjectBundle): Promise<ProjectBundl
     if (!ASSET_PATH.test(path)) fail('chemin de ressource invalide.');
     const bytes = content instanceof Blob ? new Uint8Array(await content.arrayBuffer()) : content;
     if (bytes.length > 64 * 1024 * 1024 || (totalBytes += bytes.length) > MAX_EXPANDED) fail('projet trop volumineux.');
+    if (path === HORN_ASSET_PATH) {
+      try { hornDuration(bytes); } catch { fail('fichier du klaxon invalide.'); }
+    }
     if (path.endsWith('.png')) {
       const pixels = validateProjectPng(bytes);
       // This hash only selects comparison candidates; full byte equality decides sharing.
@@ -244,7 +259,8 @@ export async function readProjectFile(file: Blob): Promise<ProjectBundle> {
   for (const entry of entries) {
     if (entry.name !== 'project.json' && !ASSET_PATH.test(entry.name)) fail('fichier inattendu dans le projet.');
     const size = (entry as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize;
-    if (typeof size !== 'number' || size < 0 || size > (entry.name === 'project.json' ? 8 : 64) * 1024 * 1024 || (total += size) > MAX_EXPANDED) fail('archive trop volumineuse.');
+    const limit = entry.name === HORN_ASSET_PATH ? MAX_HORN_BYTES : (entry.name === 'project.json' ? 8 : 64) * 1024 * 1024;
+    if (typeof size !== 'number' || size < 0 || size > limit || (total += size) > MAX_EXPANDED) fail('archive trop volumineuse.');
   }
   const document: unknown = upgradeProjectMaps(JSON.parse(await zip.file('project.json')!.async('string')));
   const paths = new Set(entries.filter((e) => e.name !== 'project.json').map((e) => e.name));
@@ -261,7 +277,7 @@ export async function readProjectFile(file: Blob): Promise<ProjectBundle> {
 }
 
 /** Les références de l'archive sont remplacées uniquement par des URLs créées pour ses propres PNG. */
-export function hydrateProject(bundle: ProjectBundle): { document: ProjectDocument; model: Skin3DProject | null; surfaceTextures: Skin3DFile[]; urls: string[] } {
+export function hydrateProject(bundle: ProjectBundle): { document: ProjectDocument; model: Skin3DProject | null; surfaceTextures: Skin3DFile[]; horn: SkinHorn | null; urls: string[] } {
   const document = structuredClone(bundle.document); const urls: string[] = [];
   const images = new Map<string, string>();
   for (const [path, value] of bundle.assets) if (path.endsWith('.png')) {
@@ -285,7 +301,9 @@ export function hydrateProject(bundle: ProjectBundle): { document: ProjectDocume
   const model: Skin3DProject | null = m ? { mesh: data(m.mesh), preview: m.preview ? data(m.preview).buffer as ArrayBuffer : null,
     name: m.name, ...(m.parts ? { parts: m.parts } : {}), passthrough: m.passthrough.map((entry) => ({ name: entry.name, data: data(entry.asset) })) } : null;
   const surfaceTextures = (document.surfaceTextures ?? []).map((entry) => ({ name: entry.name, data: data(entry.asset) }));
-  return { document, model, surfaceTextures, urls };
+  const horn = document.horn ? { name: document.horn.name, data: data(document.horn.asset) } : null;
+  if (horn) hornDuration(horn.data);
+  return { document, model, surfaceTextures, horn, urls };
 }
 
 export function projectError(error: unknown) {

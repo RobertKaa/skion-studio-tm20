@@ -72,6 +72,11 @@ Puis ouvrir http://localhost:5173
 - **Aperçu 3D temps réel** (three.js) sur le modèle Stadium fourni, ou sur le GLB d'un
   projet personnalisé. Images projetées sur plusieurs surfaces, peinture et matières liées.
 - **Import** d'un skin `.zip` existant (DDS BC1/BC2/BC3/BC4/BC5 ou RGBA non compressé, PNG, JPG)
+- **Klaxon personnalisé** : joindre un MP3, WAV ou OGG de dix secondes maximum
+  depuis **Télécharger**. Le WAV mono destiné au jeu est équilibré automatiquement :
+  les sons faibles sont renforcés et les pics limités avec une marge de 1 dB avant
+  saturation. L’écoute dans l’app utilise ce même fichier ; le projet conserve la
+  source mono intacte. Les projets existants bénéficient de ce traitement au prochain export.
 - **Pièces importées séparées** : textures découpées selon le guide Stadium et les pièces
   du GLB, avec des réglages de couleur, matière, lumière et saleté par pièce.
 - **Projets complets** : bibliothèque locale avec sauvegarde, réouverture, copies et corbeille ;
@@ -227,6 +232,12 @@ localement et exclus du suivi Git. Ils ne sont donc pas disponibles après un
 clone du dépôt seul : les commandes de test et de construction ci-dessous
 nécessitent ces fichiers locaux et leurs dépendances. Les sources de
 l’application et les images finales de `public/` restent versionnées.
+
+Le modèle chargé par l’aperçu est conservé dans `public/models/car/`. Les cinq
+textures de relief et d’occlusion utilisées par l’application restent dans
+`src/assets/model/car/`. Les archives de ressources, la copie du FBX et les
+autres textures de référence sont conservées localement et ignorées par Git,
+comme les outils de préparation des skins personnalisés.
 
 - `npm run dev` — serveur de développement
 - `npm run build` — build de production

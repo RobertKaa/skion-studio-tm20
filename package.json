@@ -13,9 +13,11 @@
     "test:projects": "tsx scripts/test-project-file.ts && tsx scripts/test-large-project.ts && tsx scripts/test-resolution.ts",
     "test:performance": "tsx scripts/test-adaptive-preview.ts && tsx scripts/test-resolution.ts",
     "test:underbody": "tsx scripts/test-underbody-view.ts && tsx scripts/test-decal-projection.ts && tsx scripts/test-preview-environment.ts",
-    "test:quality": "tsx scripts/test-dds.ts && tsx scripts/test-material.ts && tsx scripts/test-wheel-surface.ts && tsx scripts/test-wheel-treads.ts && tsx scripts/test-wheel-relief-overlay.ts && tsx scripts/test-preview-surface-textures.ts && tsx scripts/test-preview-ambient-occlusion.ts && tsx scripts/test-surface-texture-roundtrip.ts && tsx scripts/test-player-display.ts && tsx scripts/test-export-color-preview.ts && tsx scripts/test-export-material-preview.ts && tsx scripts/test-uv-guide-coverage.ts && tsx scripts/test-export.ts",
+    "test:quality": "tsx scripts/test-dds.ts && tsx scripts/test-material.ts && tsx scripts/test-wheel-surface.ts && tsx scripts/test-wheel-treads.ts && tsx scripts/test-wheel-relief-overlay.ts && tsx scripts/test-preview-surface-textures.ts && tsx scripts/test-preview-ambient-occlusion.ts && tsx scripts/test-surface-texture-roundtrip.ts && tsx scripts/test-player-display.ts && tsx scripts/test-export-color-preview.ts && tsx scripts/test-export-material-preview.ts && tsx scripts/test-uv-guide-coverage.ts && tsx scripts/test-fuel-cap.ts && tsx scripts/test-export.ts",
     "test:generator": "tsx scripts/test-generator.ts",
     "test:element-copy": "tsx scripts/test-element-copy.ts",
+    "test:horn": "tsx scripts/test-horn.ts",
+    "test:background": "tsx scripts/test-texture-background.ts",
     "preview": "vite preview",
     "preview:gh": "vite build && vite preview --base /skion-studio-tm20/"
   },

@@ -9,6 +9,7 @@ import { decodeDDS, encodeDDS, encodeTGA, type RGBAImage } from './dds';
 import { ILLUM_ROLES, MAPS, isDirtMask, mapIdFromFileName, type IllumRole, type MapId } from './maps';
 import { UV_GUIDE_ISLANDS } from './uvGuideData';
 import { ambientOcclusionFile, decodeAmbientOcclusion } from './three/previewAmbientOcclusion';
+import { HORN_FILE_NAME, MAX_HORN_SOURCE_BYTES, normalizeHornAudio, prepareHorn, type SkinHorn } from './horn';
 import {
   SKIN3D_MESH_FILE,
   SKIN3D_PREVIEW_FILE,
@@ -55,6 +56,7 @@ function nextAnimationFrame(): Promise<void> {
 }
 
 export interface ExportSources {
+  horn?: SkinHorn | null;
   /** False exports black dirt masks, while leaving editable masks untouched. */
   dirtEnabled?: boolean;
   getMapCanvas: (id: MapId) => HTMLCanvasElement;
@@ -260,6 +262,7 @@ export function applyIllumRole(
 }
 
 export interface BuildSkinZipOptions {
+  horn?: SkinHorn | null;
   dirtEnabled?: boolean;
   skinName: string;
   /** Rôle du canal alpha pour la map d'illumination (Details_I), hors vitesse. */
@@ -331,6 +334,7 @@ export async function buildSkinZipFromImages(
   images: Record<MapId, RGBAImage>,
   opts: BuildSkinZipOptions,
 ): Promise<Blob> {
+  const hornAudio = opts.horn ? normalizeHornAudio(opts.horn.data) : null;
   const zip = new JSZip();
   for (const def of MAPS) {
     let rgba = images[def.id];
@@ -369,6 +373,7 @@ export async function buildSkinZipFromImages(
     if (!isGameZipPassthrough(name) || zip.file(name)) continue;
     zip.file(name, extra.data);
   }
+  if (hornAudio) zip.file(HORN_FILE_NAME, hornAudio);
   const meshNote = opts.meshGbx
     ? `Ce zip contient ${SKIN3D_MESH_FILE} : le visuel remplace la carrosserie, la hitbox reste celle du jeu.\n`
     : '';
@@ -376,6 +381,7 @@ export async function buildSkinZipFromImages(
     'ReadMe.txt',
     `Skin "${opts.skinName}" généré par Skion Studio.\n` +
       meshNote +
+      (opts.horn ? `Klaxon personnalisé inclus : ${HORN_FILE_NAME} (WAV mono).\n` : '') +
       `Placez ce fichier .zip dans Documents/Trackmania/Skins/Models/CarSport/\n` +
       `puis dans le jeu : Profil > Garage > Upload skin.\n`,
   );
@@ -414,6 +420,7 @@ export async function exportSkinZip(
     illumRolesByMap[def.id] = { width: size, height: size, data: ctx.getImageData(0, 0, size, size).data };
   }
   return buildSkinZipFromImages(images, {
+    horn: sources.horn,
     skinName,
     dirtEnabled: sources.dirtEnabled,
     illumRole: sources.illumRole,
@@ -431,6 +438,7 @@ export interface ImportFailure {
 }
 
 export interface ImportResult {
+  horn?: SkinHorn;
   imported: { id: MapId; image: RGBAImage; path: string }[];
   skipped: string[];
   failures: ImportFailure[];
@@ -518,10 +526,25 @@ export async function importSkinZipFromBuffer(buf: ArrayBuffer): Promise<ImportR
   let metaName: string | null = null;
   let parts: BlenderPart[] | undefined;
   const passthrough: Skin3DFile[] = [];
+  // Decode a single candidate; prefer the game file at the root over archived alternatives.
+  const hornCandidates = entries.filter((entry) => /^horn\.(wav|ogg|mp3)$/i.test(baseName(entry.name)));
+  const selectedHorn = hornCandidates.find((entry) => /^horn\.wav$/i.test(entry.name))
+    ?? hornCandidates.find((entry) => /\.wav$/i.test(entry.name)) ?? hornCandidates[0];
 
   for (const [path, entry] of Object.entries(zip.files)) {
     if (entry.dir) continue;
     const file = baseName(path);
+    if (/^horn\.(wav|ogg|mp3)$/i.test(file)) {
+      if (entry !== selectedHorn) { result.skipped.push(path); continue; }
+      try {
+        const size = (entry as unknown as { _data: { uncompressedSize: number } })._data.uncompressedSize;
+        if (size > MAX_HORN_SOURCE_BYTES) throw new Error('10 Mo maximum par fichier audio.');
+        const bytes = await entry.async('uint8array');
+        const mime = /\.mp3$/i.test(file) ? 'audio/mpeg' : /\.ogg$/i.test(file) ? 'audio/ogg' : 'audio/wav';
+        result.horn = await prepareHorn(new Blob([new Uint8Array(bytes)], { type: mime }), file);
+      } catch (error) { result.failures.push({ path, reason: formatImportError('Klaxon', error) }); }
+      continue;
+    }
     if (isMainBodyMeshName(file)) {
       mesh = new Uint8Array(await entry.async('arraybuffer'));
       continue;

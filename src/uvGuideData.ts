@@ -14,6 +14,7 @@
  */
 
 import { WHEEL_UV_GUIDE } from './wheelUvGuide';
+import { FUEL_CAP_UV_GUIDE } from './fuelCapUvGuide';
 export type UvGuideFamily = 'skin' | 'details' | 'wheels';
 
 export interface UvGuideIsland {
@@ -832,7 +833,7 @@ export const UV_GUIDE_ISLANDS: UvGuideIsland[] = [
   ] }
 ];
 
-UV_GUIDE_ISLANDS.push(...WHEEL_UV_GUIDE);
+UV_GUIDE_ISLANDS.push(FUEL_CAP_UV_GUIDE, ...WHEEL_UV_GUIDE);
 
 /** Îlots regroupés par famille de map. */
 export const UV_GUIDE_BY_FAMILY: Record<UvGuideFamily, UvGuideIsland[]> = {

@@ -282,6 +282,7 @@ export interface RegionOrientation {
  */
 export const REGION_ORIENTATION: Record<string, RegionOrientation> = {
   top: { angle: 180, flipX: false },
+  fuelCap: { angle: 180, flipX: false },
   left: { angle: 271, flipX: false },
   right: { angle: 89, flipX: false },
   archL: { angle: 163, flipX: true },
@@ -342,6 +343,8 @@ export function getRegionOrientation(key: string): RegionOrientation {
 export const SKIN_REGIONS: Record<string, UVRegion> = {
   // Panneau central : habitacle + toit + capot (plus gros îlot UV).
   top: { x: 0.266, y: 0.006, w: 0.468, h: 0.805, label: 'TOIT / CAPOT' },
+  // Sous-zone du panneau central : joint réel du bouchon, côté gauche.
+  fuelCap: { x: 0.652875, y: 0.185726, w: 0.026421, h: 0.026822, label: 'BOUCHON DE RÉSERVOIR' },
   // Flancs : îlots distincts (pas de miroir). Vérifié : u≈0.8 → monde +X = GAUCHE.
   left: { x: 0.721, y: 0.384, w: 0.157, h: 0.366, label: 'FLANC GAUCHE' },
   right: { x: 0.122, y: 0.384, w: 0.157, h: 0.366, label: 'FLANC DROIT' },

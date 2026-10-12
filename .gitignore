@@ -60,6 +60,18 @@ __pycache__/
 *.blend
 *.blend[0-9]*
 
+# Local source packs and extracted reference copies; keep only runtime textures
+/src/assets/model/*.zip
+/src/assets/model/extracted/
+/src/assets/model/car/*
+!/src/assets/model/car/Details_AO.dds
+!/src/assets/model/car/Details_N.dds
+!/src/assets/model/car/Skin_AO.dds
+!/src/assets/model/car/Wheels_AO.dds
+!/src/assets/model/car/Wheels_N.dds
+/scripts/png.ts
+/.cursor/rules/skin-3d.mdc
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

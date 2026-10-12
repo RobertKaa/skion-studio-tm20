@@ -19,6 +19,7 @@ const VB = 1000;
 const COLORS: Record<string, string> = {
   // carrosserie (Skin_01) — palette désaturée pour rester lisible sans crier
   top: '#f08a8a',
+  fuelCap: '#f2cb82',
   left: '#7fd6a6',
   right: '#dcd67a',
   archL: '#86b6f0',
@@ -104,7 +105,7 @@ function labelSpots(
       if (!anchor) continue;
       const label = lampsOnly && LAMP_KEYS.has(island.key)
         ? ({ d_tail_hi: 'FEU HAUT', d_tail: 'FEU', d_head: 'PHARE' } as Record<string, string>)[island.key]
-        : island.label;
+        : island.key === 'fuelCap' ? 'BOUCHON' : island.label;
       candidates.push({ key: island.key, label, ...anchor, color, area });
     }
   }
@@ -127,7 +128,9 @@ export function UvGuideOverlay({ activeMap, visible, focusedRegion = null, islan
   const islands = providedIslands ?? UV_GUIDE_BY_FAMILY[family];
   if (!islands || islands.length === 0) return null;
   const lampsOnly = mapDef.kind === 'illum';
-  const spots = labelSpots(islands, lampsOnly).filter((spot) => !focusedRegion || spot.key === focusedRegion);
+  // Isolation can target a single contour; highlight its named zone as well.
+  const focusedKey = focusedRegion?.split(':element:')[0] ?? null;
+  const spots = labelSpots(islands, lampsOnly).filter((spot) => !focusedKey || spot.key === focusedKey);
 
   return (
     <svg
@@ -139,7 +142,7 @@ export function UvGuideOverlay({ activeMap, visible, focusedRegion = null, islan
     >
       {islands.map((island) => {
         const color = COLORS[island.key] ?? FALLBACK;
-        const focused = focusedRegion === island.key || selectedRegion === island.key;
+        const focused = focusedKey === island.key || selectedRegion === island.key;
         const dimmed = focusedRegion != null && !focused;
         const quiet = lampsOnly && !LAMP_KEYS.has(island.key);
         const lamp = lampsOnly && LAMP_KEYS.has(island.key);
@@ -174,7 +177,7 @@ export function UvGuideOverlay({ activeMap, visible, focusedRegion = null, islan
       {spots.map((spot, i) => (
         <text
           key={`${spot.key}-${i}`}
-          className={`uv-guide-overlay__label${focusedRegion === spot.key ? ' uv-guide-overlay__label--focused' : ''}${lampsOnly ? ' uv-guide-overlay__label--lamp' : ''}`}
+          className={`uv-guide-overlay__label${focusedKey === spot.key ? ' uv-guide-overlay__label--focused' : ''}${lampsOnly ? ' uv-guide-overlay__label--lamp' : ''}`}
           x={spot.x}
           y={spot.y}
           fill={spot.color}

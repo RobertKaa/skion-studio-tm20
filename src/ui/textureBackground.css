@@ -1,0 +1,26 @@
+.texture-background {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.texture-background-heading { display: flex; align-items: center; gap: 7px; color: var(--fg); font-size: 12px; }
+.texture-background .hint { margin: 0; }
+.texture-background-file {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-0);
+}
+.texture-background-file img { width: 40px; height: 40px; flex: 0 0 40px; object-fit: cover; border-radius: 4px; }
+.texture-background-file span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.texture-background-file button { flex-shrink: 0; }
+.texture-background-fit { display: flex; gap: 5px; }
+.texture-background-fit button { flex: 1; min-width: 0; padding-inline: 6px; }
