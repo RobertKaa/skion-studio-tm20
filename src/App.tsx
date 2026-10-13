@@ -57,6 +57,7 @@ import { hydrateProject, projectError, projectLayerCount, readProjectFile, write
 import { getProject, lastProjectId, putProject, rememberProject, type LocalProject } from './projectStore';
 import { createBaseSkinProject } from './baseSkin';
 import { HORN_ASSET_PATH, hornFingerprint, type SkinHorn } from './horn';
+import { RegionImageFill, type RegionImageTarget } from './ui/RegionImageFill';
 
 // ----------------------------------------------------------------- constantes
 
@@ -358,18 +359,22 @@ export default function App() {
   const syncBrushPreview = useCallback((clientX?: number, clientY?: number) => {
     const preview = brushPreviewRef.current;
     const ed = editorRef.current;
-    if (!preview || !ed || toolRef.current !== 'draw') {
+    const hide = () => {
       if (preview) preview.style.display = 'none';
+      canvasStageRef.current?.classList.remove('canvas-stage--brush-preview');
+    };
+    if (!preview || !ed || toolRef.current !== 'draw') {
+      hide();
       return;
     }
     const ptr = clientX != null && clientY != null ? { x: clientX, y: clientY } : brushPointerRef.current;
     if (!ptr) {
-      preview.style.display = 'none';
+      hide();
       return;
     }
     const info = ed.getBrushPreviewAtClient(ptr.x, ptr.y, ed.brushSize);
     if (!info) {
-      preview.style.display = 'none';
+      hide();
       return;
     }
     preview.style.display = 'block';
@@ -378,6 +383,8 @@ export default function App() {
     preview.style.width = `${Math.max(info.diameter, 2)}px`;
     preview.style.height = `${Math.max(info.diameter, 2)}px`;
     preview.style.borderColor = ed.brushColor;
+    // Hide the system pointer only once its visible replacement is ready.
+    canvasStageRef.current?.classList.add('canvas-stage--brush-preview');
   }, []);
 
   const toastTimerRef = useRef(0);
@@ -810,8 +817,16 @@ export default function App() {
       brushPointerRef.current = { x: e.clientX, y: e.clientY };
       syncBrushPreview(e.clientX, e.clientY);
     };
+    const onBlur = () => {
+      brushPointerRef.current = null;
+      syncBrushPreview();
+    };
     window.addEventListener('mousemove', onMove);
-    return () => window.removeEventListener('mousemove', onMove);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('blur', onBlur);
+    };
   }, [tool, syncBrushPreview]);
 
   // Ferme le popover « Copier vers » au clic extérieur.
@@ -1373,6 +1388,21 @@ export default function App() {
     } catch (error) {
       notify(`Image non chargée : ${error instanceof Error ? error.message : 'image illisible'}`);
     }
+  };
+
+  const onRegionImageChosen = async (file: File, target: RegionImageTarget) => {
+    const editor = editorRef.current;
+    if (!editor || busyRef.current) return;
+    setBusy('Remplissage de la sélection avec l’image…');
+    try {
+      await editor.fillRegionWithImage(file, target.key, target.mapId);
+      if (editorRef.current === editor && editor.activeMap === target.mapId) {
+        setTool('select'); setInspectorTab('props');
+      }
+      notify(`Image ajoutée à ${target.label}. Ajustez son cadrage : le contour reste fixe. Ctrl+Z pour annuler.`);
+    } catch (error) {
+      notify(`Image non chargée : ${error instanceof Error ? error.message : 'image illisible'}`);
+    } finally { setBusy(null); }
   };
 
   const changeView = (next: View) => {
@@ -2403,7 +2433,9 @@ export default function App() {
               </button>
             )}
           </div>
-          <p className="hint">{selectedElement ? `Sélection : ${selectedElement.label}. ` : quickRegionKey && regionPrecision === 'piece' ? `Pièce : ${regionSet[quickRegionKey]?.label}. ` : 'Cliquez sur la forme exacte à remplir dans le guide 2D. ' }Remplir crée un calque éditable dans ce canal. Les formes voisines sont conservées.</p>
+          <RegionImageFill target={selectedRegionKey ? { mapId: activeMap, key: selectedRegionKey, label: selectedElement?.label ?? regionSet[selectedRegionKey]?.label ?? 'la sélection' } : null}
+            disabled={!ready || !!busy || placingImage} onChoose={(file, target) => void onRegionImageChosen(file, target)} />
+          <p className="hint">{selectedElement ? `Sélection : ${selectedElement.label}. ` : quickRegionKey && regionPrecision === 'piece' ? `Pièce : ${regionSet[quickRegionKey]?.label}. ` : 'Cliquez sur la forme exacte à remplir dans le guide 2D. ' }La couleur ou l’image crée un calque éditable. L’image est ajustée sans déformation et reste limitée au contour choisi.</p>
         </Section>
       ));
 
@@ -2856,6 +2888,7 @@ export default function App() {
               ref={canvasStageRef}
               className={`canvas-stage${tool === 'draw' ? ' canvas-stage--draw' : ''}${mapDef.kind === 'roughmetal' ? ` canvas-stage--${surfaceView}` : ''}`}
               onMouseMove={onCanvasFrameMove}
+              onMouseEnter={onCanvasFrameMove}
               onMouseLeave={onCanvasFrameLeave}
             >
               <div className={`canvas-frame${tool === 'draw' ? ' canvas-frame--draw' : ''}`} ref={canvasFrameRef}>

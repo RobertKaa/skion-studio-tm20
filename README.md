@@ -69,6 +69,9 @@ Puis ouvrir http://localhost:5173
 - **Annuler / rétablir** par texture (Ctrl+Z / Ctrl+Shift+Z)
 - **Guide UV et sélection précise** : cliquer sur une forme indépendante ou sélectionner
   une pièce entière, puis la remplir dans un nouveau calque éditable.
+  **Remplir avec une image** ajuste une image sans la déformer à la sélection et
+  conserve son contour fixe, même en déplaçant ou redimensionnant l’image.
+  Les autres éléments restent intacts, y compris avec la symétrie activée.
 - **Aperçu 3D temps réel** (three.js) sur le modèle Stadium fourni, ou sur le GLB d'un
   projet personnalisé. Images projetées sur plusieurs surfaces, peinture et matières liées.
 - **Import** d'un skin `.zip` existant (DDS BC1/BC2/BC3/BC4/BC5 ou RGBA non compressé, PNG, JPG)
@@ -242,6 +245,7 @@ comme les outils de préparation des skins personnalisés.
 - `npm run dev` — serveur de développement
 - `npm run build` — build de production
 - `npm run test:desktop-ux` — navigation sans modification des calques, focus et raccourcis du dialogue de téléchargement, erreurs d’export et URLs temporaires
+- `npm run test:region-image` — remplissage image sur une sélection UV, contours et trous, proportions/orientation, treize canaux, historique, projet et sécurité
 - `npx tsx scripts/test-dds.ts` — tests de l'encodeur DDS
 - `npx tsx scripts/test-blender-parts.ts` — contours, sélection précise, import GLB et sécurité
 - `npx tsx scripts/test-part-layers.ts` — découpage des pixels, matière, lumière et migration

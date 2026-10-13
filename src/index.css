@@ -1108,7 +1108,7 @@ input[type='range']:disabled::-webkit-slider-thumb {
   background-position: 0 0, 10px 10px;
 }
 .canvas-stage--draw {
-  cursor: none;
+  cursor: crosshair;
 }
 
 .canvas-frame {
@@ -1138,6 +1138,11 @@ input[type='range']:disabled::-webkit-slider-thumb {
 .canvas-frame--draw .canvas-host,
 .canvas-frame--draw .canvas-host .canvas-container,
 .canvas-frame--draw .canvas-host canvas {
+  cursor: crosshair !important;
+}
+.canvas-stage--brush-preview .canvas-frame--draw .canvas-host,
+.canvas-stage--brush-preview .canvas-frame--draw .canvas-host .canvas-container,
+.canvas-stage--brush-preview .canvas-frame--draw .canvas-host canvas {
   cursor: none !important;
 }
 
@@ -1186,8 +1191,8 @@ input[type='range']:disabled::-webkit-slider-thumb {
   border-radius: 50%;
   transform: translate(-50%, -50%);
   display: none;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
-  mix-blend-mode: difference;
+  /* The white/black edges remain visible even when the brush matches the texture. */
+  box-shadow: 0 0 0 1px #fff, 0 0 0 2px #111, inset 0 0 0 1px #111;
 }
 
 /* éléments flottants sur le stage */

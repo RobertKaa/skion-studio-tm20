@@ -701,7 +701,7 @@ export class EditorCore {
     brushSize = this.brushSize,
   ): BrushPreviewFrame | null {
     const frame = this.viewportFrame;
-    if (!frame) return null;
+    if (!frame || this.navigationMode || this.isPanning() || this.spaceHeld) return null;
     const rect = frame.getBoundingClientRect();
     if (
       clientX < rect.left ||
@@ -1422,7 +1422,7 @@ export class EditorCore {
           : this.tool === 'select'
             ? 'default'
             : this.tool === 'draw'
-              ? 'none'
+              ? 'crosshair'
               : this.spaceHeld
                 ? 'grab'
                 : 'crosshair';
@@ -1661,6 +1661,47 @@ export class EditorCore {
     c.requestRenderAll();
     this.flushTexture();
     return img;
+  }
+
+  /** Fill only the requested UV shape, keeping the original image and a fixed, editable mask. */
+  async fillRegionWithImage(file: File, key: string, mapId: MapId = this.activeMap) {
+    const state = this.maps.get(mapId);
+    const island = this.findIsland(key);
+    const bounds = this.islandBounds(key);
+    if (!state || !island || island.family !== MAP_BY_ID[mapId].group || !bounds) {
+      throw new Error('Sélectionnez un élément UV valide avant d’ajouter une image.');
+    }
+    // Capture the target before decoding: a later map/selection change cannot redirect this fill.
+    const clip = this.buildIslandClip(key, mapId);
+    if (!clip) throw new Error('Le contour de cette sélection est indisponible.');
+    const orientation = this.carAligned ? getRegionOrientation(key.replace(/:element:\d+$/, '')) : { angle: 0, flipX: false };
+    const radians = orientation.angle * Math.PI / 180;
+    const width = bounds.w * state.canvas.width, height = bounds.h * state.canvas.height;
+    const localWidth = Math.abs(Math.cos(radians)) * width + Math.abs(Math.sin(radians)) * height;
+    const localHeight = Math.abs(Math.sin(radians)) * width + Math.abs(Math.cos(radians)) * height;
+    const role = this.illumToolRole;
+    const image = await this.loadEditableImage(file);
+    // Extend beyond the contour by one texel to avoid a second antialiased edge on the image.
+    const scale = Math.max((localWidth + 2) / image.width, (localHeight + 2) / image.height);
+    image.set({
+      left: (bounds.x + bounds.w / 2) * state.canvas.width,
+      top: (bounds.y + bounds.h / 2) * state.canvas.height,
+      originX: 'center', originY: 'center', scaleX: scale, scaleY: scale,
+      ...orientation, perPixelTargetFind: true, clipPath: clip,
+    });
+    const object = image as FabricImage & EditorObject;
+    object.name = `Image · ${island.label} · ${textureBackgroundName(file.name)}`;
+    object.imageOrder = Date.now() * 1000 + idCounter;
+    if (MAP_BY_ID[mapId].kind === 'illum') object.illumRole = role;
+    const wasSuspended = state.suspendHistory;
+    state.suspendHistory = true;
+    try { state.canvas.add(image); } finally { state.suspendHistory = wasSuspended; }
+    // Explicit selection fills never create a second image, even with symmetry enabled.
+    this.pushHistory(mapId);
+    if (this.activeMap === mapId) { state.canvas.setActiveObject(image); this.setTool('select'); }
+    image.setCoords(); state.canvas.requestRenderAll();
+    this.emit('layers'); this.emit('selection'); this.flushTexture();
+    return image;
   }
 
   /** Une seule image source et un seul historique ; les fragments et la matière sont des calques liés. */
