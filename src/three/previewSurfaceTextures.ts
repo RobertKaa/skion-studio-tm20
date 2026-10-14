@@ -1,15 +1,16 @@
 import * as THREE from 'three';
 import type { RGBAImage } from '../dds';
 import type { Skin3DFile } from '../skin3d';
+import { composeMaterialSurface, type MaterialSurfaceOverlay } from '../materials/surfaceMaps';
 import {
   applyWheelRelief, decodeNormalVectors, getWheelTreadNormal, isWheelTreadPreset,
   normalizeWheelSurface, resolveWheelNormalImage, SMOOTH_WHEEL_NORMAL, type WheelSurfaceSettings,
 } from '../wheelSurface';
 
-export const NORMAL_TEXTURE_FILES = ['Details_N.dds', 'Wheels_N.dds'] as const;
+export const NORMAL_TEXTURE_FILES = ['Details_N.dds', 'Wheels_N.dds', 'Skin_N.dds'] as const;
 export type NormalTextureFile = typeof NORMAL_TEXTURE_FILES[number];
 
-const nativeUrls: Record<NormalTextureFile, URL> = {
+const nativeUrls: Partial<Record<NormalTextureFile, URL>> = {
   'Details_N.dds': new URL('../assets/model/car/Details_N.dds', import.meta.url),
   'Wheels_N.dds': new URL('../assets/model/car/Wheels_N.dds', import.meta.url),
 };
@@ -38,18 +39,21 @@ export function resolveNormalTexture(
 
 /** Owns only the GPU normal textures; it never changes the editable atlases. */
 export class PreviewSurfaceTextures {
+  private materialOverlays: readonly MaterialSurfaceOverlay[] = [];
+  private materialComposites = new Map<NormalTextureFile, { source: RGBAImage | null; overlays: readonly MaterialSurfaceOverlay[]; image: RGBAImage | null }>();
   private imported = new Map<NormalTextureFile, RGBAImage>();
   private native = new Map<NormalTextureFile, RGBAImage>();
   private textures = new Map<NormalTextureFile, { image: RGBAImage; texture: THREE.DataTexture }>();
   private officialModel = true;
+  private skinNormalEnabled = false;
   private wheelSurface = normalizeWheelSurface(undefined);
   private wheelTransform: { source: RGBAImage; strength: number; image: RGBAImage } | null = null;
   private disposed = false;
-  private readonly materials: { details: THREE.MeshStandardMaterial; wheels: THREE.MeshStandardMaterial };
+  private readonly materials: { skin?: THREE.MeshStandardMaterial; details: THREE.MeshStandardMaterial; wheels: THREE.MeshStandardMaterial };
   private readonly anisotropy: number;
 
   constructor(
-    materials: { details: THREE.MeshStandardMaterial; wheels: THREE.MeshStandardMaterial },
+    materials: { skin?: THREE.MeshStandardMaterial; details: THREE.MeshStandardMaterial; wheels: THREE.MeshStandardMaterial },
     anisotropy: number,
   ) { this.materials = materials; this.anisotropy = anisotropy; }
 
@@ -61,12 +65,14 @@ export class PreviewSurfaceTextures {
       return response.arrayBuffer();
     });
     await Promise.all(NORMAL_TEXTURE_FILES.map(async (file) => {
+      const url = nativeUrls[file];
+      if (!url) return;
       try {
         // Share the native wheel image with the 2D guide/export and its bounded
         // sidewall composites instead of fetching/decoding a second CPU atlas.
         const image = file === 'Wheels_N.dds' && !load
           ? await resolveWheelNormalImage({ mode: 'relief', strength: 1 })
-          : decodeNormalTexture(await loadBuffer(nativeUrls[file]));
+          : decodeNormalTexture(await loadBuffer(url));
         if (this.disposed) return;
         if (!image) return;
         this.native.set(file, image);
@@ -90,8 +96,30 @@ export class PreviewSurfaceTextures {
     this.sync();
   }
 
+  setMaterialOverlays(overlays: readonly MaterialSurfaceOverlay[]) {
+    if (this.materialOverlays === overlays) return;
+    this.materialOverlays = overlays; this.sync();
+  }
+
+  private materialImage(file: NormalTextureFile, source: RGBAImage | null) {
+    const cached = this.materialComposites.get(file);
+    if (cached?.source === source && cached.overlays === this.materialOverlays) return cached.image;
+    const family = file === 'Skin_N.dds' ? 'skin' : file === 'Details_N.dds' ? 'details' : 'wheels';
+    const overlays = this.materialOverlays.filter(layer => layer.family === family && layer.normal).map(layer => layer.normal!);
+    const image = composeMaterialSurface(source, overlays, true);
+    this.materialComposites.set(file, { source, overlays: this.materialOverlays, image });
+    return image;
+  }
+
   setOfficialModel(official: boolean) {
     this.officialModel = official;
+    this.sync();
+  }
+
+  /** Skin_N is bound only when the loaded custom mesh explicitly requests it. */
+  setSkinNormalEnabled(enabled: boolean) {
+    if (this.skinNormalEnabled === enabled) return;
+    this.skinNormalEnabled = enabled;
     this.sync();
   }
 
@@ -122,9 +150,10 @@ export class PreviewSurfaceTextures {
   private sync() {
     if (this.disposed) return;
     for (const file of NORMAL_TEXTURE_FILES) {
-      const material = file === 'Details_N.dds' ? this.materials.details : this.materials.wheels;
+      const material = file === 'Skin_N.dds' ? this.materials.skin : file === 'Details_N.dds' ? this.materials.details : this.materials.wheels;
+      if (!material) continue;
       const source = resolveNormalTexture(file, this.imported, this.native, this.officialModel);
-      const image = file === 'Wheels_N.dds' ? this.wheelImage(source) : source;
+      const image = file === 'Skin_N.dds' && !this.skinNormalEnabled ? null : this.materialImage(file, file === 'Wheels_N.dds' ? this.wheelImage(source) : source);
       const previous = this.textures.get(file);
       if (previous?.image === image) continue;
       previous?.texture.dispose();
@@ -150,7 +179,9 @@ export class PreviewSurfaceTextures {
     this.disposed = true;
     for (const { texture } of this.textures.values()) texture.dispose();
     this.textures.clear(); this.native.clear(); this.imported.clear();
+    this.materialComposites.clear(); this.materialOverlays = [];
     this.wheelTransform = null;
     this.materials.details.normalMap = null; this.materials.wheels.normalMap = null;
+    if (this.materials.skin) this.materials.skin.normalMap = null;
   }
 }

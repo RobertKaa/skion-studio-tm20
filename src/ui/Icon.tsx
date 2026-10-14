@@ -54,9 +54,11 @@ export type IconName =
   | 'move'
   | 'save'
   | 'volume'
-  | 'folder';
+  | 'folder'
+  | 'grip';
 
 const PATHS: Record<IconName, string[]> = {
+  grip: ['M9 5h.01', 'M15 5h.01', 'M9 12h.01', 'M15 12h.01', 'M9 19h.01', 'M15 19h.01'],
   volume: ['M11 5 6 9H3v6h3l5 4V5z', 'M15 8a5 5 0 0 1 0 8', 'M18 5a9 9 0 0 1 0 14'],
   save: ['M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12l4 4v12a2 2 0 0 1-2 2z', 'M7 3v6h10V3', 'M7 21v-8h10v8'],
   folder: ['M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z'],

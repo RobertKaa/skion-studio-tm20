@@ -22,12 +22,14 @@ import { lightIsOn, roleFromAlpha } from '../illumination';
 import { continuousImageUV, imageIslandAt } from '../editor/imagePlacement';
 import { bakeProjection, type DecalProjection, type PixelSource, type ProjectionTriangle, type SurfaceAnchor, type Vec3 } from './decalProjection';
 import { PreviewSurfaceTextures } from './previewSurfaceTextures';
+import type { MaterialSurfaceOverlay } from '../materials/surfaceMaps';
 import { PreviewAmbientOcclusion } from './previewAmbientOcclusion';
 import { PlayerDisplay } from './playerDisplay';
 import { ExportColorPreview, type ExportMaterialImage } from './ExportColorPreview';
 import { decodeSurfaceMaterial } from '../material';
 import type { WheelSurfaceSettings } from '../wheelSurface';
 import type { Skin3DFile } from '../skin3d';
+import { hasExperimentalSkinNormalShader, previewMaterialSlot } from './materialSlots';
 
 /** Modèle servi statiquement depuis public/models/ (fiable en dev et prod). */
 const CAR_MODEL_RESOURCE_PATH = `${import.meta.env?.BASE_URL ?? '/'}models/car/`;
@@ -64,18 +66,14 @@ export interface Image3DHandler {
 }
 
 function materialSlot(name: string): MaterialSlot {
-  const n = name.toLowerCase();
-  if (n.includes('wheel')) return 'wheels';
-  if (n.includes('detail')) return 'details';
-  if (n.includes('glass')) return 'glass';
-  if (n.includes('skin')) return 'skin';
-  return 'other';
+  return previewMaterialSlot(name);
 }
 
 function slotFromObject(mesh: THREE.Mesh): MaterialSlot {
   const mat = mesh.material;
   const matName = (Array.isArray(mat) ? mat[0]?.name : mat?.name) ?? '';
-  return materialSlot(`${mesh.name} ${matName}`);
+  const fromMaterial = materialSlot(matName);
+  return fromMaterial === 'other' ? materialSlot(mesh.name) : fromMaterial;
 }
 
 function fitModelToGround(root: THREE.Object3D): number {
@@ -120,6 +118,7 @@ export class CarPreview {
   private exportPreviewActive = false;
   private playerDisplay: PlayerDisplay | null = null;
   private coatIntensity = 1;
+  private skinNormalShader = false;
   private emissiveIntensity = 1.4;
   private braking = false;
   private night = false;
@@ -288,7 +287,7 @@ export class CarPreview {
       opacity: 0.72,
     });
     this.surfaceTextures = new PreviewSurfaceTextures(
-      { details: this.detailsMat, wheels: this.wheelsMat },
+      { skin: this.skinMat, details: this.detailsMat, wheels: this.wheelsMat },
       this.renderer.capabilities.getMaxAnisotropy(),
     );
     void this.surfaceTextures.loadNativeTextures();
@@ -361,10 +360,14 @@ export class CarPreview {
    * de la Stadium Car officielle. Les matériaux sont rebranchés sur les mêmes
    * atlas (le nom doit contenir skin / detail / wheel / glass).
    */
-  async loadCustomPreview(buffer: ArrayBuffer): Promise<void> {
+  async loadCustomPreview(buffer: ArrayBuffer, options: { nativeSurfaceLayout?: boolean } = {}): Promise<void> {
     embeddedGlbData(buffer);
     const generation = ++this.loadGeneration;
     if (!await this.installModel(buffer, 'glb', generation)) throw new Error('Le chargement du modèle personnalisé a été interrompu.');
+    if (options.nativeSurfaceLayout) {
+      this.surfaceTextures.setOfficialModel(true);
+      this.ambientOcclusion.setOfficialModel(true);
+    }
   }
 
   /** Revient au FBX officiel (export texture seul, sans mesh custom). */
@@ -397,9 +400,11 @@ export class CarPreview {
     if (!hasMesh) throw new Error('Le modèle ne contient aucun maillage de voiture.');
 
     this.detachModel();
+    let skinNormals = false;
     model.traverse((obj) => {
       if (!(obj instanceof THREE.Mesh)) return;
       const origMats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      if (origMats.some(material => hasExperimentalSkinNormalShader(material?.name ?? ''))) skinNormals = true;
       for (const m of origMats) {
         if (m && !this.importedMaterials.includes(m)) this.importedMaterials.push(m);
       }
@@ -411,6 +416,9 @@ export class CarPreview {
     });
 
     const span = fitModelToGround(model);
+    this.skinNormalShader = skinNormals;
+    this.skinMat.clearcoat = skinNormals ? 0 : this.exportPreviewActive ? 1 : this.coatIntensity;
+    this.surfaceTextures.setSkinNormalEnabled(skinNormals);
     this.surfaceTextures?.setOfficialModel(kind === 'fbx');
     this.ambientOcclusion?.setOfficialModel(kind === 'fbx');
     this.modelRoot = model;
@@ -576,6 +584,11 @@ export class CarPreview {
     this.ambientOcclusion.setFiles(files);
   }
 
+  setMaterialSurfaceOverlays(overlays: readonly MaterialSurfaceOverlay[]) {
+    this.surfaceTextures.setMaterialOverlays(overlays);
+    this.ambientOcclusion.setMaterialOverlays(overlays);
+  }
+
   setWheelSurface(value: WheelSurfaceSettings) {
     this.surfaceTextures.setWheelSurface(value);
     this.ambientOcclusion.setWheelSurface(value);
@@ -585,13 +598,13 @@ export class CarPreview {
     this.exportColorPreview.set(images);
     this.exportPreviewActive = true;
     // This multiplier belongs only to workshop inspection, never to the ZIP.
-    this.skinMat.clearcoat = 1;
+    this.skinMat.clearcoat = this.skinNormalShader ? 0 : 1;
   }
 
   clearExportColorPreview() {
     this.exportColorPreview.clear();
     this.exportPreviewActive = false;
-    this.skinMat.clearcoat = this.coatIntensity;
+    this.skinMat.clearcoat = this.skinNormalShader ? 0 : this.coatIntensity;
   }
 
   /** Branche/rafraîchit un canvas source comme texture d'une map. */
@@ -685,6 +698,9 @@ export class CarPreview {
         this.wheelsMat.needsUpdate = true;
       }
     }
+    const size = `${source.width}x${source.height}`;
+    if (tex.userData.skionSize && tex.userData.skionSize !== size) tex.dispose();
+    tex.userData.skionSize = size;
     tex.needsUpdate = true;
   }
 
@@ -782,7 +798,7 @@ export class CarPreview {
   /** Intensité du vernis (clearcoat) sur la carrosserie (0..1). */
   setCoatIntensity(v: number) {
     this.coatIntensity = Math.max(0, Math.min(1, v));
-    this.skinMat.clearcoat = this.exportPreviewActive ? 1 : this.coatIntensity;
+    this.skinMat.clearcoat = this.skinNormalShader ? 0 : this.exportPreviewActive ? 1 : this.coatIntensity;
     this.skinMat.needsUpdate = true;
   }
 
@@ -1330,7 +1346,7 @@ export class CarPreview {
   }
 
   /** Triangles en espace monde avec leurs UV d'origine : une projection peut traverser plusieurs atlas. */
-  projectImage(decal: DecalProjection, source: PixelSource) {
+  projectImage(decal: DecalProjection, source: PixelSource, resolution?: number) {
     if (!this.projectionTriangles) {
       this.carRoot.updateMatrixWorld(true);
       const triangles: ProjectionTriangle[] = [];
@@ -1351,7 +1367,7 @@ export class CarPreview {
       });
       this.projectionTriangles = triangles;
     }
-    return bakeProjection(this.projectionTriangles, decal, source);
+    return bakeProjection(this.projectionTriangles, decal, source, resolution);
   }
 
   private handlePointerUp(e: PointerEvent) {

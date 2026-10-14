@@ -1,13 +1,15 @@
 {
   "name": "skion-studio",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "test:desktop-ux": "tsx --tsconfig tsconfig.app.json scripts/test-desktop-ux.tsx && tsx scripts/test-pointer-zoom.ts",
+    "test:layers": "tsx scripts/test-layer-reorder.ts && tsx --tsconfig tsconfig.app.json scripts/test-layer-drag.tsx",
+    "test:relief": "tsx scripts/test-relief-v1.ts && tsx scripts/test-relief-prototype.ts && tsx scripts/test-relief-preview.ts && tsx scripts/test-relief-export.ts && tsx --tsconfig tsconfig.app.json scripts/test-relief-dialog.tsx",
     "test:environment": "tsx scripts/test-preview-environment.ts && tsx scripts/test-project-file.ts",
     "test:reset": "tsx scripts/test-reset-skin.ts && tsx scripts/test-reset-model.ts && tsx scripts/test-project-file.ts",
     "test:projects": "tsx scripts/test-project-file.ts && tsx scripts/test-large-project.ts && tsx scripts/test-resolution.ts",
@@ -17,8 +19,10 @@
     "test:generator": "tsx scripts/test-generator.ts",
     "test:element-copy": "tsx scripts/test-element-copy.ts",
     "test:region-image": "tsx --tsconfig tsconfig.app.json scripts/test-region-image.tsx",
+    "test:texture-size": "tsx --tsconfig tsconfig.app.json scripts/test-texture-resolution.tsx",
     "test:horn": "tsx scripts/test-horn.ts",
     "test:background": "tsx scripts/test-texture-background.ts",
+    "test:materials": "tsx scripts/test-material-exr.ts && tsx scripts/test-material-render.ts && tsx scripts/test-material-import.ts && tsx scripts/test-material-library.ts && tsx scripts/test-material-layers.ts && tsx scripts/test-material-surfaces.ts && tsx --tsconfig tsconfig.app.json scripts/test-materials-ui.tsx",
     "preview": "vite preview",
     "preview:gh": "vite build && vite preview --base /skion-studio-tm20/"
   },

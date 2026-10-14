@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { FabricObject, IText, Line } from 'fabric';
 import {
   EditorCore,
@@ -58,6 +58,30 @@ import { getProject, lastProjectId, putProject, rememberProject, type LocalProje
 import { createBaseSkinProject } from './baseSkin';
 import { HORN_ASSET_PATH, hornFingerprint, type SkinHorn } from './horn';
 import { RegionImageFill, type RegionImageTarget } from './ui/RegionImageFill';
+import { TextureResolutionControl } from './ui/TextureResolutionControl';
+import { MaterialsPanel } from './ui/MaterialsPanel';
+import { LayerList } from './ui/LayerList';
+import { selectLayerInspector, selectionInspector } from './ui/layerNavigation';
+import type { MaterialDefinition, MaterialLayer } from './materials/types';
+import { exportMaterialSurfaces } from './materials/exportSurfaces';
+import { TEXTURE_RESOLUTION, type TextureResolution } from './editor/resolution';
+import { exportReliefPrototype, prototypeSurfaceFiles, reliefPrototypeName } from './relief/export';
+import type { ReliefPrototypeResult } from './relief/types';
+import { captureReliefSettings, type ReliefSettings } from './relief/settings';
+
+const ReliefPrototypeDialog = lazy(() => import('./ui/ReliefPrototypeDialog').then(module => ({ default: module.ReliefPrototypeDialog })));
+
+interface ReliefSession {
+  name: string;
+  maps: Map<MapId, HTMLCanvasElement>;
+  roles: Map<MapId, HTMLCanvasElement>;
+  material: MaterialLayer | null;
+  surfaceFiles: Skin3DFile[];
+  illumRole: IllumRole;
+  speedColor: string;
+  dirtEnabled: boolean;
+  horn: SkinHorn | null;
+}
 
 // ----------------------------------------------------------------- constantes
 
@@ -117,19 +141,6 @@ const CHANNEL_LABELS: Record<MapId, string> = {
   Wheels_B: 'Couleur',
   Wheels_R: 'Matière',
   Wheels_DirtMask: 'Saleté',
-};
-
-const LAYER_ICONS: Record<string, IconName> = {
-  rect: 'square',
-  ellipse: 'circle',
-  circle: 'circle',
-  line: 'line',
-  polygon: 'hexagon',
-  path: 'brush',
-  'i-text': 'type',
-  text: 'type',
-  image: 'image',
-  group: 'layers',
 };
 
 const pct = (v: number) => `${Math.round((v / 255) * 100)} %`;
@@ -224,6 +235,7 @@ export default function App() {
   const [surfaceView, setSurfaceView] = useState<'roughness' | 'metalness' | 'data'>('roughness');
   const [layers, setLayers] = useState<LayerInfo[]>([]);
   const [selection, setSelection] = useState<SelectionState | null>(null);
+  const [selectedMaterialLayer, setSelectedMaterialLayer] = useState<MaterialLayer | null>(null);
   const [historyState, setHistoryState] = useState({ undo: false, redo: false });
   const [dirtyMaps, setDirtyMaps] = useState<Partial<Record<MapId, boolean>>>({});
   const [skinName, setSkinName] = useState('MonSkin');
@@ -234,6 +246,10 @@ export default function App() {
   const [downloadsOpen, setDownloadsOpen] = useState(false);
   const downloadsOpenRef = useRef(false); downloadsOpenRef.current = downloadsOpen;
   const closeDownloads = useCallback(() => setDownloadsOpen(false), []);
+  const [reliefSession, setReliefSession] = useState<ReliefSession | null>(null);
+  const [reliefSettings, setReliefSettings] = useState<ReliefSettings | null>(null);
+  const reliefSessionRef = useRef<ReliefSession | null>(null); reliefSessionRef.current = reliefSession;
+  const closeReliefPrototype = useCallback(() => setReliefSession(null), []);
   const busyRef = useRef(false);
   const projectRestoringRef = useRef(false);
   const [projectContent, setProjectContent] = useState<string[]>([]);
@@ -291,6 +307,8 @@ export default function App() {
   const [wheelSurface, setWheelSurface] = useState<WheelSurfaceSettings>({ ...DEFAULT_WHEEL_SURFACE });
   const [surfaceFiles, setSurfaceFiles] = useState<Skin3DFile[]>([]);
   const [horn, setHorn] = useState<SkinHorn | null>(null);
+  const [textureResolution, setTextureResolutionState] = useState<TextureResolution>(TEXTURE_RESOLUTION);
+  const texturePixelScale = textureResolution / TEXTURE_RESOLUTION;
   const hornKey = useMemo(() => hornFingerprint(horn), [horn]);
   const wheelSurfaceFiles = useMemo(() => [...(skin3d?.passthrough ?? []), ...surfaceFiles], [skin3d, surfaceFiles]);
   const [showWheelRelief, setShowWheelRelief] = useState(true);
@@ -302,9 +320,9 @@ export default function App() {
     try { return localStorage.getItem('skion-studio:fluid-editing') !== 'off'; } catch { return true; }
   });
   const fluidEditingRef = useRef(fluidEditing); fluidEditingRef.current = fluidEditing;
-  const savedSessionRef = useRef({ projectId, savedAt, savedMetadata, savedContent, coatIntensity, neonIntensity, dirtEnabled, dirtPreview, wheelSurface, surfaceFiles, horn });
-  savedSessionRef.current = { projectId, savedAt, savedMetadata, savedContent, coatIntensity, neonIntensity, dirtEnabled, dirtPreview, wheelSurface, surfaceFiles, horn };
-  const projectMetadata = JSON.stringify([skinName, coatIntensity, neonIntensity, !!skin3d, dirtEnabled, previewEnvironment.venue, previewEnvironment.mood, braking, wheelSurface, hornKey]);
+  const savedSessionRef = useRef({ projectId, savedAt, savedMetadata, savedContent, coatIntensity, neonIntensity, dirtEnabled, dirtPreview, wheelSurface, surfaceFiles, horn, reliefSettings });
+  savedSessionRef.current = { projectId, savedAt, savedMetadata, savedContent, coatIntensity, neonIntensity, dirtEnabled, dirtPreview, wheelSurface, surfaceFiles, horn, reliefSettings };
+  const projectMetadata = JSON.stringify([skinName, coatIntensity, neonIntensity, !!skin3d, dirtEnabled, previewEnvironment.venue, previewEnvironment.mood, braking, wheelSurface, hornKey, textureResolution]);
   const projectModified = savedMetadata === null || projectMetadata !== savedMetadata || projectContent.length !== savedContent.length || projectContent.some((snapshot, index) => snapshot !== savedContent[index]);
   /** Vue : éditeur 2D, 2D + 3D côte à côte, ou 3D plein cadre. */
   const [view, setView] = useState<View>('3d');
@@ -321,7 +339,7 @@ export default function App() {
   const placingImageRef = useRef(false);
   imagePlacementRef.current = imagePlacement;
   /** Onglet de l'inspecteur (panneau droit). */
-  const [inspectorTab, setInspectorTab] = useState<'texture' | 'props' | 'layers'>('texture');
+  const [inspectorTab, setInspectorTab] = useState<'texture' | 'props' | 'layers' | 'materials'>('texture');
   /** Dernier canal visité par famille, pour y revenir en changeant de famille. */
   const lastMapByFamily = useRef<Record<Family, MapId>>({
     skin: 'Skin_B',
@@ -337,6 +355,7 @@ export default function App() {
   const [showGrid, setShowGrid] = useState(false);
   const [gridDiv, setGridDiv] = useState(16);
   const [transform, setTransformState] = useState<Transform | null>(null);
+  const transformPixels = transform ? { ...transform, x: transform.x * texturePixelScale, y: transform.y * texturePixelScale, w: transform.w * texturePixelScale, h: transform.h * texturePixelScale } : null;
   const [centerTarget, setCenterTarget] = useState<string>('');
   /** Aligner les décalques/numéros sur la voiture (orientation de la pièce), pas sur le canvas. */
   const [carAligned, setCarAligned] = useState(true);
@@ -399,6 +418,7 @@ export default function App() {
     const ed = editorRef.current;
     if (!ed) return;
     const obj = ed.getSelection();
+    setSelectedMaterialLayer(ed.getSelectionMaterialLayer());
     if (!obj) {
       previewRef.current?.setProjectionGuide(null);
       setSelection(null);
@@ -447,7 +467,7 @@ export default function App() {
     ed.elementContextMenuHandler = setElementCopyContext;
     previewRef.current = pv;
     ed.setFluidPreview(fluidEditingRef.current);
-    ed.projectionBaker = (decal, source) => pv.projectImage(decal, source);
+    ed.projectionBaker = (decal, source) => pv.projectImage(decal, source, ed.getTextureResolution());
     pv.onModelReady = () => {
       ed.rebuildProjectionsForModel();
       setVehicleRigReady(pv.hasVehicleRig()); setVehiclePose({ ...REST_VEHICLE_POSE });
@@ -466,6 +486,7 @@ export default function App() {
         if (!all && !updates.has(def.id)) continue;
         pv.setMapCanvas(def.id, ed.getPreviewCanvasElement(def.id), def.kind === 'illum' ? ed.getPreviewIllumRoleCanvas(def.id) : undefined);
       }
+      pv.setMaterialSurfaceOverlays(ed.getMaterialSurfaceOverlays());
     };
     const offTexture = ed.on('texture', pushTextures);
     const offLayers = ed.on('layers', () => {
@@ -495,7 +516,7 @@ export default function App() {
       // le rail et la barre d'options doivent suivre, ainsi que le surlignage des calques.
       setToolState(ed.tool);
       setLayers(ed.getLayers());
-      setInspectorTab((previous) => previous === 'layers' ? previous : ed.tool !== 'select' || ed.getSelection() ? 'props' : 'texture');
+      setInspectorTab((previous) => ed.getSelectionMaterialLayer() ? 'materials' : previous === 'layers' || previous === 'materials' ? previous : ed.tool !== 'select' || ed.getSelection() ? 'props' : 'texture');
     });
 
     // Pipette : prélève une couleur du canvas vers le remplissage + le pinceau.
@@ -511,9 +532,10 @@ export default function App() {
       const material = decodeSurfaceMaterial(hex);
       notify(kind === 'roughmetal' ? `Matière prélevée : rugosité ${pct(material.roughness)}, métal ${pct(material.metalness)}.` : kind === 'grayscale' ? `Valeur prélevée : ${pct(material.roughness)}.` : `Couleur prélevée : ${hex.toUpperCase()}`);
     };
-    ed.regionPickHandler = (island, element) => { setQuickRegionKey(island?.key ?? ''); setRegionElement(element ?? null); setInspectorTab('texture'); requestAnimationFrame(() => { if (inspectorBodyRef.current) inspectorBodyRef.current.scrollTop = 0; }); };
+    ed.regionPickHandler = (island, element) => { setQuickRegionKey(island?.key ?? ''); setRegionElement(element ?? null); setInspectorTab(previous => previous === 'materials' ? previous : 'texture'); requestAnimationFrame(() => { if (inspectorBodyRef.current) inspectorBodyRef.current.scrollTop = 0; }); };
     const offSpeed = ed.on('speed-color', () => setSpeedColor(ed.getSpeedLightColor()));
     const offHist = ed.on('history', () => {
+      setTextureResolutionState(ed.getTextureResolution());
       if (!projectRestoringRef.current) setProjectContent(ed.getProjectContentState());
       setHistoryState({ undo: ed.canUndo(), redo: ed.canRedo() });
       // Undo/redo d'un changement de fond : pastille et curseurs rugosité/métal suivent.
@@ -596,7 +618,7 @@ export default function App() {
       setFocusedRegion(null);
       setCenterTarget('');
       setToolState('select');
-      setInspectorTab('props');
+      setInspectorTab(ed.getSelectionMaterialLayer() ? 'materials' : 'props');
     };
     pv.setImageHandler({
       transform: (values) => ed.setProjection(values, 'projection:gizmo'),
@@ -687,15 +709,19 @@ export default function App() {
       if (recovery.precision) { ed.regionPrecision = recovery.precision; setRegionPrecision(recovery.precision); }
       if (recovery.session) {
         const session = recovery.session;
-        setProjectId(session.projectId); setSavedAt(session.savedAt); setSavedMetadata(session.savedMetadata); setSavedContent(session.savedContent);
+        const previousMetadata = session.savedMetadata ? JSON.parse(session.savedMetadata) as unknown[] : null;
+        setProjectId(session.projectId); setSavedAt(session.savedAt);
+        setSavedMetadata(previousMetadata?.length === 10 ? JSON.stringify([...previousMetadata, TEXTURE_RESOLUTION]) : session.savedMetadata);
+        setSavedContent(session.savedContent);
         setCoatIntensity(session.coatIntensity); setNeonIntensity(session.neonIntensity); setDirtEnabled(session.dirtEnabled); setDirtPreview(session.dirtPreview);
         setWheelSurface(normalizeWheelSurface(session.wheelSurface)); setSurfaceFiles(session.surfaceFiles ?? []);
         setHorn(session.horn ?? null);
+        setReliefSettings(session.reliefSettings ?? null);
         pv.setCoatIntensity(session.coatIntensity); pv.setEmissiveIntensity(session.neonIntensity); pv.setDirtPreview(session.dirtPreview, session.dirtEnabled);
       }
       if (model?.preview && !model.parts) { try { model.parts = blenderPartsFromGlb(model.preview); } catch { /* old preview remains usable */ } }
       ed.setBlenderParts(model?.parts);
-      if (model?.preview) void pv.loadCustomPreview(model.preview).catch((error) => console.error('[CarPreview] Restauration du modèle custom :', error));
+      if (model?.preview) void pv.loadCustomPreview(model.preview, {nativeSurfaceLayout:!!recovery.session?.reliefSettings}).catch((error) => console.error('[CarPreview] Restauration du modèle custom :', error));
       ed.adoptObjectUrls(recovery.urls ?? []);
       void ed.restoreCheckpoint(recovery.checkpoint).then(() => {
         if (editorRef.current !== ed) return;
@@ -849,7 +875,7 @@ export default function App() {
       const ed = editorRef.current;
       if (!ed) return;
       // Les modales gèrent leurs raccourcis : Ctrl+Z/Suppr ne doivent pas toucher l’éditeur derrière.
-      if (showRandomRef.current || libraryOpenRef.current || downloadsOpenRef.current || confirmDialogOpenRef.current || busyRef.current || imagePlacementRef.current || placingImageRef.current) return;
+      if (showRandomRef.current || libraryOpenRef.current || downloadsOpenRef.current || reliefSessionRef.current || confirmDialogOpenRef.current || busyRef.current || imagePlacementRef.current || placingImageRef.current) return;
       if ((e.target as HTMLElement).closest('.element-copy-menu')) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault(); void saveProjectRef.current(); return;
@@ -1046,7 +1072,9 @@ export default function App() {
 
   /** Champs numériques : une entrée d'historique par champ édité (pas par frappe). */
   const onTransform = (p: Partial<Transform>) => {
-    editorRef.current?.setTransform(p, `transform:${Object.keys(p).join(',')}`);
+    const logical = { ...p };
+    for (const key of ['x', 'y', 'w', 'h'] as const) if (logical[key] !== undefined) logical[key] /= texturePixelScale;
+    editorRef.current?.setTransform(logical, `transform:${Object.keys(p).join(',')}`);
     setTransformState(editorRef.current?.getTransform() ?? null);
   };
 
@@ -1300,7 +1328,7 @@ export default function App() {
       ed.flushTexture();
       const revision = textureRevisionRef.current;
       const sources = (['Skin_B', 'Details_B', 'Wheels_B', 'Skin_R', 'Details_R', 'Wheels_R', 'Skin_CoatR'] as ExportMaterialMapId[]).map((id) => {
-        const canvas = ed.getCanvasElement(id);
+        const canvas = ed.getExportCanvasElement(id);
         const image = canvas.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, canvas.width, canvas.height);
         return { id, image: { width: image.width, height: image.height, data: image.data } };
       });
@@ -1365,6 +1393,109 @@ export default function App() {
     } finally { setBusy(null); }
   };
 
+  const onApplyMaterial = async (definition: MaterialDefinition, regions: string[], exclusions: string[]) => {
+    const ed = editorRef.current;
+    if (!ed || busyRef.current) return;
+    const mapId = ed.activeMap;
+    setBusy('Application du matériau…');
+    try {
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      if (ed.activeMap !== mapId) throw new Error('La surface a changé. Choisissez à nouveau la zone d’application.');
+      await ed.addMaterialLayer(definition, regions, exclusions);
+      setInspectorTab('materials');
+      notify(`« ${definition.name} » appliqué. Motif et finitions restent liés ; Ctrl+Z pour annuler.`);
+    } catch (error) { notify(projectError(error)); }
+    finally { setBusy(null); }
+  };
+
+  const onMaterialChange = (definition: MaterialDefinition) => {
+    void editorRef.current?.setSelectionMaterialDefinition(definition).catch(error => notify(projectError(error)));
+  };
+
+  const onMaterialMaskChange = (regions: string[], exclusions: string[]) => {
+    try { editorRef.current?.setSelectionMaterialMask(regions, exclusions); }
+    catch (error) { notify(projectError(error)); }
+  };
+
+  const openReliefPrototype = async () => {
+    const editor = editorRef.current;
+    if (!editor || !ready || busyRef.current) return;
+    setBusy('Préparation de l’atelier de relief…');
+    try {
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      const copy = (source: HTMLCanvasElement, data = false) => {
+        const canvas = document.createElement('canvas'); canvas.width = source.width; canvas.height = source.height;
+        const context = canvas.getContext('2d')!; context.imageSmoothingEnabled = !data;
+        context.drawImage(source, 0, 0); return canvas;
+      };
+      const maps = new Map(MAPS.map(map => [map.id, copy(editor.getExportCanvasElement(map.id))]));
+      const roles = new Map(MAPS.filter(map => map.kind === 'illum').map(map => [map.id, copy(editor.getExportIllumRoleCanvas(map.id), true)]));
+      const files = [...new Map([...(skin3dRef.current?.passthrough ?? []), ...surfaceFiles].map(file => [file.name.toLowerCase(), file])).values()];
+      const wheelNormal = await buildWheelNormalFile(wheelSurface, files, true);
+      const wheelAO = buildWheelOcclusionFile(wheelSurface, true);
+      const prepared = await prototypeSurfaceFiles(await exportMaterialSurfaces(withWheelNormalFile(files, wheelNormal, wheelSurface, wheelAO), editor.getMaterialSurfaceOverlays(), editor.getTextureResolution(), true, wheelSurface, files.some(file => /^Wheels_N\.dds$/i.test(file.name))));
+      const material = editor.getSelectionMaterialLayer();
+      setReliefSession({ name: skinName, maps, roles, material: material?.family === 'skin' ? material : null,
+        surfaceFiles: prepared, illumRole, speedColor, dirtEnabled, horn });
+    } catch (error) { notify(`Atelier de relief indisponible : ${projectError(error)}`); }
+    finally { setBusy(null); }
+  };
+
+  const downloadReliefPrototype = async (result: ReliefPrototypeResult, maps: ReadonlyMap<MapId, HTMLCanvasElement>, icon: HTMLCanvasElement, sourceName: string) => {
+    const session = reliefSessionRef.current;
+    if (!session) throw new Error('L’atelier du prototype est fermé.');
+    const blob = await exportReliefPrototype(session.name, sourceName, result, maps, session.surfaceFiles, {
+      illumRole: session.illumRole, speedColor: session.speedColor, dirtEnabled: session.dirtEnabled,
+      horn: session.horn,
+      getIllumRoleCanvas: id => session.roles.get(id)!,
+    }, icon);
+    const url = URL.createObjectURL(blob), anchor = document.createElement('a');
+    anchor.href = url; anchor.download = `${reliefPrototypeName(session.name, result)}.zip`; anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return blob.size;
+  };
+
+  const applyRelief = async (result: ReliefPrototypeResult, settings: ReliefSettings, maps: ReadonlyMap<MapId, HTMLCanvasElement>, appearance?: MaterialDefinition) => {
+    const ed = editorRef.current, pv = previewRef.current;
+    if (!ed || !pv || !result.project.preview) throw new Error('L’éditeur 3D est indisponible.');
+    const checkpoint = ed.createCheckpoint(), previousModel = skin3dRef.current, previousView = pv.getViewState(), activeMap = ed.activeMap;
+    const appliedLayers: ReliefSettings['appliedLayers'] = {};
+    try {
+      const parts = blenderPartsFromGlb(result.project.preview);
+      await pv.loadCustomPreview(result.project.preview, { nativeSurfaceLayout: true });
+      ed.setTextureResolution(settings.textureResolution);
+      ed.setBlenderParts(parts);
+      // Material owners keep all linked channels editable. Existing paint layers
+      // stay in place; reapplying replaces only the owners created by this tool.
+      const definition = appearance ?? settings.material?.definition;
+      const families = settings.scope === 'vehicle' ? ['Skin_B','Details_B','Wheels_B'] as const : ['Skin_B'] as const;
+      if (settings.material && (definition!.preset !== 'solid' || definition!.textures.color)) for (const map of families) {
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        ed.setActiveMap(map);
+        const previous = new Set(ed.getLayers().map(layer => layer.id));
+        await ed.addMaterialLayer(definition!, appearance || settings.scope === 'vehicle' ? [] : settings.material.regions.map(region => region.key), appearance || settings.scope === 'vehicle' ? [] : settings.material.exclusions.map(region => region.key));
+        const added = ed.getLayers().find(layer => !previous.has(layer.id)); if (added) appliedLayers[map] = added.id;
+      }
+      else if (definition && (definition.textures.roughmetal || definition.textures.roughness || definition.textures.metalness)) {
+        for (const color of families) { const map = color.replace('_B','_R') as MapId; await ed.setBackgroundFromCanvas(map, maps.get(map)!, { flush: false, recordHistory: false }); }
+      }
+      if (definition?.preset === 'solid' && !definition.textures.color && definition.textures.coat) await ed.setBackgroundFromCanvas('Skin_CoatR', maps.get('Skin_CoatR')!, {flush:false,recordHistory:false});
+      for (const [map, id] of Object.entries(reliefSettings?.appliedLayers ?? {})) { ed.setActiveMap(map as MapId); ed.deleteLayer(id); }
+      ed.commitCheckpoint(checkpoint); ed.setActiveMap(activeMap); ed.flushTexture();
+      const files = new Map([...(reliefSessionRef.current?.surfaceFiles ?? []), ...result.project.passthrough].map(file => [file.name.toLowerCase(), file]));
+      if (result.options.mode === 'geometry') files.delete('skin_n.dds');
+      const model = { ...result.project, parts, passthrough: [...files.values()] };
+      skin3dRef.current = model; setSkin3d(model); setSurfaceFiles([]);
+      setReliefSettings({ ...settings, appliedLayers, stats: result.stats, heightSourceBits:result.options.heightSourceBits }); setSavedMetadata(null);
+      pv.restoreViewState(previousView); setInspectorTab('materials'); setView('3d');
+      notify('Relief appliqué. Enregistrez le projet pour conserver le modèle, les sources et les réglages.');
+    } catch (error) {
+      await ed.restoreCheckpoint(checkpoint); ed.setBlenderParts(previousModel?.parts); ed.setActiveMap(activeMap);
+      if (previousModel?.preview) await pv.loadCustomPreview(previousModel.preview); else await pv.loadOfficialModel();
+      pv.restoreViewState(previousView); throw error;
+    }
+  };
+
   const onImageChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -1402,6 +1533,22 @@ export default function App() {
       notify(`Image ajoutée à ${target.label}. Ajustez son cadrage : le contour reste fixe. Ctrl+Z pour annuler.`);
     } catch (error) {
       notify(`Image non chargée : ${error instanceof Error ? error.message : 'image illisible'}`);
+    } finally { setBusy(null); }
+  };
+
+  const onTextureResolution = async (size: TextureResolution) => {
+    const editor = editorRef.current;
+    if (!editor || busyRef.current || size === editor.getTextureResolution()) return;
+    setBusy('Mise à jour de la résolution des textures…');
+    try {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      exportColorPreviewRef.current = false; setExportColorPreview(false); previewRef.current?.clearExportColorPreview();
+      editor.setTextureResolution(size);
+      setTextureResolutionState(size);
+      setTransformState(editor.getTransform());
+      notify(`Textures du skin : ${size} × ${size} px. Calques et images conservés.`);
+    } catch (error) {
+      notify(`Résolution non modifiée : ${projectError(error)}`);
     } finally { setBusy(null); }
   };
 
@@ -1465,6 +1612,7 @@ export default function App() {
         else setSkinName(file.name.replace(/\.zip$/i, ''));
       }
       if (result.skin3d || result.imported.length) {
+        setReliefSettings(null);
         setSkin3d(modelOnly ? replaceSkin3DGeometry(skin3d!, result.skin3d!) : result.skin3d);
         if (!modelOnly) {
           setSurfaceFiles(result.skin3d ? [] : result.surfaceTextures ?? []);
@@ -1537,7 +1685,8 @@ export default function App() {
     const surfaceTextures = surfaceFiles.map((entry, index) => ({ name: entry.name, asset: `assets/extra-${(skin3d?.passthrough.length ?? 0) + index}.bin` }));
     surfaceFiles.forEach((entry, index) => assets.set(surfaceTextures[index].asset, entry.data));
     if (horn) assets.set(HORN_ASSET_PATH, horn.data);
-    const workspace: ProjectWorkspace = { activeMap: ed.activeMap, view, camera: pv.getViewState(), coatIntensity, neonIntensity, night, braking, dirtEnabled, dirtPreview, environment: pv.getEnvironment(), wheelSurface };
+    const workspace: ProjectWorkspace = { textureResolution: ed.getTextureResolution(), activeMap: ed.activeMap, view, camera: pv.getViewState(), coatIntensity, neonIntensity, night, braking, dirtEnabled, dirtPreview, environment: pv.getEnvironment(), wheelSurface };
+    if (reliefSettings) workspace.relief = await captureReliefSettings(reliefSettings, assets);
     return { document: { format: 'tm-skin-studio', version: 2, name: skinName.trim().slice(0, 120) || 'Sans titre',
       editor: { maps: content.maps, speedColor: content.speedColor, illumRole: content.illumRole }, workspace, model, surfaceTextures,
       ...(horn ? { horn: { name: horn.name, asset: HORN_ASSET_PATH } } : {}) }, assets };
@@ -1556,7 +1705,7 @@ export default function App() {
     setSkinName(name);
     setProjectId(id); setSavedAt(now);
     const content = editorRef.current!.getProjectContentState(); setProjectContent(content); setSavedContent(content);
-    setSavedMetadata(JSON.stringify([name, coatIntensity, neonIntensity, !!skin3d, dirtEnabled, previewEnvironment.venue, previewEnvironment.mood, braking, wheelSurface, hornKey])); rememberProject(id);
+    setSavedMetadata(JSON.stringify([name, coatIntensity, neonIntensity, !!skin3d, dirtEnabled, previewEnvironment.venue, previewEnvironment.mood, braking, wheelSurface, hornKey, editorRef.current!.getTextureResolution()])); rememberProject(id);
     return id;
   };
 
@@ -1578,17 +1727,17 @@ export default function App() {
   const loadProjectBundle = async (bundle: ProjectBundle, saved?: LocalProject, mode: 'open' | 'reset' = 'open') => {
     const ed = editorRef.current; const pv = previewRef.current;
     if (!ed || !pv) throw new Error('L’éditeur n’est pas encore prêt.');
-    const checkpoint = ed.createCheckpoint(); const previousModel = skin3d;
+    const checkpoint = ed.createCheckpoint(); const previousModel = skin3d, previousRelief = reliefSettings;
     const previousView = pv.getViewState(); const previousPose = { ...vehiclePose };
     const hydrated = hydrateProject(bundle);
     setBusy(mode === 'reset' ? 'Réinitialisation de toutes les textures et de la voiture…' : 'Ouverture du projet et de tous ses calques…'); projectRestoringRef.current = true;
     try {
       // Verify the base vehicle before discarding any edited texture.
       if (mode === 'reset') await pv.loadOfficialModel();
-      await ed.loadProject(hydrated.document.editor.maps, hydrated.document.editor);
+      await ed.loadProject(hydrated.document.editor.maps, { ...hydrated.document.editor, textureResolution: hydrated.document.workspace.textureResolution });
       if (hydrated.model?.preview && !hydrated.model.parts) { try { hydrated.model.parts = blenderPartsFromGlb(hydrated.model.preview); } catch { /* preserve legacy projects */ } }
       ed.setBlenderParts(hydrated.model?.parts);
-      if (hydrated.model?.preview) await pv.loadCustomPreview(hydrated.model.preview);
+      if (hydrated.model?.preview) await pv.loadCustomPreview(hydrated.model.preview, { nativeSurfaceLayout: !!hydrated.document.workspace.relief });
       else if (mode !== 'reset') await pv.loadOfficialModel();
       const document = hydrated.document; const workspace = document.workspace;
       for (const url of ed.takeObjectUrls()) URL.revokeObjectURL(url);
@@ -1599,6 +1748,7 @@ export default function App() {
       skin3dRef.current = hydrated.model;
       setSkin3d(hydrated.model); setSkinName(saved?.name ?? document.name); setView(workspace.view); setNavigating(true); ed.setNavigation(true);
       setSurfaceFiles(hydrated.surfaceTextures);
+      setReliefSettings(workspace.relief ?? null);
       setHorn(hydrated.horn);
       setWheelSurface(normalizeWheelSurface(workspace.wheelSurface));
       const environment = resolvePreviewEnvironment(workspace.environment, workspace.night);
@@ -1616,11 +1766,12 @@ export default function App() {
       }
       setProjectId(saved?.id ?? null); setSavedAt(saved?.updatedAt ?? null);
       const content = ed.getProjectContentState(); setProjectContent(content); setSavedContent(content);
-      setSavedMetadata(saved ? JSON.stringify([saved.name, workspace.coatIntensity, workspace.neonIntensity, !!hydrated.model, workspace.dirtEnabled ?? true, environment.venue, environment.mood, workspace.braking, normalizeWheelSurface(workspace.wheelSurface), hornFingerprint(hydrated.horn)]) : null);
+      setSavedMetadata(saved ? JSON.stringify([saved.name, workspace.coatIntensity, workspace.neonIntensity, !!hydrated.model, workspace.dirtEnabled ?? true, environment.venue, environment.mood, workspace.braking, normalizeWheelSurface(workspace.wheelSurface), hornFingerprint(hydrated.horn), workspace.textureResolution ?? TEXTURE_RESOLUTION]) : null);
       rememberProject(saved?.id ?? null); setLibraryOpen(false);
       notify(mode === 'reset' ? 'Skin entièrement réinitialisé : voiture officielle, textures et réglages de base.' : saved ? 'Projet rouvert : chaque calque reste modifiable.' : 'Fichier projet ouvert. Enregistrez-le pour l’ajouter à Mes projets.');
     } catch (error) {
       try {
+        setReliefSettings(previousRelief);
         await ed.restoreCheckpoint(checkpoint);
         ed.setBlenderParts(previousModel?.parts);
         if (previousModel?.preview) await pv.loadCustomPreview(previousModel.preview); else await pv.loadOfficialModel();
@@ -1703,17 +1854,26 @@ export default function App() {
       const extraFiles = [...new Map([...(skin3d?.passthrough ?? []), ...surfaceFiles].map((entry) => [entry.name.toLowerCase(), entry])).values()];
       const wheelNormal = await buildWheelNormalFile(wheelSurface, extraFiles, !skin3d?.preview);
       const wheelOcclusion = buildWheelOcclusionFile(wheelSurface, !skin3d?.preview);
-      const blob = await exportSkinZip(skinName, {
+      const exportSources = {
         horn,
+        textureResolution: ed.getTextureResolution(),
         dirtEnabled,
-        getMapCanvas: (id) => ed.getCanvasElement(id),
+        getMapCanvas: (id: MapId) => ed.getExportCanvasElement(id),
         illumRole,
-        getIllumRoleCanvas: (id) => ed.getIllumRoleCanvas(id),
+        getIllumRoleCanvas: (id: MapId) => ed.getExportIllumRoleCanvas(id),
         speedColor,
         icon: exportIcon,
         meshGbx: skin3d?.mesh,
-        passthrough: withWheelNormalFile(extraFiles, wheelNormal, wheelSurface, wheelOcclusion),
-      });
+        passthrough: await exportMaterialSurfaces(withWheelNormalFile(extraFiles, wheelNormal, wheelSurface, wheelOcclusion), ed.getMaterialSurfaceOverlays(), ed.getTextureResolution(), !skin3d?.preview, wheelSurface, extraFiles.some(file => /^Wheels_N\.dds$/i.test(file.name))),
+      };
+      const blob = reliefSettings && skin3d?.preview && reliefSettings.stats
+        ? await exportReliefPrototype(skinName, reliefSettings.sourceName, { options: {
+          mode: reliefSettings.mode, strengthMm: reliefSettings.strengthMm, normalStrength: 1, scope: reliefSettings.scope,
+          textureResolution: ed.getTextureResolution(), diagnostic: reliefSettings.diagnostic, surfaceMethod: 'dense-heightfield-v1',
+          heightSourceBits:reliefSettings.heightSourceBits,
+        }, project: skin3d, normalAtlas: null, stats: reliefSettings.stats },
+        new Map(MAPS.map(map => [map.id, ed.getExportCanvasElement(map.id)])), exportSources.passthrough, exportSources, exportIcon)
+        : await exportSkinZip(skinName, exportSources);
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = `${skinName || 'skin'}.zip`;
@@ -1991,11 +2151,12 @@ export default function App() {
               <SliderField
                 compact
                 label="Taille"
-                value={brushSize}
-                min={2}
-                max={120}
-                format={(v) => `${v} px`}
-                onChange={(v) => onBrushChange(brushColor, v)}
+                value={brushSize * texturePixelScale}
+                min={2 * texturePixelScale}
+                max={120 * texturePixelScale}
+                step={texturePixelScale}
+                format={(v) => `${Math.round(v * 10) / 10} px`}
+                onChange={(v) => onBrushChange(brushColor, v / texturePixelScale)}
                 title="[ et ] ou Ctrl+molette"
               />
               <SliderField
@@ -2337,32 +2498,32 @@ export default function App() {
           </div>
         </Section>
 
-        {transform && !projection && (
+        {transformPixels && !projection && (
           <Section title="Position et taille">
             {selection.type === 'image' && <Toggle checked={keepImageRatio} onChange={setKeepImageRatio} label="Conserver les proportions" />}
             <div className="transform-grid" onBlur={endHistoryGesture}>
               <label className="num">
                 <span>X</span>
-                <input aria-label="Position X" type="number" value={transform.x} onChange={(e) => { const v = numOrNull(e); if (v !== null) onTransform({ x: v }); }} />
+                <input aria-label="Position X" type="number" value={transformPixels.x} onChange={(e) => { const v = numOrNull(e); if (v !== null) onTransform({ x: v }); }} />
               </label>
               <label className="num">
                 <span>Y</span>
-                <input aria-label="Position Y" type="number" value={transform.y} onChange={(e) => { const v = numOrNull(e); if (v !== null) onTransform({ y: v }); }} />
+                <input aria-label="Position Y" type="number" value={transformPixels.y} onChange={(e) => { const v = numOrNull(e); if (v !== null) onTransform({ y: v }); }} />
               </label>
               <label className="num">
                 <span>L</span>
-                <input aria-label="Largeur" type="number" min={1} value={transform.w} onChange={(e) => { const v = numOrNull(e); if (v !== null && v > 0) onTransform({ w: v, ...(selection.type === 'image' && keepImageRatio ? { h: transform.h * v / transform.w } : {}) }); }} />
+                <input aria-label="Largeur" type="number" min={1} value={transformPixels.w} onChange={(e) => { const v = numOrNull(e); if (v !== null && v > 0) onTransform({ w: v, ...(selection.type === 'image' && keepImageRatio ? { h: transformPixels.h * v / transformPixels.w } : {}) }); }} />
               </label>
               <label className="num">
                 <span>H</span>
-                <input aria-label="Hauteur" type="number" min={1} value={transform.h} onChange={(e) => { const v = numOrNull(e); if (v !== null && v > 0) onTransform({ h: v, ...(selection.type === 'image' && keepImageRatio ? { w: transform.w * v / transform.h } : {}) }); }} />
+                <input aria-label="Hauteur" type="number" min={1} value={transformPixels.h} onChange={(e) => { const v = numOrNull(e); if (v !== null && v > 0) onTransform({ h: v, ...(selection.type === 'image' && keepImageRatio ? { w: transformPixels.w * v / transformPixels.h } : {}) }); }} />
               </label>
               <label className="num">
                 <span>°</span>
-                <input aria-label="Rotation" type="number" value={transform.angle} onChange={(e) => { const v = numOrNull(e); if (v !== null) onTransform({ angle: v }); }} />
+                <input aria-label="Rotation" type="number" value={transformPixels.angle} onChange={(e) => { const v = numOrNull(e); if (v !== null) onTransform({ angle: v }); }} />
               </label>
             </div>
-            <p className="hint">Pixels de la texture ({mapDef.workRes} × {mapDef.workRes}).</p>
+            <p className="hint">Pixels de la texture ({textureResolution} × {textureResolution}).</p>
           </Section>
         )}
 
@@ -2545,7 +2706,7 @@ export default function App() {
             <select aria-label="Pas de la grille" value={gridDiv} onChange={(e) => onGridDiv(Number(e.target.value))} disabled={!showGrid}>
               {GRID_DIVS.map((d) => (
                 <option key={d} value={d}>
-                  {d} × {d} · {Math.round(mapDef.workRes / d)} px
+                  {d} × {d} · {Math.round(textureResolution / d)} px
                 </option>
               ))}
             </select>
@@ -2592,45 +2753,19 @@ export default function App() {
         </div>
       ) : (
         <>
-        <p className="layers-hint">Cliquez pour sélectionner · double-clic pour ouvrir les réglages. Le calque du haut recouvre ceux du dessous.</p>
-        <button type="button" className="btn btn-sm layer-edit" disabled={!selection} onClick={() => { setTool('select'); setInspectorTab('props'); }}><Icon name="sliders" size={14} /> Modifier la sélection</button>
-        <ul className="layer-list">
-          {layers.map((l) => (
-            <li
-              key={l.id}
-              className={`layer-row${l.selected ? ' is-selected' : ''}${l.visible ? '' : ' is-hidden'}${
-                l.locked ? ' is-locked' : ''
-              }`}
-            >
-              <button type="button" className="layer-select" aria-pressed={l.selected} onClick={() => { setTool('select'); editorRef.current?.selectLayer(l.id); setInspectorTab(l.linked && !l.locked ? 'props' : 'layers'); }} onDoubleClick={() => setInspectorTab('props')} title={`${l.name} · ${l.linked ? 'réglages liés à l’image' : 'double-clic pour modifier'}`}>
-              <Icon name={LAYER_ICONS[l.type] ?? 'square'} size={14} className="layer-type" />
-              <span className="layer-name" title={l.name}>
-                {l.name}
-              </span>
-              </button>
-              <span className="layer-actions" onClick={(e) => e.stopPropagation()}>
-                <IconButton size="sm" icon="chevronUp" label="Monter" disabled={l.linked} onClick={() => editorRef.current?.moveLayer(l.id, 'up')} className="hover-only" tipSide="left" />
-                <IconButton size="sm" icon="chevronDown" label="Descendre" disabled={l.linked} onClick={() => editorRef.current?.moveLayer(l.id, 'down')} className="hover-only" tipSide="left" />
-                <IconButton size="sm" icon="trash" label="Supprimer" danger onClick={() => editorRef.current?.deleteLayer(l.id)} className="hover-only" tipSide="left" />
-                <IconButton
-                  size="sm"
-                  icon={l.locked ? 'lock' : 'unlock'}
-                  label={l.locked ? 'Déverrouiller' : 'Verrouiller'}
-                  active={l.locked}
-                  onClick={() => editorRef.current?.toggleLock(l.id)}
-                  tipSide="left"
-                />
-                <IconButton
-                  size="sm"
-                  icon={l.visible ? 'eye' : 'eyeOff'}
-                  label={l.visible ? 'Masquer' : 'Afficher'}
-                  onClick={() => editorRef.current?.toggleVisible(l.id)}
-                  tipSide="left"
-                />
-              </span>
-            </li>
-          ))}
-        </ul>
+        <p className="layers-hint">Glissez la poignée pour réordonner les calques. Cliquez sur un matériau ou double-cliquez sur un autre calque pour le modifier. Le calque du haut recouvre ceux du dessous.</p>
+        {layers.some(layer => layer.material?.linked) && <p className="layers-material-hint">Les finitions liées suivent leur matériau : leur placement et leur ordre se règlent depuis le calque couleur.</p>}
+        <button type="button" className="btn btn-sm layer-edit" disabled={!selection} onClick={() => { const ed = editorRef.current; if (!ed) return; setTool('select'); setInspectorTab(selectionInspector(ed)); }}><Icon name="sliders" size={14} />{selectedMaterialLayer ? 'Modifier le matériau' : 'Modifier la sélection'}</button>
+        <LayerList
+          key={activeMap}
+          layers={layers}
+          onSelect={(layer, edit) => { const ed = editorRef.current; if (!ed) return; setTool('select'); setInspectorTab(selectLayerInspector(ed, layer, edit)); }}
+          onMove={(id, dir) => editorRef.current?.moveLayer(id, dir)}
+          onReorder={(source, target, position) => editorRef.current?.moveLayerRelative(source, target, position)}
+          onDelete={(id) => editorRef.current?.deleteLayer(id)}
+          onToggleLock={(id) => editorRef.current?.toggleLock(id)}
+          onToggleVisible={(id) => editorRef.current?.toggleVisible(id)}
+        />
         </>
       )}
     </div>
@@ -2726,11 +2861,12 @@ export default function App() {
           ) : tool === 'select' && selection ? (
             <div className="selection-context">
               <span>{selection.name || SELECTION_TYPE_LABELS[selection.type] || 'Élément sélectionné'}</span>
-              <span className="opt-hint">{selection.projection ? view === '2d' ? 'Déplacement dans Voiture 3D · taille et matière dans Élément' : 'Glissez sur le logo · poignées pour taille et rotation · matière dans Élément' : view === '3d' ? selection.type === 'image' ? 'Glissez sur l’image pour déplacer · taille et rotation dans Élément' : 'Réglages dans Élément · ouvrez Texture 2D pour déplacer cette forme' : 'Glissez pour déplacer · poignées pour redimensionner · réglages dans Élément'}</span>
+              <span className="opt-hint">{selectedMaterialLayer ? view === '2d' ? 'Motif et finition dans Matières · le masque reste fixe' : 'Glissez sur la voiture pour décaler le motif · réglages dans Matières' : selection.projection ? view === '2d' ? 'Déplacement dans Voiture 3D · taille et matière dans Élément' : 'Glissez sur le logo · poignées pour taille et rotation · matière dans Élément' : view === '3d' ? selection.type === 'image' ? 'Glissez sur l’image pour déplacer · taille et rotation dans Élément' : 'Réglages dans Élément · ouvrez Texture 2D pour déplacer cette forme' : 'Glissez pour déplacer · poignées pour redimensionner · réglages dans Élément'}</span>
             </div>
           ) : <span className="opt-hint">{tool === 'select' ? view === '3d' ? 'Ajoutez une image, puis cliquez sur la voiture pour la placer.' : 'Choisissez un dessin sur la texture ou dans Calques. Espace + glisser pour déplacer la vue.' : currentTool?.hint}</span>}
         </div>
         <div className="options-right">
+          <TextureResolutionControl value={textureResolution} disabled={!ready || !!busy || placingImage || !!imagePlacement} onChange={(size) => void onTextureResolution(size)} />
           <button type="button" className={`btn btn-sm${exportColorPreview ? ' is-active' : ''}`} disabled={!ready || !!busy || placingImage || view === '2d'} aria-pressed={exportColorPreview} onClick={() => void onToggleExportPreview()} title="Comparer les couleurs, matières et vernis après compression DDS, sans saleté simulée ni multiplicateur de vernis d’atelier. L’éclairage reste estimé. Toute modification revient à l’édition sans changer les calques.">
             <Icon name="eye" size={14} /> {exportColorPreview ? 'Retour à l’original' : 'Aperçu de l’export'}
           </button>
@@ -2775,6 +2911,9 @@ export default function App() {
           <button type="button" className="rail-image-add" aria-label="Ajouter une image" disabled={!ready || placingImage} onClick={() => imageInputRef.current?.click()}>
             <span className="rail-image-symbol"><Icon name="image" size={22} /><Icon name="plus" size={12} /></span>
             <strong>Ajouter une image</strong><small>Logo, sticker, numéro…</small>
+          </button>
+          <button type="button" className={`tool-item rail-materials${inspectorTab === 'materials' ? ' is-active' : ''}`} aria-label="Bibliothèque de matériaux" aria-pressed={inspectorTab === 'materials'} disabled={!ready || placingImage || !!busy} onClick={() => { setTool('region'); if (view !== '2d') setView('split'); setInspectorTab('materials'); }}>
+            <Icon name="layers" size={18} /><span>Matériaux</span>
           </button>
           <div className="rail-caption">ACTIVITÉ</div>
           <div className="rail-group" role="group" aria-label="Activité d’édition">
@@ -2896,7 +3035,7 @@ export default function App() {
                 <div className="canvas-overlays" style={{ transform: overlayTransform }}>
                   <WheelReliefOverlay visible={family === 'wheels' && showWheelRelief && view !== '3d'} value={wheelSurface} files={wheelSurfaceFiles} officialModel={!skin3d?.preview} technicalChannel={mapDef.kind !== 'basecolor'} />
                   {showGrid && <div className="grid-overlay" style={{ backgroundSize: `${100 / gridDiv}% ${100 / gridDiv}%` }} />}
-                  <UvGuideOverlay activeMap={activeMap} islands={guideIslands} zoom={zoomPercent / 100} visible={(showGuide || tool === 'region') && guideIslands.length > 0} focusedRegion={family === 'skin' ? focusedRegion : null} selectedRegion={tool === 'region' && regionPrecision === 'piece' ? quickRegionKey : null} selectedElement={tool === 'region' ? selectedElement : null} onSelect={tool === 'region' ? (key) => { setQuickRegionKey(key); setRegionElement(null); setInspectorTab('texture'); } : undefined} />
+                  <UvGuideOverlay activeMap={activeMap} islands={guideIslands} zoom={zoomPercent / 100} visible={(showGuide || tool === 'region') && guideIslands.length > 0} focusedRegion={family === 'skin' ? focusedRegion : null} selectedRegion={tool === 'region' && regionPrecision === 'piece' ? quickRegionKey : null} selectedElement={tool === 'region' ? selectedElement : null} onSelect={tool === 'region' ? (key) => { setQuickRegionKey(key); setRegionElement(null); setInspectorTab(previous => previous === 'materials' ? previous : 'texture'); } : undefined} />
                 </div>
               </div>
               {mapDef.kind === 'roughmetal' && (
@@ -2911,7 +3050,7 @@ export default function App() {
               )}
               <div className="float float--bl">
                 <span className="float-item">
-                  {MAP_BY_ID[activeMap].label} · {mapDef.workRes} px
+                  {MAP_BY_ID[activeMap].label} · {textureResolution} px
                 </span>
               </div>
               <div className="float float--br zoom">
@@ -2983,12 +3122,15 @@ export default function App() {
             <button type="button" role="tab" aria-selected={inspectorTab === 'props'} className={inspectorTab === 'props' ? 'is-active' : ''} onClick={() => setInspectorTab('props')}>
               <Icon name="sliders" size={14} /> {tool === 'select' ? 'Élément' : 'Outil'}
             </button>
+            <button type="button" role="tab" aria-selected={inspectorTab === 'materials'} className={inspectorTab === 'materials' ? 'is-active' : ''} onClick={() => setInspectorTab('materials')}>
+              <Icon name="layers" size={14} /> Matières
+            </button>
             <button type="button" role="tab" aria-selected={inspectorTab === 'layers'} className={inspectorTab === 'layers' ? 'is-active' : ''} onClick={() => setInspectorTab('layers')}>
               <Icon name="layers" size={14} /> Calques
               {layers.length > 0 && <span className="count">{layers.length}</span>}
             </button>
           </div>
-          <div className="inspector-context"><span>{FAMILY_LABELS[family]} <Icon name="chevronRight" size={12} /> {CHANNEL_LABELS[activeMap]}</span><strong>{inspectorTab === 'texture' ? 'Fond & pièces' : inspectorTab === 'layers' ? 'Calques' : tool !== 'select' ? 'Prochain tracé' : 'Sélection'}</strong></div>
+          <div className="inspector-context"><span>{FAMILY_LABELS[family]} <Icon name="chevronRight" size={12} /> {CHANNEL_LABELS[activeMap]}</span><strong>{inspectorTab === 'materials' ? 'Matériaux' : inspectorTab === 'texture' ? 'Fond & pièces' : inspectorTab === 'layers' ? 'Calques' : tool !== 'select' ? 'Prochain tracé' : 'Sélection'}</strong></div>
           <div className="inspector-body" ref={inspectorBodyRef}>
             {imagePlacement ? <div className="placement-help"><Icon name="target" size={24} /><strong>Choisissez son emplacement</strong><p>Cliquez sur une surface de la voiture. Tournez la voiture avec le clic droit.</p>
               {'file' in imagePlacement && <div className="placement-settings">
@@ -3001,13 +3143,16 @@ export default function App() {
               </div>}
               <button type="button" className="btn btn-full" disabled={placingImage} onClick={() => setImagePlacement(null)}>Annuler le placement</button></div> : <>
             {mapDef.kind === 'illum' && inspectorTab !== 'layers' && renderLightPreview()}
-            {inspectorTab === 'layers' ? renderLayers() : inspectorTab === 'texture' || tool === 'region' ? renderTextureProps() : tool !== 'select' ? (
+            {inspectorTab === 'materials' ? <><div className="relief-prototype-entry"><button type="button" className="btn btn-full" disabled={!ready || !!busy || placingImage} onClick={() => void openReliefPrototype()}><Icon name="box" size={15} /> Textures et relief · v1.0</button>{reliefSettings && <p className="hint">Pour modifier la hauteur, rouvrez l’atelier. Les calques règlent l’apparence.</p>}</div><MaterialsPanel family={family} islands={guideIslands} selectedRegion={selectedElement ?? selectedIsland ?? null} selection={selectedMaterialLayer}
+              disabled={!ready || !!busy || placingImage} onApply={(definition, regions, exclusions) => void onApplyMaterial(definition, regions, exclusions)}
+              onChange={onMaterialChange} onChangeMask={onMaterialMaskChange} onCommit={() => { editorRef.current?.commitMaterialLayers(); endHistoryGesture(); }} onError={notify} /></>
+            : inspectorTab === 'layers' ? renderLayers() : inspectorTab === 'texture' || tool === 'region' ? renderTextureProps() : tool !== 'select' ? (
               <Section title={`${currentTool?.label ?? 'Outil'} · prochain tracé`}>
                 <div className="tool-settings">{renderToolOptions()}</div>
                 {mapDef.kind === 'illum' && lightRoleControl('Comportement du prochain tracé', newLightRole, onNewLightRole)}
                 <p className="hint">Ces réglages s’appliquent aux prochains éléments. Pour retoucher un dessin existant, choisissez Décorer puis l’onglet Élément.</p>
               </Section>
-            ) : selection ? renderSelectionProps() : (
+            ) : selectedMaterialLayer ? <Section title="Matériau sélectionné"><p className="hint">Le motif, la finition et le masque de ce calque se règlent ensemble dans Matières.</p><button type="button" className="btn btn-full" onClick={() => setInspectorTab('materials')}>Modifier le matériau</button></Section> : selection ? renderSelectionProps() : (
               <div className="empty studio-welcome">
                 <div className="welcome-symbol"><Icon name="image" size={28} /></div>
                 <h2>Décorez votre livrée</h2>
@@ -3027,7 +3172,9 @@ export default function App() {
 
       {downloadsOpen && <DownloadDialog onClose={closeDownloads} onPrepareProject={downloadCurrentProject} onExport={onExport} horn={horn} onHornChange={setHorn} />}
 
-      {libraryOpen && <ProjectLibrary currentId={projectId} needsSave={projectModified && (dirtyCount > 0 || !!projectId || skinName !== 'MonSkin' || !!editorRef.current?.hasProjectContent() || !!skin3d || coatIntensity !== 1 || neonIntensity !== 1.4 || !dirtEnabled)}
+      {reliefSession && <Suspense fallback={<div className="modal-overlay" role="status">Chargement de l’atelier de relief…</div>}><ReliefPrototypeDialog name={reliefSession.name} maps={reliefSession.maps} material={reliefSession.material} surfaceFiles={reliefSession.surfaceFiles} settings={reliefSettings} onApply={applyRelief} onClose={closeReliefPrototype} onExport={downloadReliefPrototype} /></Suspense>}
+
+      {libraryOpen && <ProjectLibrary currentId={projectId} needsSave={projectModified && (dirtyCount > 0 || !!projectId || skinName !== 'MonSkin' || !!editorRef.current?.hasProjectContent() || !!skin3d || coatIntensity !== 1 || neonIntensity !== 1.4 || !dirtEnabled || textureResolution !== TEXTURE_RESOLUTION)}
         onClose={() => setLibraryOpen(false)} onSave={saveProject} onOpen={openSavedProject} onImport={importProjectFile} onDownloadCurrent={downloadCurrentProject}
         onRenameCurrent={(id, name) => { if (id === projectId) { const next = name.trim().slice(0, 120) || 'Sans titre'; setSkinName(next); setSavedAt(Date.now()); setSavedMetadata((before) => { if (!before) return null; const metadata = JSON.parse(before); metadata[0] = next; return JSON.stringify(metadata); }); } }}
         onDeleteCurrent={(id) => { if (id === projectId) { setProjectId(null); setSavedAt(null); setSavedMetadata(null); } }} />}

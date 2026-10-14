@@ -1,0 +1,37 @@
+import assert from 'node:assert/strict';
+import * as THREE from 'three';
+import { encodeDDS } from '../src/dds';
+import { PreviewSurfaceTextures, normalTextureFile } from '../src/three/previewSurfaceTextures';
+import { hasExperimentalSkinNormalShader, previewMaterialSlot } from '../src/three/materialSlots';
+
+assert.equal(previewMaterialSlot('_DetailsDmgNormal_Skin'), 'skin', 'The atlas suffix wins over the shader name');
+assert.equal(previewMaterialSlot('_DetailsDmgNormal_Wheels'), 'wheels');
+assert.equal(previewMaterialSlot('_SkinDmg_Skin'), 'skin');
+assert.equal(previewMaterialSlot('_SkinDmgDecal_Skin'), 'skin');
+assert.equal(previewMaterialSlot('Details'), 'details');
+assert.equal(hasExperimentalSkinNormalShader('_DetailsDmgNormal_Skin'), true);
+assert.equal(hasExperimentalSkinNormalShader('_SkinDmg_Skin'), false);
+assert.equal(hasExperimentalSkinNormalShader('_DetailsDmgNormal_Details'), false);
+assert.equal(normalTextureFile('Skin_N.dds'), 'Skin_N.dds');
+
+const materials = { skin: new THREE.MeshPhysicalMaterial(), details: new THREE.MeshStandardMaterial(), wheels: new THREE.MeshStandardMaterial() };
+const manager = new PreviewSurfaceTextures(materials, 4);
+const data = new Uint8ClampedArray(4 * 4 * 4);
+for (let i = 0; i < data.length; i += 4) data.set([180, 110, 240, 255], i);
+manager.setFiles([{ name: 'Skin_N.dds', data: new Uint8Array(encodeDDS({ width: 4, height: 4, data }, 'BC5', { colorSpace: 'linear' })) }]);
+assert.equal(materials.skin.normalMap, null, 'The standard car never silently shows an unsupported Skin normal');
+manager.setSkinNormalEnabled(true);
+const texture = materials.skin.normalMap as THREE.DataTexture;
+assert(texture, 'The experimental custom shader enables its own normal atlas');
+assert.equal(texture.colorSpace, THREE.NoColorSpace);
+assert.equal(texture.flipY, true);
+assert.equal(texture.name, 'Skin_N.dds');
+assert.equal(materials.details.normalMap, null, 'Skin normals are not routed to the Details atlas');
+manager.setSkinNormalEnabled(true); assert.equal(materials.skin.normalMap, texture, 'Stable configuration reuses GPU resources');
+let disposals = 0; texture.addEventListener('dispose', () => disposals++);
+manager.setSkinNormalEnabled(false); assert.equal(materials.skin.normalMap, null); assert.equal(disposals, 1);
+manager.setSkinNormalEnabled(true); assert(materials.skin.normalMap);
+manager.setFiles([]); assert.equal(materials.skin.normalMap, null, 'Comparing the original clears the normal map');
+manager.dispose(); manager.dispose();
+for (const material of Object.values(materials)) material.dispose();
+console.log('✓ Relief preview : famille Skin séparée du shader, activation explicite, comparaison et libération GPU');

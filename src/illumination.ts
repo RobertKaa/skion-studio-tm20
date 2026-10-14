@@ -1,5 +1,5 @@
 import { ILLUM_ROLES, type IllumRole } from './maps';
-import { TEXTURE_RESOLUTION } from './editor/resolution';
+import { MAX_TEXTURE_RESOLUTION } from './editor/resolution';
 import type { PixelSource } from './three/decalProjection';
 
 export interface ImageLight { role: IllumRole; strength: number }
@@ -20,7 +20,7 @@ export function encodeIllumCodes(width: number, height: number, codes: Uint8Arra
 export function validIllumCodes(value: unknown): value is IllumCodes {
   if (!value || typeof value !== 'object') return false;
   const c = value as IllumCodes;
-  if (!Number.isInteger(c.width) || !Number.isInteger(c.height) || c.width < 1 || c.height < 1 || c.width > TEXTURE_RESOLUTION || c.height > TEXTURE_RESOLUTION || !Array.isArray(c.runs) || c.runs.length % 2 || c.runs.length > c.width * c.height * 2) return false;
+  if (!Number.isInteger(c.width) || !Number.isInteger(c.height) || c.width < 1 || c.height < 1 || c.width > MAX_TEXTURE_RESOLUTION || c.height > MAX_TEXTURE_RESOLUTION || !Array.isArray(c.runs) || c.runs.length % 2 || c.runs.length > c.width * c.height * 2) return false;
   let pixels = 0;
   for (let i = 0; i < c.runs.length; i += 2) {
     if (!Number.isInteger(c.runs[i]) || c.runs[i] < 1 || !Number.isInteger(c.runs[i + 1]) || c.runs[i + 1] < 0 || c.runs[i + 1] > 255) return false;

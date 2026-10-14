@@ -43,6 +43,10 @@ export function normalizeWheelSurface(value: unknown): WheelSurfaceSettings {
 
 /** Trackmania BC5 normals encode X/Y in logical R/G, with OpenGL Y+. */
 export function decodeNormalVectors(buffer: ArrayBuffer): RGBAImage | null {
+  if (buffer.byteLength < 128 || buffer.byteLength > 32 * 1024 * 1024) return null;
+  const header = new DataView(buffer);
+  if (header.getUint32(0, true) !== 0x20534444 || !header.getUint32(12, true) || !header.getUint32(16, true) ||
+    header.getUint32(12, true) > 4096 || header.getUint32(16, true) > 4096) return null;
   const image = decodeDDS(buffer);
   if (!image) return null;
   for (let i = 0; i < image.data.length; i += 4) {

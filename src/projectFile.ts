@@ -5,13 +5,16 @@ import type { Skin3DFile, Skin3DProject } from './skin3d';
 import { isWheelSurfaceMode, type WheelSurfaceSettings } from './wheelSurface';
 import { validateBlenderParts, type BlenderPart } from './blenderParts';
 import { validIllumCodes } from './illumination';
-import { LEGACY_TEXTURE_RESOLUTION, TEXTURE_RESOLUTION, upgradeMapResolution } from './editor/resolution';
+import { LEGACY_TEXTURE_RESOLUTION, TEXTURE_RESOLUTION, upgradeMapResolution, isTextureResolution, type TextureResolution } from './editor/resolution';
 import { isPreviewEnvironment, type PreviewEnvironment } from './previewEnvironment';
 import { HORN_ASSET_PATH, MAX_HORN_BYTES, hornDuration, hornSourceName, type SkinHorn } from './horn';
 import { validTextureBackgroundSettings } from './editor/textureBackground';
+import { isValidMaterialLayer } from './materials/types';
+import { validReliefSettings, type ReliefSettings } from './relief/settings';
 
 export type ProjectMaps = Record<MapId, Record<string, unknown>>;
 export interface ProjectWorkspace {
+  textureResolution?: TextureResolution;
   activeMap: MapId; view: '2d' | 'split' | '3d'; camera: PreviewViewState;
   coatIntensity: number; neonIntensity: number; night: boolean; braking: boolean;
   /** Global export protection; optional for projects saved before dirt controls existed. */
@@ -20,6 +23,7 @@ export interface ProjectWorkspace {
   /** Optional to retain compatibility with projects created before the test circuit. */
   environment?: PreviewEnvironment;
   wheelSurface?: WheelSurfaceSettings;
+  relief?: ReliefSettings;
 }
 export interface ProjectDocument {
   format: 'tm-skin-studio'; version: 1 | 2; name: string;
@@ -33,7 +37,9 @@ export interface ProjectDocument {
 }
 export interface ProjectBundle { document: ProjectDocument; assets: Map<string, Blob | Uint8Array> }
 export const PROJECT_EXTENSION = '.tmskin';
-const MAX_FILE = 128 * 1024 * 1024;
+// Editable 4K PBR sources plus a dense model can exceed 128 MiB even when
+// their game ZIP is compact. Keep a bounded project capacity distinct from it.
+const MAX_FILE = 192 * 1024 * 1024;
 const MAX_EXPANDED = 256 * 1024 * 1024;
 // Native custom cars split the 2048² atlases into many independently editable
 // pieces. The sphere car alone needs ~300 million pixels before deduplication.
@@ -79,6 +85,8 @@ export function validateProjectDocument(value: unknown, assets: Set<string>): as
   })) fail('vue 3D invalide.');
   for (const [key, max] of [['coatIntensity', 1], ['neonIntensity', 4]] as const) if (typeof workspace[key] !== 'number' || (workspace[key] as number) < 0 || (workspace[key] as number) > max) fail('intensité invalide.');
   if (typeof workspace.night !== 'boolean' || typeof workspace.braking !== 'boolean') fail('simulation invalide.');
+  if (workspace.textureResolution !== undefined && !isTextureResolution(workspace.textureResolution)) fail('résolution de texture invalide.');
+  if (workspace.relief !== undefined && !validReliefSettings(workspace.relief, src => /^assets\/image-\d+\.png$/.test(src) && assets.has(src))) fail('réglages ou sources du relief invalides.');
   if (workspace.environment !== undefined && !isPreviewEnvironment(workspace.environment)) fail('environnement de test invalide.');
   if (workspace.dirtEnabled !== undefined && typeof workspace.dirtEnabled !== 'boolean') fail('protection de saleté invalide.');
   if (workspace.dirtPreview !== undefined && (typeof workspace.dirtPreview !== 'number' || !Number.isFinite(workspace.dirtPreview) || workspace.dirtPreview < 0 || workspace.dirtPreview > 1)) fail('aperçu de saleté invalide.');
@@ -111,6 +119,8 @@ export function validateProjectDocument(value: unknown, assets: Set<string>): as
     for (const key of Object.keys(node)) if (['__proto__', 'prototype', 'constructor'].includes(key)) fail('propriété interdite.');
     if (typeof node.type === 'string' && !OBJECT_TYPES.has(node.type.toLowerCase())) fail(`type de calque « ${node.type.slice(0, 40)} » non pris en charge.`);
     if (node.src !== undefined) image(node.src);
+    if (node.materialLayer !== undefined && (String(node.type).toLowerCase() !== 'image' || node.decal !== undefined ||
+      !isValidMaterialLayer(node.materialLayer, (src) => /^assets\/image-\d+\.png$/.test(src) && assets.has(src)))) fail('matériau ou textures associés invalides.');
     if (node.linkedImageId) fail('un fragment ne peut pas remplacer son image maîtresse.');
     if (node.filters !== undefined && (!Array.isArray(node.filters) || node.filters.length)) fail('filtre d’image non pris en charge.');
     if (node.textureBackground !== undefined && (!validTextureBackgroundSettings(node.textureBackground) ||
@@ -189,7 +199,7 @@ async function compactProjectImages(bundle: ProjectBundle): Promise<ProjectBundl
   for (const [path, content] of bundle.assets) {
     if (!ASSET_PATH.test(path)) fail('chemin de ressource invalide.');
     const bytes = content instanceof Blob ? new Uint8Array(await content.arrayBuffer()) : content;
-    if (bytes.length > 64 * 1024 * 1024 || (totalBytes += bytes.length) > MAX_EXPANDED) fail('projet trop volumineux.');
+    if (bytes.length > 64 * 1024 * 1024) fail('projet trop volumineux.');
     if (path === HORN_ASSET_PATH) {
       try { hornDuration(bytes); } catch { fail('fichier du klaxon invalide.'); }
     }
@@ -205,6 +215,10 @@ async function compactProjectImages(bundle: ProjectBundle): Promise<ProjectBundl
       if ((imagePixels += pixels) > MAX_IMAGE_PIXELS) fail('trop d’images en haute résolution dans ce projet.');
       candidates.push({ path, bytes }); buckets.set(key, candidates);
     }
+    // Internal capture can reference the same immutable texture from several
+    // families and the relief source. Only unique files enter the final ZIP.
+    // Untrusted ZIPs are still capped before decompression in readProjectFile.
+    if ((totalBytes += bytes.length) > MAX_EXPANDED) fail('projet trop volumineux.');
     assets.set(path, bytes);
   }
   if (!aliases.size) return { document: bundle.document, assets };
@@ -217,6 +231,7 @@ async function compactProjectImages(bundle: ProjectBundle): Promise<ProjectBundl
     Object.values(node).forEach(walk);
   };
   walk(document.editor.maps);
+  walk(document.workspace.relief);
   return { document, assets };
 }
 
@@ -246,12 +261,12 @@ async function serializeProjectFile(bundle: ProjectBundle): Promise<Blob> {
     zip.file(name, bytes);
   }
   const buffer = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE', compressionOptions: { level: 3 } });
-  if (buffer.byteLength > MAX_FILE) fail('128 Mo maximum par fichier projet.');
+  if (buffer.byteLength > MAX_FILE) fail(`192 Mo maximum par fichier projet (${(buffer.byteLength/1048576).toFixed(1)} Mo obtenus).`);
   return new Blob([buffer], { type: 'application/zip' });
 }
 
 export async function readProjectFile(file: Blob): Promise<ProjectBundle> {
-  if (file.size > MAX_FILE) fail('128 Mo maximum par fichier projet.');
+  if (file.size > MAX_FILE) fail('192 Mo maximum par fichier projet.');
   const zip = await JSZip.loadAsync(await file.arrayBuffer());
   const entries = Object.values(zip.files).filter((entry) => !entry.dir);
   let total = 0;
@@ -292,6 +307,7 @@ export function hydrateProject(bundle: ProjectBundle): { document: ProjectDocume
     Object.values(node).forEach(walk);
   };
   walk(document.editor.maps);
+  walk(document.workspace.relief);
   const data = (path: string) => {
     const bytes = bundle.assets.get(path);
     if (!(bytes instanceof Uint8Array)) fail('ressource binaire invalide.');

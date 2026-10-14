@@ -16,11 +16,48 @@ Puis ouvrir http://localhost:5173
 
 ## Fonctionnalités
 
-- **13 textures éditables en 2048 × 2048 px**, regroupées par surface : carrosserie, détails et roues.
+- **Matériaux dans le navigateur, sans Blender ni installation** : ouvrir **Matériaux**
+  à gauche ou **Matières** dans l’inspecteur. Six presets (peinture satinée, carbone,
+  métal brossé, caoutchouc, tissu et peinture usée) et des images PNG/JPG/WebP/EXR permettent
+  de créer un matériau complet. Déposer plusieurs images couleur, rugosité, métal,
+  vernis, lumière, saleté, normale ou AO ; leurs canaux sont détectés et restent
+  corrigeables. Les cartes ORM et rugosité/métal utilisent leurs composantes numériques.
+  Répétition, taille, rotation, décalage et miroirs sont communs aux canaux. Appliquer
+  à un élément UV, plusieurs pièces ou toute la surface, avec des exclusions ; glisser
+  sur le matériau en 3D décale son motif en conservant son masque.
+  Un seul calque contrôle couleur et finitions liées, avec annulation et sauvegarde
+  des originaux dans le projet. Dans **Calques**, une finition marquée **Lié au matériau**
+  ouvre directement **Matières** au clic ; le bouton de réglages fait de même. La couleur,
+  la rugosité/métal et les autres sorties se modifient ensemble depuis ce panneau ;
+  les finitions générées suivent le placement et l’ordre du matériau.
+  Le relief personnalisé fonctionne sur Détails/Roues ;
+  les presets génèrent des motifs couleur et des variations de brillance. Le carbone
+  fournit aussi une hauteur et des normales du même tissage, sans images à importer.
+  Les autres presets ne génèrent pas de normales. Augmenter la taille du motif
+  permet de mieux le distinguer en 3D.
+  Le vernis appartient à la carrosserie. Normales et AO suivent le masque dans
+  l’aperçu et l’export DDS. **Mes matériaux** et **Favoris** sont sauvegardés localement
+  sur cet appareil ; un pack `.skion-material.zip` permet de partager un matériau.
+  Les imports sont bornés et les liens externes/scripts refusés. `npm run test:materials`
+  vérifie rendu, canaux, masques, historique, projets, DDS, bibliothèque et interface.
+  Les ZIP de textures Blender sont aussi acceptés : les images d’un même matériau sont
+  affectées par leur nom, même dans des sous-dossiers. Le `.blend`, les aperçus et les
+  cartes de hauteur/déplacement sont ignorés avec un compte rendu. Les nœuds Blender
+  ne sont pas exécutés. Les EXR compatibles sont décodés en arrière-plan puis convertis
+  en PNG 8 bits ; les cartes numériques gardent leurs valeurs, les couleurs linéaires
+  passent en sRGB. **Qualité ZIP / EXR** limite les copies importées à 1024, 2048 (défaut)
+  ou 4096 px, sans modifier l’archive originale. Choisir un seul matériau, une seule
+  résolution et un seul format par canal en cas de variantes. Limites : ZIP de 256 Mo,
+  64 Mo par image, 128 Mo de textures et 64 millions de pixels par matériau.
+- **13 textures éditables en 1024, 2048 ou 4096 px**, regroupées par surface : carrosserie, détails et roues.
   Couleur, rugosité/métal, néon/feux et masque de saleté sont éditables sur chaque surface ;
   la carrosserie dispose aussi du vernis.
+  Le sélecteur **Textures** dans la barre d’options règle tous les canaux, l’aperçu 3D
+  et l’export. Le choix est enregistré dans le projet ; 2048 px reste la valeur par défaut.
+  Changer de résolution conserve les calques, leur placement et les images originales.
+  Les textures uniformes restent optimisées sans perte à l’export.
 - **Édition fluide**, activée par défaut : les textures modifiées de l’aperçu 3D passent
-  temporairement en 512 × 512 px, puis retrouvent leur qualité 2048 px après une courte
+  temporairement en 512 × 512 px, puis retrouvent la résolution choisie après une courte
   pause. Les calques, images originales et exports conservent leur précision.
   Le bouton dans la barre d’options permet de garder la pleine qualité en permanence.
 - **Dessous de la voiture** : l’orbite 3D permet de passer sous le châssis. Le bouton
@@ -66,6 +103,9 @@ Puis ouvrir http://localhost:5173
   éditer), import d'images (logos, stickers), couleur de fond
 - **Calques** : réordonner, masquer, verrouiller, dupliquer, supprimer ; propriétés par objet
   (couleur, opacité, contour, police, miroir, ombre)
+  Glisser la poignée d’un calque pour le placer au-dessus ou en dessous d’un autre ;
+  la liste défile automatiquement près de ses bords. Les flèches restent disponibles
+  et les finitions liées suivent l’ordre du matériau couleur.
 - **Annuler / rétablir** par texture (Ctrl+Z / Ctrl+Shift+Z)
 - **Guide UV et sélection précise** : cliquer sur une forme indépendante ou sélectionner
   une pièce entière, puis la remplir dans un nouveau calque éditable.
@@ -246,13 +286,76 @@ comme les outils de préparation des skins personnalisés.
 - `npm run build` — build de production
 - `npm run test:desktop-ux` — navigation sans modification des calques, focus et raccourcis du dialogue de téléchargement, erreurs d’export et URLs temporaires
 - `npm run test:region-image` — remplissage image sur une sélection UV, contours et trous, proportions/orientation, treize canaux, historique, projet et sécurité
+- `npm run test:texture-size` — 1024/2048/4096, précision des originaux, UV/groupes/feux, projets, dimensions DDS, textures GPU et sélecteur accessible
 - `npx tsx scripts/test-dds.ts` — tests de l'encodeur DDS
 - `npx tsx scripts/test-blender-parts.ts` — contours, sélection précise, import GLB et sécurité
 - `npx tsx scripts/test-part-layers.ts` — découpage des pixels, matière, lumière et migration
 
 ## Modèles 3D et construction locale
 
-L’application peint les textures et conserve les modèles déjà compilés. Une
+### Textures et relief v1.0
+
+Dans **Matières → Textures et relief · v1.0**, choisissez le carbone intégré,
+un matériau sélectionné ou un pack ZIP/images. Le fichier `.blend` est ignoré :
+aucune installation de Blender, Python ou autre outil n’est nécessaire.
+
+Le mode **Volume** utilise désormais une surface Body densifiée, préparée pour
+les cinq niveaux de détail natifs. Elle échantillonne la hauteur localement ;
+les PNG gris/RGB 8 ou 16 bits non entrelacés sont lus numériquement, sans gamma
+ni conversion préalable en atlas 8 bits. Les autres PNG et les hauteurs EXR
+converties utilisent le rendu 8 bits du matériau. La répétition, rotation,
+miroirs, décalages, masques et opacité suivent le placement du matériau.
+Les cartes d’un ZIP Blender restent disponibles jusqu’à 4K, indépendamment de
+la qualité d’export. La résolution de la surface reste fixe : de très petites
+fibres peuvent encore être plus fines que ses sommets.
+
+L’amplitude usuelle va de 0 à 30 mm dans chaque sens. **Relief marqué · 20 mm**
+facilite les essais de pierre ; le carbone démarre à 0,5 mm. La comparaison
+**Sans relief** garde la même apparence. Les diagnostics gris et l’amplitude
+extrême 80 mm sont accessibles dans les options avancées.
+
+**Appliquer au projet** installe le modèle et ajoute des matériaux éditables
+pour la couleur et les finitions. Les calques existants sont conservés ; une
+nouvelle application remplace les calques créés par cet atelier. Une carte de
+hauteur seule conserve la peinture. **Enregistrer** et le fichier `.tmskin`
+conservent le modèle, les sources PNG exactes et les réglages du relief.
+Les projets contenant leurs sources 4K disposent d’une capacité de 192 Mo ;
+les ressources identiques sont partagées, avec des limites d’expansion et de
+pixels conservées. Cette capacité concerne le projet éditable, pas le ZIP du jeu.
+Rouvrez l’atelier pour modifier la hauteur : modifier la peinture d’un calque
+ne recalcule pas automatiquement la géométrie.
+
+**Exporter le skin** crée un ZIP complet avec mesh, squelette, animation,
+textures, klaxon éventuel et `preview.glb`. L’export principal après application
+utilise le même budget prudent de **24 Mo**, avec des réductions mesurées des
+canaux secondaires. La couleur Skin peut rester en 4K ; les autres couleurs et
+normales sont plafonnées à 2K puis certaines finitions à 1K si nécessaire.
+Un ZIP encore trop gros est refusé. Cette cible est une politique de l’app,
+choisie après un rejet 4K, et ne constitue pas une limite officielle du jeu.
+
+Le volume des galets densifiés a été confirmé par l’utilisateur **en course
+sur PC le 14 octobre 2026**, avec des captures grises et texturées.
+Le volume concerne les panneaux fixes Skin. Les roues, pièces Details, verre
+et articulations gardent leur géométrie ; les raccords sont atténués sur 3 cm.
+La couleur et la finition peuvent couvrir Skin, Details et Wheels, avec les
+variations d’échelle et d’orientation liées à leurs UV.
+
+**Normales** et **Les deux** restent expérimentaux sur la carrosserie : le
+carbone testé avec le même ZIP local montre son relief au garage, mais peu en
+course. Le shader DetailsDmgNormal associé peut aussi changer le vernis.
+Ce point est distinct des anciens accessoires Blender rétablis par réimport
+local mais absents via un Club. La cause et le ZIP distribué par les Clubs
+n’ont pas été comparés ; la distribution Club et la console restent à vérifier.
+
+Les modèles neutres vérifiés par SHA-256 sont chargés à l’ouverture depuis
+`public/models/relief/dense/`. Le navigateur ne parse ni n’exécute de GBX ou de
+`.blend` arbitraire. `scripts/prepare-dense-relief.py` et
+`scripts/dense_heightfield_core.py` sont les outils de préparation développeur.
+Les sources natives et le rig local servent uniquement à régénérer ces assets.
+`npm run test:relief` vérifie PNG16, inflation bornée, sauvegarde, cinq LOD,
+interfaces articulées, archives, comparaison et atelier desktop.
+
+En dehors du relief intégré, l’application conserve les modèles déjà compilés. Une
 nouvelle géométrie demande Blender, NadeoImporter et les outils locaux de
 construction ; changer uniquement la peinture ne demande pas de recompilation.
 

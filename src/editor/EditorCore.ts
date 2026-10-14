@@ -33,13 +33,18 @@ import { imageIslandAt, imageIslandClearance } from './imagePlacement';
 import { materialBitmap, moveProjection, type DecalFamily, type DecalProjection, type PixelSource, type ProjectionBitmap, type SurfaceAnchor, type Vec3 } from '../three/decalProjection';
 import { decodeSurfaceMaterial, type SurfaceMaterial } from '../material';
 import type { ProjectMaps } from '../projectFile';
-import { TEXTURE_RESOLUTION, upgradeMapResolution, upgradeResolutionSnapshot } from './resolution';
+import { TEXTURE_RESOLUTION, MAX_TEXTURE_RESOLUTION, isTextureResolution, type TextureResolution, upgradeMapResolution, upgradeResolutionSnapshot } from './resolution';
 import { AdaptivePreview } from './adaptivePreview';
 import { createTextureBackground, readTextureBackground, syncTextureBackgroundCanvas, textureBackgroundName, updateTextureBackground, type BackgroundFit } from './textureBackground';
+import { isValidMaterialDefinition, isValidMaterialLayer, type MaterialDefinition, type MaterialLayer, type MaterialRegion, type MaterialRenderChannel } from '../materials/types';
+import { loadMaterialSources, renderMaterialLayer, getMaterialSourceCanvas, pinMaterialSources } from '../materials/render';
+import type { MaterialSurfaceOverlay } from '../materials/surfaceMaps';
+import { materialPngBytes } from '../materials/import';
 
-// Keep full-atlas groups/clips at native precision. Fabric's default cache budget
-// would downsample a 2048² object to roughly 1448² before rendering the texture.
-config.perfLimitSizeTotal = 2 * TEXTURE_RESOLUTION ** 2;
+// Full-atlas groups/clips must retain detail even when rendered to a 4096² texture.
+// Fabric's default cache budget would silently downsample these layers.
+config.perfLimitSizeTotal = 2 * MAX_TEXTURE_RESOLUTION ** 2;
+config.maxCacheSideLimit = Math.max(config.maxCacheSideLimit, 2 * MAX_TEXTURE_RESOLUTION + 256);
 
 /** Géométrie éditable d'un objet, exposée au panneau numérique. */
 export interface Transform {
@@ -69,6 +74,7 @@ export interface LayerInfo {
   locked: boolean;
   selected: boolean;
   linked: boolean;
+  material?: { name: string; ownerId: string; linked: boolean };
 }
 
 export interface ElementCopyContext {
@@ -113,14 +119,15 @@ const DEFAULT_VPT: TMat2D = [1, 0, 0, 1, 0, 0];
  * `mirrorOf` lie deux calques en miroir (symétrie) : l'un suit l'autre tant
  * que le mode symétrie est actif.
  */
-const CUSTOM_PROPS = ['id', 'name', 'selectable', 'evented', 'visible', 'mirrorOf', 'referenceOnly', 'illumRole', 'illumCodes', 'decal', 'linkedImageId', 'linkedImageKind', 'imageMaterial', 'imageMaterialEnabled', 'imageOrder', 'imageLight', 'imageLightEnabled', 'blenderPart', 'partColor', 'textureBackground'];
+const CUSTOM_PROPS = ['id', 'name', 'selectable', 'evented', 'visible', 'mirrorOf', 'referenceOnly', 'illumRole', 'illumCodes', 'decal', 'linkedImageId', 'linkedImageKind', 'imageMaterial', 'imageMaterialEnabled', 'imageOrder', 'imageLight', 'imageLightEnabled', 'blenderPart', 'partColor', 'textureBackground', 'materialLayer'];
+const MATERIAL_PLACEHOLDER = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAABmJLR0QA/wD/AP+gvaeTAAAAC0lEQVQImWNgAAIAAAUAAWJVMogAAAAASUVORK5CYII=';
 
 /** Calque verrouillé des feux arrière : seule sa couleur se règle. */
 const SPEED_LIGHT_NAME = 'Vitesse';
 
 /** Objet fabric enrichi des propriétés personnalisées de l'éditeur. */
 type EditorObject = FabricObject & { id?: string; name?: string; mirrorOf?: string; referenceOnly?: boolean; illumRole?: IllumRole; illumCodes?: IllumCodes; blenderPart?: string; partColor?: string;
-  decal?: DecalProjection; linkedImageId?: string; linkedImageKind?: 'color' | 'material' | 'light'; imageMaterial?: SurfaceMaterial; imageMaterialEnabled?: boolean; imageOrder?: number; imageLight?: ImageLight; imageLightEnabled?: boolean };
+  decal?: DecalProjection; linkedImageId?: string; linkedImageKind?: 'color' | 'material' | 'light' | 'coat' | 'dirt'; imageMaterial?: SurfaceMaterial; imageMaterialEnabled?: boolean; imageOrder?: number; imageLight?: ImageLight; imageLightEnabled?: boolean; materialLayer?: MaterialLayer };
 
 type LightCanvas = Canvas & { illumRole?: IllumRole };
 
@@ -193,6 +200,7 @@ interface CheckpointEntry {
 /** Point de reprise opaque renvoyé par `createCheckpoint()`. */
 export interface HistoryCheckpoint {
   maps: Map<MapId, CheckpointEntry>;
+  textureResolution?: TextureResolution;
 }
 
 export class EditorCore {
@@ -260,9 +268,10 @@ export class EditorCore {
     path: MutablePath;
     pts: { x: number; y: number }[];
   } | null = null;
-  private imageDrag: { mapId: MapId; image: FabricImage; pointer: Point; center: Point; islandKey?: string; clearance: number; changed: boolean } | null = null;
+  private imageDrag: { mapId: MapId; image: FabricImage; pointer: Point; center: Point; islandKey?: string; clearance: number; changed: boolean; patternOffset?: { x: number; y: number } } | null = null;
   private projectionDrag: { image: FabricImage & EditorObject; mapId: MapId; pointer: Vec3; center: Vec3; changed: boolean } | null = null;
   projectionBaker: ((decal: DecalProjection, source: PixelSource) => Map<DecalFamily, ProjectionBitmap>) | null = null;
+  private textureResolution: TextureResolution = TEXTURE_RESOLUTION;
   private projectionSources = new Map<string, PixelSource>();
   private projectionBakes = new Map<string, { key: string; bitmaps: Map<DecalFamily, ProjectionBitmap> }>();
   private refreshingLinkedImages = false;
@@ -272,6 +281,13 @@ export class EditorCore {
   private previewCanvases = new Map<MapId, HTMLCanvasElement>();
   private previewRoles = new Map<MapId, HTMLCanvasElement>();
   private adaptivePreview?: AdaptivePreview;
+  private materialBakes = new Map<string, { key: string; channels: Map<MaterialRenderChannel, HTMLCanvasElement>; frame: { x: number; y: number; size: number }; surfaces: MaterialSurfaceOverlay }>();
+  private materialSurfaces: readonly MaterialSurfaceOverlay[] = [];
+  private materialInteractive = false;
+  private materialSettleTimer: ReturnType<typeof setTimeout> | undefined;
+  private materialUpdateSequence = 0;
+  private materialSourceUrls = new Map<string, string>();
+  private materialSourceKeys = new Map<string, number>();
   private resizeObserver: ResizeObserver;
   /**
    * URLs `blob:` des images ajoutées (logos, fonds importés, références).
@@ -443,6 +459,38 @@ export class EditorCore {
 
   setFluidPreview(enabled: boolean) { this.adaptivePreview?.setEnabled(enabled); }
 
+  getTextureResolution(): TextureResolution { return this.textureResolution ?? TEXTURE_RESOLUTION; }
+
+  /** Re-render from vectors/original pixels; changing quality never scales a layer or its undo history. */
+  setTextureResolution(resolution: TextureResolution) {
+    if (!isTextureResolution(resolution)) throw new Error('Choisissez une résolution de 1024, 2048 ou 4096 px.');
+    if (resolution === this.getTextureResolution()) return;
+    this.endImageDrag(); this.textureResolution = resolution;
+    this.projectionBakes.clear();
+    for (const [id, state] of this.maps) {
+      // Release previous full-size CPU buffers before allocating their replacements on demand.
+      if (state.textureEl) state.textureEl.width = state.textureEl.height = 1;
+      this.markTextureDirty(id);
+    }
+    for (const canvas of this.illumRoles.values()) canvas.width = canvas.height = 1;
+    this.refreshLinkedImages(); this.emit('history'); this.emit('selection'); this.emitViewport(); this.flushTexture();
+  }
+
+  private flatBackgroundOnly(id: MapId) {
+    const canvas = this.maps.get(id)!.canvas;
+    return !canvas.backgroundImage && canvas.getObjects().every(isReference);
+  }
+
+  getExportCanvasElement(id: MapId) {
+    this.commitMaterialLayers();
+    return this.flatBackgroundOnly(id) ? this.getPreviewCanvasElement(id) : this.getCanvasElement(id);
+  }
+
+  getExportIllumRoleCanvas(id: MapId) {
+    this.commitMaterialLayers();
+    return this.flatBackgroundOnly(id) ? this.getPreviewIllumRoleCanvas(id) : this.getIllumRoleCanvas(id);
+  }
+
   /** Marque le buffer texture d'une map comme obsolète (changement de contenu, pas de pan/zoom). */
   private markTextureDirty(id: MapId) {
     this.maps.get(id)!.textureDirty = true;
@@ -459,7 +507,7 @@ export class EditorCore {
     const st = this.maps.get(id);
     if (!st?.textureDirty) return;
     st.textureDirty = false;
-    if (!this.renderTextureCanvas(id, st.textureEl, MAP_BY_ID[id].workRes, this.illumRoles)) st.textureDirty = true;
+    if (!this.renderTextureCanvas(id, st.textureEl, this.getTextureResolution(), this.illumRoles)) st.textureDirty = true;
   }
 
   private renderTextureCanvas(id: MapId, el: HTMLCanvasElement, res: number, roles: Map<MapId, HTMLCanvasElement>): boolean {
@@ -1358,8 +1406,9 @@ export class EditorCore {
 
   /** Low-resolution previews are disposable; the editable scene stays at native precision. */
   getPreviewCanvasElement(id: MapId): HTMLCanvasElement {
-    const res = this.adaptivePreview?.resolution(id) ?? TEXTURE_RESOLUTION;
-    if (res === MAP_BY_ID[id].workRes) {
+    const full = this.getTextureResolution();
+    const res = this.flatBackgroundOnly(id) ? 4 : this.adaptivePreview?.resolution(id, full) ?? full;
+    if (res === full) {
       this.previewDirty.delete(id);
       return this.getCanvasElement(id);
     }
@@ -1374,7 +1423,7 @@ export class EditorCore {
 
   getPreviewIllumRoleCanvas(id: MapId): HTMLCanvasElement {
     const canvas = this.getPreviewCanvasElement(id);
-    return canvas.width === MAP_BY_ID[id].workRes ? this.getIllumRoleCanvas(id) : this.previewRoles.get(id)!;
+    return canvas === this.maps.get(id)!.textureEl ? this.getIllumRoleCanvas(id) : this.previewRoles.get(id)!;
   }
 
   setActiveMap(id: MapId) {
@@ -1504,8 +1553,9 @@ export class EditorCore {
     const el = this.maps.get(this.activeMap)!.textureEl;
     const ctx = el.getContext('2d', { willReadFrequently: true });
     if (!ctx) return null;
-    const px = Math.round(x);
-    const py = Math.round(y);
+    const scale = this.getTextureResolution() / MAP_BY_ID[this.activeMap].workRes;
+    const px = Math.floor(x * scale);
+    const py = Math.floor(y * scale);
     if (px < 0 || py < 0 || px >= el.width || py >= el.height) return null;
     const d = ctx.getImageData(px, py, 1, 1).data;
     return `#${toHex2(d[0])}${toHex2(d[1])}${toHex2(d[2])}`;
@@ -1704,11 +1754,170 @@ export class EditorCore {
     return image;
   }
 
+  getSelectionMaterialLayer(): MaterialLayer | null {
+    const layer = (this.getSelection() as EditorObject | null)?.materialLayer;
+    return layer ? structuredClone(layer) : null;
+  }
+
+  private materialRegions(keys: string[], family: MaterialLayer['family']): MaterialRegion[] {
+    return [...new Set(keys)].map(key => {
+      const island = this.findIsland(key);
+      if (!island || island.family !== family) throw new Error('Une pièce du matériau est introuvable sur cette surface.');
+      return { key: island.key, label: island.label, polygons: structuredClone(island.polygons), ...(island.fillRule === 'evenodd' ? { fillRule: 'evenodd' as const } : {}) };
+    });
+  }
+
+  private pinMaterialOwnerSources(extra?: MaterialDefinition) {
+    const definitions = this.imageOwners().flatMap(({ image }) => image.materialLayer ? [image.materialLayer.definition] : []);
+    if (extra) definitions.push(extra);
+    pinMaterialSources(definitions.flatMap(definition => Object.values(definition.textures).map(texture => texture!.src)));
+  }
+
+  private runtimeMaterialDefinition(definition: MaterialDefinition): MaterialDefinition {
+    // Short URLs keep undo snapshots and slider updates independent of the PNG file size.
+    if (typeof window.URL.createObjectURL !== 'function') return structuredClone(definition);
+    this.materialSourceUrls ??= new Map();
+    const result = structuredClone(definition);
+    for (const texture of Object.values(result.textures)) {
+      if (!texture!.src.startsWith('data:')) continue;
+      let url = this.materialSourceUrls.get(texture!.src);
+      if (!url) {
+        url = this.persistentObjectUrl(new Blob([new Uint8Array(materialPngBytes(texture!.src))], { type: 'image/png' }));
+        this.materialSourceUrls.set(texture!.src, url);
+      }
+      texture!.src = url;
+    }
+    return result;
+  }
+
+  async addMaterialLayer(definition: MaterialDefinition, regions: string[] = [], exclusions: string[] = []) {
+    if (!isValidMaterialDefinition(definition)) throw new Error('Matériau invalide.');
+    const family = MAP_BY_ID[this.activeMap].group;
+    const sequence = ++this.materialUpdateSequence;
+    definition = this.runtimeMaterialDefinition(definition);
+    const layer: MaterialLayer = { definition, family,
+      regions: this.materialRegions(regions, family), exclusions: this.materialRegions(exclusions, family) };
+    if (!isValidMaterialLayer(layer)) throw new Error('Masque du matériau invalide.');
+    this.pinMaterialOwnerSources(definition);
+    try { await loadMaterialSources(definition); } catch (error) { this.pinMaterialOwnerSources(); throw error; }
+    if (sequence !== this.materialUpdateSequence) { this.pinMaterialOwnerSources(); throw new Error('Le projet a changé pendant le chargement du matériau. Réessayez.'); }
+    const image = new FabricImage(document.createElement('canvas')) as FabricImage & EditorObject;
+    image.id = nextId(); image.name = `Matériau · ${definition.name}`; image.materialLayer = layer;
+    image.imageOrder = Date.now() * 1000 + idCounter;
+    const mapId: MapId = family === 'skin' ? 'Skin_B' : family === 'details' ? 'Details_B' : 'Wheels_B';
+    const state = this.maps.get(mapId)!;
+    state.suspendHistory = true;
+    try { state.canvas.add(image); } finally { state.suspendHistory = false; }
+    this.refreshLinkedImages(); this.pushHistory(mapId);
+    if (this.activeMap !== mapId) this.setActiveMap(mapId);
+    this.setTool('select'); state.canvas.setActiveObject(image);
+    this.emit('selection'); this.emit('layers'); this.flushTexture();
+  }
+
+  async setSelectionMaterialDefinition(definition: MaterialDefinition) {
+    const image = this.getSelection() as (FabricImage & EditorObject) | null;
+    if (!image?.materialLayer) return;
+    if (!isValidMaterialDefinition(definition)) throw new Error('Matériau invalide.');
+    definition = this.runtimeMaterialDefinition(definition);
+    const sequence = ++this.materialUpdateSequence;
+    this.pinMaterialOwnerSources(definition);
+    try { await loadMaterialSources(definition); } catch (error) { this.pinMaterialOwnerSources(); throw error; }
+    if (sequence !== this.materialUpdateSequence || this.getSelection() !== image) return;
+    image.materialLayer = { ...image.materialLayer, definition: structuredClone(definition) };
+    image.name = `Matériau · ${definition.name}`;
+    this.materialInteractive = true;
+    this.refreshLinkedImages();
+    const mapId = this.imageOwners().find((owner) => owner.image === image)!.mapId;
+    this.pushHistory(mapId, 'material-definition');
+    this.emit('selection'); this.emit('layers'); this.flushTexture();
+    clearTimeout(this.materialSettleTimer);
+    this.materialSettleTimer = setTimeout(() => this.commitMaterialLayers(), 250);
+  }
+
+  setSelectionMaterialMask(regions: string[], exclusions: string[]) {
+    const image = this.getSelection() as EditorObject | null;
+    if (!image?.materialLayer) return;
+    const family = image.materialLayer.family;
+    const layer = { ...image.materialLayer, regions: this.materialRegions(regions, family), exclusions: this.materialRegions(exclusions, family) };
+    if (!isValidMaterialLayer(layer)) throw new Error('Masque du matériau invalide.');
+    image.materialLayer = layer;
+    this.refreshLinkedImages(); this.pushHistory(this.activeMap);
+    this.emit('selection'); this.emit('layers'); this.flushTexture();
+  }
+
+  commitMaterialLayers() {
+    clearTimeout(this.materialSettleTimer);
+    this.materialSettleTimer = undefined;
+    if (!this.materialInteractive) return;
+    this.materialInteractive = false; this.refreshLinkedImages(); this.flushTexture();
+  }
+
+  getMaterialSurfaceOverlays(): readonly MaterialSurfaceOverlay[] { return this.materialSurfaces ?? []; }
+
+  private renderMaterialOwner(image: FabricImage & EditorObject, wanted: Set<string>) {
+    const layer = image.materialLayer!;
+    const size = this.materialInteractive ? Math.min(512, this.getTextureResolution()) : this.getTextureResolution();
+    this.materialBakes ??= new Map();
+    this.materialSourceKeys ??= new Map();
+    const textures = Object.fromEntries(Object.entries(layer.definition.textures).map(([channel, texture]) => {
+      let sourceId = this.materialSourceKeys.get(texture!.src);
+      if (sourceId === undefined) { sourceId = this.materialSourceKeys.size; this.materialSourceKeys.set(texture!.src, sourceId); }
+      return [channel, { ...texture, src: sourceId }];
+    }));
+    const key = JSON.stringify([{ ...layer, definition: { ...layer.definition, textures } }, size, image.opacity]);
+    let bake = this.materialBakes.get(image.id!);
+    if (bake?.key !== key) {
+      const channels = renderMaterialLayer(layer, size);
+      const surface = (channel: 'normal' | 'ao') => {
+        const canvas = channels.get(channel);
+        if (!canvas) return undefined;
+        const pixels = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height);
+        if (image.opacity !== 1) for (let p = 3; p < pixels.data.length; p += 4) pixels.data[p] *= image.opacity;
+        return { width: pixels.width, height: pixels.height, data: pixels.data };
+      };
+      const surfaces = { family: layer.family, normal: layer.family === 'skin' ? undefined : surface('normal'), ao: surface('ao') };
+      // Keep only the selected bounds in Fabric; five full 4096px buffers per small piece would waste memory.
+      const points = layer.regions.flatMap(region => region.polygons.flat());
+      const x = points.length ? Math.max(0, Math.floor(Math.min(...points.map(point => point.x)) * size) - 1) : 0;
+      const y = points.length ? Math.max(0, Math.floor(Math.min(...points.map(point => point.y)) * size) - 1) : 0;
+      const right = points.length ? Math.min(size, Math.ceil(Math.max(...points.map(point => point.x)) * size) + 1) : size;
+      const bottom = points.length ? Math.min(size, Math.ceil(Math.max(...points.map(point => point.y)) * size) + 1) : size;
+      for (const [channel, canvas] of channels) {
+        if (channel === 'normal' || channel === 'ao' || channel === 'height') { channels.delete(channel); canvas.width = canvas.height = 1; continue; }
+        if (x === 0 && y === 0 && right === size && bottom === size) continue;
+        const cropped = document.createElement('canvas'); cropped.width = Math.max(1, right - x); cropped.height = Math.max(1, bottom - y);
+        cropped.getContext('2d')!.drawImage(canvas, x, y, cropped.width, cropped.height, 0, 0, cropped.width, cropped.height);
+        channels.set(channel, cropped); canvas.width = canvas.height = 1;
+      }
+      bake = { key, channels, frame: { x, y, size }, surfaces };
+      this.materialBakes.set(image.id!, bake);
+    }
+    const color = bake.channels.get('color')!;
+    if (image.getElement() !== color) {
+      image.setElement(color);
+      this.markTextureDirty(layer.family === 'skin' ? 'Skin_B' : layer.family === 'details' ? 'Details_B' : 'Wheels_B');
+    }
+    image.set({ left: bake.frame.x * TEXTURE_RESOLUTION / size, top: bake.frame.y * TEXTURE_RESOLUTION / size, originX: 'left', originY: 'top', scaleX: TEXTURE_RESOLUTION / size, scaleY: TEXTURE_RESOLUTION / size,
+      angle: 0, flipX: false, flipY: false, hasControls: false, hasBorders: false,
+      lockMovementX: true, lockMovementY: true, lockRotation: true, lockScalingX: true, lockScalingY: true, perPixelTargetFind: true, objectCaching: false });
+    image.setCoords();
+    const prefix = layer.family === 'skin' ? 'Skin' : layer.family === 'details' ? 'Details' : 'Wheels';
+    const targets: [MaterialRenderChannel, MapId, 'material' | 'light' | 'coat' | 'dirt'][] = [
+      ['roughmetal', `${prefix}_R` as MapId, 'material'], ['emission', `${prefix}_I` as MapId, 'light'],
+      ['dirt', `${prefix}_DirtMask` as MapId, 'dirt'],
+    ];
+    if (layer.family === 'skin') targets.push(['coat', 'Skin_CoatR', 'coat']);
+    for (const [channel, id, kind] of targets) {
+      const canvas = bake.channels.get(channel);
+      if (canvas) this.upsertLinkedImage(image, id, canvas, kind, wanted, bake.frame);
+    }
+  }
+
   /** Une seule image source et un seul historique ; les fragments et la matière sont des calques liés. */
   async addProjectedImage(file: File, mapId: MapId, anchor: SurfaceAnchor, withMaterial = false) {
     const image = await this.loadEditableImage(file);
     const sourceCanvas = document.createElement('canvas');
-    const scale = Math.min(1, 2048 / Math.max(image.width, image.height));
+    const scale = Math.min(1, MAX_TEXTURE_RESOLUTION / Math.max(image.width, image.height));
     sourceCanvas.width = Math.max(1, Math.round(image.width * scale));
     sourceCanvas.height = Math.max(1, Math.round(image.height * scale));
     const ctx = sourceCanvas.getContext('2d', { willReadFrequently: true })!;
@@ -1771,14 +1980,55 @@ export class EditorCore {
     return canvas;
   }
 
+  /** Older projects placed material owners on the active channel instead of the family's colour map. */
+  private normalizeMaterialOwners(): string | undefined {
+    let selectedOwner: string | undefined;
+    for (const [sourceId, source] of this.maps) for (const object of source.canvas.getObjects()) {
+      if (!(object instanceof FabricImage)) continue;
+      const image = object as FabricImage & EditorObject;
+      if (!image.materialLayer || image.linkedImageId) continue;
+      const family = image.materialLayer.family;
+      const targetId: MapId = family === 'skin' ? 'Skin_B' : family === 'details' ? 'Details_B' : 'Wheels_B';
+      if (sourceId === targetId) { image.imageOrder ??= Date.now() * 1000 + idCounter++; continue; }
+      const target = this.maps.get(targetId)!;
+      // Undoing an old channel snapshot can restore the same owner again. Replace it without duplicating its linked maps.
+      const previous = target.canvas.getObjects().find((candidate) => {
+        const owner = candidate as EditorObject;
+        return owner.id === image.id && !!owner.materialLayer && !owner.linkedImageId;
+      });
+      const previousIndex = previous ? target.canvas.getObjects().indexOf(previous) : -1;
+      const selected = (this.activeMap === sourceId && source.canvas.getActiveObjects().includes(image)) ||
+        (this.activeMap === targetId && !!previous && target.canvas.getActiveObjects().includes(previous));
+      image.id ??= nextId();
+      image.imageOrder ??= (previous as EditorObject | undefined)?.imageOrder ?? Date.now() * 1000 + idCounter++;
+      const sourceSuspended = source.suspendHistory, targetSuspended = target.suspendHistory;
+      source.suspendHistory = target.suspendHistory = true;
+      try {
+        source.canvas.remove(image);
+        if (previous) target.canvas.remove(previous);
+        target.canvas.add(image);
+        if (previousIndex >= 0) target.canvas.moveObjectTo(image, previousIndex);
+      } finally { source.suspendHistory = sourceSuspended; target.suspendHistory = targetSuspended; }
+      if (this.imageDrag?.image === image) this.imageDrag.mapId = targetId;
+      this.markTextureDirty(sourceId); this.markTextureDirty(targetId);
+      source.canvas.requestRenderAll(); target.canvas.requestRenderAll();
+      if (selected) selectedOwner = image.id;
+    }
+    return selectedOwner;
+  }
+
   /** Fragments reconstruits depuis l'image maîtresse, exclus de l'historique pour éviter toute désynchronisation. */
   refreshLinkedImages() {
     if (this.refreshingLinkedImages) return;
     this.refreshingLinkedImages = true;
     const wanted = new Set<string>();
+    let selectedOwner: string | undefined;
     try {
+      selectedOwner = this.normalizeMaterialOwners();
+      this.pinMaterialOwnerSources();
       for (const { mapId, image } of this.imageOwners()) {
         if (!image.id || isReference(image)) continue;
+        if (image.materialLayer) { this.renderMaterialOwner(image, wanted); continue; }
         const light = image.imageLightEnabled !== false ? image.imageLight : undefined;
         if (image.decal || image.imageMaterialEnabled || light) image.imageOrder ??= Date.now() * 1000 + idCounter++;
         let colors: Map<DecalFamily, ProjectionBitmap>;
@@ -1786,7 +2036,7 @@ export class EditorCore {
           const source = this.projectionSources.get(image.decal.source);
           if (!source) continue;
           const { material: _material, ...geometry } = image.decal;
-          const key = JSON.stringify(geometry);
+          const key = JSON.stringify([geometry, this.getTextureResolution()]);
           const saved = this.projectionBakes.get(image.id);
           colors = saved?.key === key ? saved.bitmaps : this.projectionBaker(image.decal, source);
           this.projectionBakes.set(image.id, { key, bitmaps: colors });
@@ -1794,7 +2044,7 @@ export class EditorCore {
           const canvas = own ? this.bitmapCanvas(own) : document.createElement('canvas');
           if (!own) { canvas.width = MAP_BY_ID[mapId].workRes; canvas.height = canvas.width; }
           image.setElement(canvas);
-          image.set({ left: 0, top: 0, originX: 'left', originY: 'top', scaleX: 1, scaleY: 1, angle: 0,
+          image.set({ left: 0, top: 0, originX: 'left', originY: 'top', scaleX: TEXTURE_RESOLUTION / canvas.width, scaleY: TEXTURE_RESOLUTION / canvas.height, angle: 0,
             flipX: false, flipY: false, clipPath: undefined, hasControls: false, hasBorders: false,
             lockMovementX: true, lockMovementY: true, lockScalingX: true, lockScalingY: true, lockRotation: true,
             perPixelTargetFind: true, objectCaching: false });
@@ -1806,12 +2056,12 @@ export class EditorCore {
           try {
             c.backgroundColor = ''; c.backgroundImage = undefined; c.setViewportTransform([...DEFAULT_VPT]);
             image.set({ opacity: 1, shadow: null });
-            mask = c.toCanvasElement(1, { filter: (object) => object === image });
+            mask = c.toCanvasElement(this.getTextureResolution() / TEXTURE_RESOLUTION, { filter: (object) => object === image });
           } finally {
             c.backgroundColor = saved.backgroundColor; c.backgroundImage = saved.backgroundImage; c.setViewportTransform(saved.vpt as TMat2D);
             image.set({ opacity: saved.opacity, shadow: saved.shadow });
           }
-          const res = MAP_BY_ID[mapId].workRes;
+          const res = this.getTextureResolution();
           colors = new Map([[MAP_BY_ID[mapId].group, { width: res, height: res, data: mask.getContext('2d')!.getImageData(0, 0, res, res).data, triangles: 1 }]]);
         } else continue;
         for (const [family, bitmap] of colors) {
@@ -1841,27 +2091,33 @@ export class EditorCore {
         sorted.forEach((entry, index) => state.canvas.moveObjectTo(entry.object, participants[index].index));
         this.markTextureDirty(id); state.canvas.requestRenderAll();
       }
+      const materialOwners = this.imageOwners().filter(({ image }) => image.materialLayer);
+      const surfaces = materialOwners.filter(({ image }) => image.visible !== false).map(({ image }) => this.materialBakes.get(image.id!)!.surfaces);
+      if (surfaces.length !== this.materialSurfaces?.length || surfaces.some((surface, index) => surface !== this.materialSurfaces[index])) this.materialSurfaces = surfaces;
+      const alive = new Set(materialOwners.map(({ image }) => image.id));
+      for (const id of this.materialBakes?.keys() ?? []) if (!alive.has(id)) this.materialBakes.delete(id);
     } finally { this.refreshingLinkedImages = false; }
+    if (selectedOwner) this.selectLinkedImageOwner(selectedOwner);
   }
 
   rebuildProjectionsForModel() {
     this.projectionBakes.clear(); this.refreshLinkedImages(); this.flushTexture(); this.emit('layers'); this.emit('selection'); this.emit('dirty');
   }
 
-  private upsertLinkedImage(owner: FabricImage & EditorObject, mapId: MapId, bitmap: PixelSource, kind: 'color' | 'material' | 'light', wanted: Set<string>) {
+  private upsertLinkedImage(owner: FabricImage & EditorObject, mapId: MapId, bitmap: PixelSource | HTMLCanvasElement, kind: 'color' | 'material' | 'light' | 'coat' | 'dirt', wanted: Set<string>, frame?: { x: number; y: number; size: number }) {
     const id = `${owner.id}:${mapId}`; wanted.add(id);
     const state = this.maps.get(mapId)!;
     let child = state.canvas.getObjects().find((object) => (object as EditorObject).id === id) as (FabricImage & EditorObject) | undefined;
-    const canvas = this.bitmapCanvas(bitmap);
+    const canvas = 'getContext' in bitmap ? bitmap : this.bitmapCanvas(bitmap);
     if (!child) {
       child = new FabricImage(canvas) as FabricImage & EditorObject;
       child.id = id; child.linkedImageId = owner.id; child.linkedImageKind = kind;
       state.suspendHistory = true;
       try { state.canvas.add(child); } finally { state.suspendHistory = false; }
     } else child.setElement(canvas);
-    child.name = `${kind === 'material' ? 'Matière' : kind === 'light' ? 'Lumière' : 'Projection'} · ${owner.name || 'Image'}`;
-    if (kind === 'light') child.illumRole = owner.imageLight?.role ?? owner.illumRole ?? 'always';
-    child.set({ left: 0, top: 0, originX: 'left', originY: 'top', scaleX: 1, scaleY: 1, angle: 0, visible: owner.visible,
+    child.name = `${kind === 'material' ? 'Matière' : kind === 'light' ? 'Lumière' : kind === 'coat' ? 'Vernis' : kind === 'dirt' ? 'Saleté' : 'Projection'} · ${owner.name || 'Image'}`;
+    if (kind === 'light') child.illumRole = owner.materialLayer?.definition.emissionRole ?? owner.imageLight?.role ?? owner.illumRole ?? 'always';
+    child.set({ left: frame ? frame.x * TEXTURE_RESOLUTION / frame.size : 0, top: frame ? frame.y * TEXTURE_RESOLUTION / frame.size : 0, originX: 'left', originY: 'top', scaleX: TEXTURE_RESOLUTION / (frame?.size ?? bitmap.width), scaleY: TEXTURE_RESOLUTION / (frame?.size ?? bitmap.height), angle: 0, visible: owner.visible,
       opacity: owner.opacity, selectable: owner.selectable, evented: owner.evented, hasControls: false, hasBorders: false,
       lockMovementX: true, lockMovementY: true, lockRotation: true, lockScalingX: true, lockScalingY: true, perPixelTargetFind: true, objectCaching: false });
     child.setCoords(); this.markTextureDirty(mapId); state.canvas.requestRenderAll();
@@ -1893,6 +2149,7 @@ export class EditorCore {
   }
   getSelectionImageMaterial(): { enabled: boolean; value: SurfaceMaterial } | null {
     const image = this.getSelection() as (FabricImage & EditorObject) | null;
+    if (image?.materialLayer) return null;
     if (!(image instanceof FabricImage) || isReference(image) || MAP_BY_ID[this.activeMap].kind !== 'basecolor') return null;
     return { enabled: !!(image.decal?.material || image.imageMaterialEnabled), value: image.decal?.material ?? image.imageMaterial ?? this.defaultImageMaterial(this.activeMap) };
   }
@@ -1979,6 +2236,7 @@ export class EditorCore {
     const res = MAP_BY_ID[mapId].workRes;
     const islandKey = image.clipPath ? imageIslandAt(MAP_BY_ID[mapId].group, center.x / res, 1 - center.y / res) : undefined;
     this.imageDrag = { mapId, image, pointer: point, center,
+      ...((image as EditorObject).materialLayer ? { patternOffset: { x: (image as EditorObject).materialLayer!.definition.transform.offsetX, y: (image as EditorObject).materialLayer!.definition.transform.offsetY } } : {}),
       islandKey,
       clearance: islandKey ? Math.min(imageIslandClearance(MAP_BY_ID[mapId].group, islandKey, center.x / res, 1 - center.y / res), .45 * Math.min(image.getScaledWidth(), image.getScaledHeight()) / res) : 0,
       changed: false };
@@ -1990,6 +2248,17 @@ export class EditorCore {
   moveImageDrag(x: number, y: number) {
     const drag = this.imageDrag;
     if (!drag) return false;
+    const layer = (drag.image as EditorObject).materialLayer;
+    if (layer && drag.patternOffset) {
+      const offsetX = Math.max(-16384, Math.min(16384, drag.patternOffset.x + x - drag.pointer.x));
+      const offsetY = Math.max(-16384, Math.min(16384, drag.patternOffset.y + y - drag.pointer.y));
+      if (offsetX === layer.definition.transform.offsetX && offsetY === layer.definition.transform.offsetY) return true;
+      (drag.image as EditorObject).materialLayer = { ...layer, definition: { ...layer.definition, transform: { ...layer.definition.transform, offsetX, offsetY } } };
+      drag.changed = true; this.materialInteractive = true;
+      this.refreshLinkedImages(); this.flushTexture(); this.emit('selection');
+      clearTimeout(this.materialSettleTimer); this.materialSettleTimer = setTimeout(() => this.commitMaterialLayers(), 250);
+      return true;
+    }
     const res = MAP_BY_ID[drag.mapId].workRes;
     const next = new Point(
       Math.max(0, Math.min(res, drag.center.x + x - drag.pointer.x)),
@@ -2208,10 +2477,11 @@ export class EditorCore {
     const st = this.maps.get(id);
     if (!st) throw new Error(`Map inconnue : ${id}`);
     const c = st.canvas;
-    const res = MAP_BY_ID[id].workRes;
     const sw = source.width;
     const sh = source.height;
     if (!sw || !sh) throw new Error(`Image importée vide (0×0) pour ${MAP_BY_ID[id].fileName}`);
+    // Preserve a native 4K import even when the current output setting is lower.
+    const res = Math.min(MAX_TEXTURE_RESOLUTION, Math.max(MAP_BY_ID[id].workRes, sw, sh));
 
     const raster = this.canvasFromImageSource(source);
     const fitted = document.createElement('canvas');
@@ -2265,6 +2535,12 @@ export class EditorCore {
         const litPixel = importedCodes.findIndex((_code, p) => Math.max(pixels[p * 4], pixels[p * 4 + 1], pixels[p * 4 + 2]) > 20);
         image.illumRole = roleFromAlpha(importedCodes[litPixel] ?? 255);
       }
+    }
+
+    const sceneScale = MAP_BY_ID[id].workRes / res;
+    if (sceneScale !== 1) for (const image of images) {
+      image.set({ left: image.left * sceneScale, top: image.top * sceneScale, scaleX: image.scaleX * sceneScale, scaleY: image.scaleY * sceneScale });
+      image.setCoords();
     }
 
     const stale = c.getObjects().filter((o) => {
@@ -2398,6 +2674,8 @@ export class EditorCore {
         const copy = clone as EditorObject;
         copy.decal = undefined; copy.linkedImageId = undefined; copy.linkedImageKind = undefined;
         copy.illumCodes = undefined;
+        copy.materialLayer = undefined;
+        if ((obj as EditorObject).materialLayer) copy.set({ hasControls: true, hasBorders: true, lockMovementX: false, lockMovementY: false, lockScalingX: false, lockScalingY: false, lockRotation: false });
         copy.imageMaterial = undefined; copy.imageMaterialEnabled = false; copy.imageOrder = undefined; copy.imageLight = undefined; copy.imageLightEnabled = undefined;
         (clone as FabricObject & { id?: string }).id = nextId();
         const srcName = (obj as FabricObject & { name?: string }).name;
@@ -2441,6 +2719,8 @@ export class EditorCore {
     // The new element is independent of UV-piece, symmetry and 3D-image owners.
     copy.mirrorOf = undefined; copy.blenderPart = undefined; copy.partColor = undefined;
     copy.decal = undefined; copy.linkedImageId = undefined; copy.linkedImageKind = undefined;
+    copy.materialLayer = undefined;
+    if ((object as EditorObject).materialLayer) copy.set({ hasControls: true, hasBorders: true, lockMovementX: false, lockMovementY: false, lockScalingX: false, lockScalingY: false, lockRotation: false });
     copy.imageMaterial = undefined; copy.imageMaterialEnabled = false; copy.imageOrder = undefined;
     copy.imageLight = undefined; copy.imageLightEnabled = undefined; copy.illumCodes = undefined;
     copy.illumRole = MAP_BY_ID[targetId].kind === 'illum' ? this.illumToolRole : undefined;
@@ -2460,11 +2740,13 @@ export class EditorCore {
   getLayers(): LayerInfo[] {
     const c = this.canvas;
     const active = new Set(c.getActiveObjects());
+    const owners = new Map(this.imageOwners().map(({ image }) => [image.id, image]));
     return c
       .getObjects()
       .filter((o) => !this.isSpeedLight(o))
       .map((o) => {
-        const obj = o as FabricObject & { id?: string; name?: string };
+        const obj = o as EditorObject;
+        const owner = obj.linkedImageId ? owners.get(obj.linkedImageId) : obj;
         return {
           id: obj.id ?? '',
           name: obj.name || this.defaultName(obj),
@@ -2472,7 +2754,12 @@ export class EditorCore {
           visible: obj.visible !== false,
           locked: !obj.selectable,
           selected: active.has(obj),
-          linked: !!(obj as EditorObject).linkedImageId,
+          linked: !!obj.linkedImageId,
+          ...(owner?.materialLayer ? { material: {
+            name: owner.materialLayer.definition.name,
+            ownerId: owner.id ?? '',
+            linked: !!obj.linkedImageId,
+          } } : {}),
         };
       })
       .reverse();
@@ -2551,29 +2838,81 @@ export class EditorCore {
     this.emit('layers');
   }
 
-  moveLayer(id: string, dir: 'up' | 'down' | 'top' | 'bottom') {
-    const obj = this.findById(id);
-    if (!obj) return;
-    const c = this.canvas;
-    if ((obj as EditorObject).linkedImageId) return;
-    if (dir === 'up') c.bringObjectForward(obj);
-    else if (dir === 'down') c.sendObjectBackwards(obj);
-    else if (dir === 'top') c.bringObjectToFront(obj);
-    else c.sendObjectToBack(obj);
-    if ((obj as EditorObject).imageOrder !== undefined) {
-      const owners = new Map(this.imageOwners().map(({ image }) => [image.id, image]));
-      const peers = c.getObjects().map((object) => (object as EditorObject).linkedImageId ? owners.get((object as EditorObject).linkedImageId) : object as EditorObject)
-        .filter((object): object is EditorObject => object?.imageOrder !== undefined);
-      const index = peers.indexOf(obj as EditorObject);
-      const before = peers[index - 1]?.imageOrder; const after = peers[index + 1]?.imageOrder;
-      if (before !== undefined && after !== undefined) (obj as EditorObject).imageOrder = (before + after) / 2;
-      else if (before !== undefined) (obj as EditorObject).imageOrder = before + 1;
-      else if (after !== undefined) (obj as EditorObject).imageOrder = after - 1;
-      this.refreshLinkedImages();
-    }
+  private layerMoveGroup(object: FabricObject): Set<FabricObject> {
+    const group = new Set([object]);
+    const mirror = this.symmetry ? this.mirrorPartner(object, this.canvas) : undefined;
+    if (mirror && !(mirror as EditorObject).linkedImageId && !this.isSpeedLight(mirror)) group.add(mirror);
+    return group;
+  }
+
+  /** Plan shared image ranks without modifying owners on another channel. */
+  private movedImageRanks(objects: FabricObject[], moving: Set<FabricObject>): { owner: EditorObject; order: number }[] | null {
+    const owners = new Map(this.imageOwners().map(({ image }) => [image.id, image]));
+    const peers = [...new Set(objects.map((object) => (object as EditorObject).linkedImageId
+      ? owners.get((object as EditorObject).linkedImageId) : object as EditorObject))]
+      .filter((owner): owner is EditorObject => owner?.imageOrder !== undefined);
+    const moved = peers.filter((owner) => moving.has(owner));
+    if (!moved.length) return [];
+    let first = peers.indexOf(moved[0]), last = peers.indexOf(moved.at(-1)!);
+    const rankRange = () => {
+      const count = last - first + 1, low = peers[first - 1]?.imageOrder, high = peers[last + 1]?.imageOrder;
+      const step = Math.max(1, Math.abs(low ?? high ?? 0) * Number.EPSILON * 4);
+      const values = Array.from({ length: count }, (_, index) => low !== undefined && high !== undefined
+        ? low + (high - low) * (index + 1) / (count + 1)
+        : low !== undefined ? low + step * (index + 1)
+        : high !== undefined ? high - step * (count - index) : index);
+      if (values.some((value, index) => !Number.isFinite(value) ||
+        (index ? value <= values[index - 1] : low !== undefined && value <= low)) ||
+        (high !== undefined && values.at(-1)! >= high)) return null;
+      return values.map((order, index) => ({ owner: peers[first + index], order }));
+    };
+    const ranks = rankRange();
+    if (ranks) return ranks;
+    // Large timestamp ranks can run out of midpoint precision after repeated
+    // moves. Rebalance this channel's neighbouring owners within fixed external
+    // bounds, so one local undo still restores every changed owner.
+    const local = new Set(objects.filter((object) => !(object as EditorObject).linkedImageId));
+    while (first > 0 && local.has(peers[first - 1])) first--;
+    while (last + 1 < peers.length && local.has(peers[last + 1])) last++;
+    return rankRange();
+  }
+
+  /** before/after follow getLayers(): the visible list starts with the top layer. */
+  moveLayerRelative(sourceId: string, targetId: string, position: 'before' | 'after'): boolean {
+    if (position !== 'before' && position !== 'after') return false;
+    const source = this.findById(sourceId), target = this.findById(targetId);
+    if (!source || !target || source === target || (source as EditorObject).linkedImageId ||
+      this.isSpeedLight(source) || this.isSpeedLight(target)) return false;
+    const c = this.canvas, objects = c.getObjects(), moving = this.layerMoveGroup(source);
+    const targetGroup = this.layerMoveGroup(target);
+    if ([...targetGroup].some((object) => moving.has(object))) return false;
+    const rest = objects.filter((object) => !moving.has(object));
+    const targetIndices = rest.map((object, index) => targetGroup.has(object) ? index : -1).filter((index) => index >= 0);
+    const insertion = position === 'before' ? Math.max(...targetIndices) + 1 : Math.min(...targetIndices);
+    const ordered = [...rest.slice(0, insertion), ...objects.filter((object) => moving.has(object)), ...rest.slice(insertion)];
+    if (ordered.every((object, index) => object === objects[index])) return false;
+    const ranks = this.movedImageRanks(ordered, moving);
+    if (!ranks) return false;
+    ordered.forEach((object, index) => c.moveObjectTo(object, index));
+    ranks.forEach(({ owner, order }) => { owner.imageOrder = order; });
+    if (ranks.length) this.refreshLinkedImages();
     c.requestRenderAll();
     this.pushHistory(this.activeMap);
     this.emit('layers');
+    return true;
+  }
+
+  moveLayer(id: string, dir: 'up' | 'down' | 'top' | 'bottom') {
+    const object = this.findById(id);
+    if (!object || (object as EditorObject).linkedImageId || this.isSpeedLight(object)) return;
+    const group = this.layerMoveGroup(object);
+    const objects = this.canvas.getObjects().filter((layer) => !this.isSpeedLight(layer)).reverse();
+    const indices = objects.map((layer, index) => group.has(layer) ? index : -1).filter((index) => index >= 0);
+    const target = dir === 'up' ? objects[Math.min(...indices) - 1]
+      : dir === 'down' ? objects[Math.max(...indices) + 1]
+      : dir === 'top' ? objects.find((layer) => !group.has(layer))
+      : [...objects].reverse().find((layer) => !group.has(layer));
+    if (target) this.moveLayerRelative(id, (target as EditorObject).id!, dir === 'up' || dir === 'top' ? 'before' : 'after');
   }
 
   /**
@@ -2617,6 +2956,7 @@ export class EditorCore {
     if ((obj as EditorObject).linkedImageId) {
       const kind = (obj as EditorObject).linkedImageKind;
       if (!this.selectLinkedImageOwner((obj as EditorObject).linkedImageId!)) return;
+      if ((this.getSelection() as EditorObject | null)?.materialLayer) { this.deleteSelection(); return; }
       if (kind === 'material') this.setImageMaterialEnabled(false);
       else if (kind === 'light' && MAP_BY_ID[this.activeMap].kind === 'basecolor') this.setImageLightEnabled(false);
       else this.deleteSelection();
@@ -2634,14 +2974,14 @@ export class EditorCore {
     if ((obj as EditorObject).decal) {
       const decal = (obj as EditorObject).decal!;
       (clone as EditorObject).decal = { ...decal, center: decal.center.map((v, i) => v + decal.tangent[i] * .12) as Vec3 };
-    } else clone.set({ left: (obj.left ?? 0) + 24, top: (obj.top ?? 0) + 24 });
+    } else if (!(obj as EditorObject).materialLayer) clone.set({ left: (obj.left ?? 0) + 24, top: (obj.top ?? 0) + 24 });
     (clone as EditorObject).id = nextId();
     (clone as EditorObject).imageOrder = Date.now() * 1000 + idCounter;
     (clone as EditorObject).mirrorOf = undefined;
     st.suspendHistory = true;
     try {
       c.add(clone);
-      if (this.symmetry && !(obj as EditorObject).decal) await this.createMirror(clone, c, this.activeMap);
+      if (this.symmetry && !(obj as EditorObject).decal && !(obj as EditorObject).materialLayer) await this.createMirror(clone, c, this.activeMap);
     } finally {
       st.suspendHistory = false;
     }
@@ -3303,11 +3643,13 @@ export class EditorCore {
     data.workRes = c.width;
     if ((c as LightCanvas).illumRole) data.illumRole = (c as LightCanvas).illumRole;
     data.objects = data.objects.filter((object: { linkedImageId?: string }) => !object.linkedImageId);
+    for (const object of data.objects as Record<string, unknown>[]) if (object.materialLayer) object.src = MATERIAL_PLACEHOLDER;
     return JSON.stringify(data);
   }
 
   /** Archive les originaux PNG, jamais les URLs temporaires ni les fragments recalculables. */
   async captureProject() {
+    this.commitMaterialLayers();
     this.endHistoryCoalescing(); this.endImageDrag();
     const maps = {} as ProjectMaps; const assets = new Map<string, Blob>();
     const imagePaths = new Map<string, string>();
@@ -3334,7 +3676,31 @@ export class EditorCore {
       if (json.decal && typeof json.decal === 'object') (json.decal as Record<string, unknown>).source = path;
     };
     const packObject = async (object: FabricObject, json: Record<string, unknown>) => {
-      if (object instanceof FabricImage) await packImage(object as FabricImage & EditorObject, json);
+      if (object instanceof FabricImage) {
+        const layer = (object as EditorObject).materialLayer;
+        if (layer) {
+          await loadMaterialSources(layer.definition);
+          const placeholder = await FabricImage.fromURL(MATERIAL_PLACEHOLDER);
+          try { await packImage(placeholder as FabricImage & EditorObject, json); } finally { placeholder.dispose(); }
+          const saved = json.materialLayer as MaterialLayer;
+          for (const [channel, texture] of Object.entries(layer.definition.textures)) {
+            const native = getMaterialSourceCanvas(texture!.src);
+            if (!native) throw new Error('Une texture originale du matériau est indisponible.');
+            let path = imagePaths.get(texture!.src);
+            if (!path) {
+              // Keep the exact imported PNG (including numeric 16-bit height).
+              // Canvas re-encoding loses precision and prevents deduplication
+              // with the relief workshop's original source assets.
+              const response = await fetch(texture!.src, { signal: AbortSignal.timeout(20_000) });
+              if (!response.ok) throw new Error('Texture originale impossible à sauvegarder.');
+              const blob = await response.blob();
+              if (blob.size > 64 * 1024 * 1024) throw new Error('Texture originale trop volumineuse.');
+              path = `assets/image-${assets.size}.png`; assets.set(path, blob); imagePaths.set(texture!.src, path);
+            }
+            saved.definition.textures[channel as keyof MaterialDefinition['textures']]!.src = path;
+          }
+        } else await packImage(object as FabricImage & EditorObject, json);
+      }
       if (object instanceof Group && Array.isArray(json.objects)) {
         const children = object.getObjects();
         for (let i = 0; i < children.length; i++) await packObject(children[i], json.objects[i] as Record<string, unknown>);
@@ -3352,16 +3718,22 @@ export class EditorCore {
   }
 
   /** Tous les calques sont chargés dans des canvas temporaires avant de remplacer le projet courant. */
-  async loadProject(maps: ProjectMaps, globals: { speedColor: string; illumRole: IllumRole }) {
+  async loadProject(maps: ProjectMaps, globals: { speedColor: string; illumRole: IllumRole; textureResolution?: TextureResolution }) {
+    ++this.materialUpdateSequence;
+    if (globals.textureResolution !== undefined && !isTextureResolution(globals.textureResolution)) throw new Error('Résolution de texture invalide.');
     const staged = new Map<MapId, StaticCanvas>();
     const sources = new Map<string, PixelSource>();
     try {
+      const materialDefinitions = Object.values(maps).flatMap(map => (map.objects as { materialLayer?: MaterialLayer }[]).flatMap(object => object.materialLayer ? [object.materialLayer.definition] : []));
+      pinMaterialSources(materialDefinitions.flatMap(definition => Object.values(definition.textures).map(texture => texture!.src)));
+      for (const definition of materialDefinitions) await loadMaterialSources(definition);
       for (const def of MAPS) {
         const canvas = new StaticCanvas(document.createElement('canvas'), { width: def.workRes, height: def.workRes, renderOnAddRemove: false });
         staged.set(def.id, canvas);
         await canvas.loadFromJSON(upgradeMapResolution(maps[def.id]));
         for (const object of canvas.getObjects()) {
           const image = object as FabricImage & EditorObject;
+          if (image.materialLayer) await loadMaterialSources(image.materialLayer.definition);
           if (!(image instanceof FabricImage) || !image.decal || sources.has(image.decal.source)) continue;
           const original = await FabricImage.fromURL(image.decal.source);
           try {
@@ -3373,10 +3745,13 @@ export class EditorCore {
         }
       }
       this.endImageDrag(); this.endHistoryCoalescing();
+      this.textureResolution = globals.textureResolution ?? TEXTURE_RESOLUTION;
       this.projectionSources = sources; this.projectionBakes.clear();
       this.speedLightColor = globals.speedColor;
       for (const [id, temporary] of staged) {
         const state = this.maps.get(id)!; const canvas = state.canvas;
+        if (state.textureEl) state.textureEl.width = state.textureEl.height = 1;
+        const oldRoles = this.illumRoles?.get(id); if (oldRoles) oldRoles.width = oldRoles.height = 1;
         state.suspendHistory = true;
         try {
           canvas.discardActiveObject(); canvas.clear();
@@ -3392,6 +3767,10 @@ export class EditorCore {
       }
       this.refreshLinkedImages(); this.resetAllBaselines();
       this.emit('speed-color'); this.emit('layers'); this.emit('selection'); this.flushTexture();
+    } catch (error) {
+      this.pinMaterialOwnerSources();
+      for (const { image } of this.imageOwners()) if (image.materialLayer) await loadMaterialSources(image.materialLayer.definition);
+      throw error;
     } finally { for (const canvas of staged.values()) await canvas.dispose(); }
   }
 
@@ -3515,7 +3894,7 @@ export class EditorCore {
     for (const [id, st] of this.maps) {
       maps.set(id, { snap: this.serialize(st.canvas), undo: st.undo.slice(), redo: st.redo.slice() });
     }
-    return { maps };
+    return { maps, textureResolution: this.getTextureResolution() };
   }
 
   private checkpointChanged(st: MapState, saved: CheckpointEntry): boolean {
@@ -3528,6 +3907,7 @@ export class EditorCore {
 
   /** Revient à l'état du point de reprise (contenu + historique) sur chaque map modifiée depuis. */
   async restoreCheckpoint(cp: HistoryCheckpoint) {
+    this.setTextureResolution(cp.textureResolution ?? TEXTURE_RESOLUTION);
     for (const [id, original] of cp.maps) {
       const saved = { snap: upgradeResolutionSnapshot(original.snap), undo: original.undo.map(upgradeResolutionSnapshot), redo: original.redo.map(upgradeResolutionSnapshot) };
       const st = this.maps.get(id);
@@ -3563,6 +3943,7 @@ export class EditorCore {
   }
 
   private async restore(st: MapState, snap: string) {
+    ++this.materialUpdateSequence;
     const c = st.canvas;
     // Ids des objets sélectionnés : loadFromJSON vide le canvas (et la sélection),
     // on la rétablit ensuite pour que le panneau Propriétés reste ouvert.
@@ -3575,10 +3956,12 @@ export class EditorCore {
     try {
       const json = upgradeMapResolution(JSON.parse(snap));
       await c.loadFromJSON(json);
+      this.pinMaterialOwnerSources();
       syncTextureBackgroundCanvas(c);
       if (typeof json.illumRole === 'string' && ['always', 'head', 'brake'].includes(json.illumRole)) (c as LightCanvas).illumRole = json.illumRole as IllumRole;
       for (const o of c.getObjects()) o.setCoords();
       for (const { image } of this.imageOwners()) {
+        if (image.materialLayer) await loadMaterialSources(image.materialLayer.definition);
         if (!image.decal || this.projectionSources.has(image.decal.source)) continue;
         const original = await FabricImage.fromURL(image.decal.source);
         const source = document.createElement('canvas'); source.width = original.width; source.height = original.height;
@@ -3646,6 +4029,11 @@ export class EditorCore {
   }
 
   dispose() {
+    ++this.materialUpdateSequence;
+    clearTimeout(this.materialSettleTimer);
+    this.materialBakes?.clear(); this.materialSurfaces = [];
+    this.materialSourceUrls?.clear(); this.materialSourceKeys?.clear();
+    pinMaterialSources([]);
     this.adaptivePreview?.dispose();
     this.unwireViewport();
     this.resizeObserver.disconnect();

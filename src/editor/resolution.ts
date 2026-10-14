@@ -1,6 +1,12 @@
-/** Every editable atlas and full-quality DDS uses the same pixel coordinate space. */
+/** Stable scene coordinates; output pixels can change without resampling source layers. */
 export const TEXTURE_RESOLUTION = 2048;
 export const LEGACY_TEXTURE_RESOLUTION = 1024;
+export const TEXTURE_RESOLUTIONS = [1024, 2048, 4096] as const;
+export type TextureResolution = typeof TEXTURE_RESOLUTIONS[number];
+export const MAX_TEXTURE_RESOLUTION = 4096;
+export function isTextureResolution(value: unknown): value is TextureResolution {
+  return typeof value === 'number' && TEXTURE_RESOLUTIONS.some((size) => size === value);
+}
 
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 

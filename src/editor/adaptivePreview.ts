@@ -32,8 +32,8 @@ export class AdaptivePreview {
     this.cancelPending = this.schedule(() => this.settle(), PREVIEW_SETTLE_MS);
   }
 
-  resolution(id: MapId) {
-    return this.reduced.has(id) ? EDITING_PREVIEW_RESOLUTION : TEXTURE_RESOLUTION;
+  resolution(id: MapId, fullResolution: number = TEXTURE_RESOLUTION) {
+    return this.reduced.has(id) ? Math.min(EDITING_PREVIEW_RESOLUTION, fullResolution) : fullResolution;
   }
 
   setEnabled(enabled: boolean) {

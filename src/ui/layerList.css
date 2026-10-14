@@ -1,0 +1,14 @@
+.layer-list--sortable .layer-row { position: relative; gap: 5px; padding-left: 4px; }
+.layer-grip { display: grid; place-items: center; flex: 0 0 18px; width: 18px; align-self: stretch; color: var(--fg-3); cursor: grab; touch-action: none; border-radius: var(--r-md); }
+.layer-grip:hover, .layer-grip:focus-visible { color: var(--fg); background: var(--bg-2); }
+.layer-grip:disabled { cursor: default; opacity: .35; }
+.layer-list--sortable.is-dragging, .layer-list--sortable.is-dragging * { cursor: grabbing; user-select: none; }
+.layer-list--sortable .is-drag-source { opacity: .45; }
+.layer-list--sortable .is-drop-before::before, .layer-list--sortable .is-drop-after::after { content: ''; position: absolute; left: 3px; right: 3px; height: 2px; background: var(--accent); border-radius: 2px; box-shadow: 0 0 0 1px var(--bg-0); pointer-events: none; z-index: 1; }
+.layer-list--sortable .is-drop-before::before { top: -1px; }
+.layer-list--sortable .is-drop-after::after { bottom: -1px; }
+.layer-drag-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+@media (pointer: coarse) {
+  .layer-list--sortable .layer-row { min-height: 40px; }
+  .layer-grip { flex-basis: 24px; width: 24px; }
+}

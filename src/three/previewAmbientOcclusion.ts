@@ -3,6 +3,7 @@ import { decodeDDS, type RGBAImage } from '../dds';
 import type { Skin3DFile } from '../skin3d';
 import { isWheelTreadPreset, normalizeWheelSurface, type WheelSurfaceSettings } from '../wheelSurface';
 import { getWheelTreadOcclusion } from '../wheelTreads';
+import { attenuateMaterialAO, composeMaterialSurface, type MaterialSurfaceOverlay } from '../materials/surfaceMaps';
 
 export const AO_TEXTURE_FILES = ['Skin_AO.dds', 'Details_AO.dds', 'Wheels_AO.dds'] as const;
 export type AmbientOcclusionFile = typeof AO_TEXTURE_FILES[number];
@@ -57,6 +58,8 @@ export function resolveAmbientOcclusion(
  * The native atlases are valid only for the official Stadium UV layout.
  */
 export class PreviewAmbientOcclusion {
+  private materialOverlays: readonly MaterialSurfaceOverlay[] = [];
+  private materialComposites = new Map<AmbientOcclusionFile, { source: RGBAImage | null; overlays: readonly MaterialSurfaceOverlay[]; image: RGBAImage | null }>();
   private imported = new Map<AmbientOcclusionFile, RGBAImage>();
   private native = new Map<AmbientOcclusionFile, RGBAImage>();
   private textures = new Map<AmbientOcclusionFile, { image: RGBAImage; texture: THREE.DataTexture }>();
@@ -124,21 +127,38 @@ export class PreviewAmbientOcclusion {
     return file === 'Skin_AO.dds' ? this.materials.skin : file === 'Details_AO.dds' ? this.materials.details : this.materials.wheels;
   }
 
+  setMaterialOverlays(overlays: readonly MaterialSurfaceOverlay[]) {
+    if (this.materialOverlays === overlays) return;
+    this.materialOverlays = overlays; this.sync();
+  }
+
+  private materialImage(file: AmbientOcclusionFile, source: RGBAImage | null) {
+    const cached = this.materialComposites.get(file);
+    if (cached?.source === source && cached.overlays === this.materialOverlays) return cached.image;
+    const family = file === 'Skin_AO.dds' ? 'skin' : file === 'Details_AO.dds' ? 'details' : 'wheels';
+    const overlays = this.materialOverlays.filter(layer => layer.family === family && layer.ao).map(layer => layer.ao!);
+    const image = composeMaterialSurface(source, overlays, false);
+    this.materialComposites.set(file, { source, overlays: this.materialOverlays, image });
+    return image;
+  }
+
   private sync() {
     if (this.disposed) return;
     for (const file of AO_TEXTURE_FILES) {
       const material = this.material(file);
       const wheel = file === 'Wheels_AO.dds';
-      const image = wheel
+      const source = wheel
         ? this.wheelSurface.mode === 'smooth' || this.wheelSurface.strength === 0
           ? null
           : isWheelTreadPreset(this.wheelSurface.mode)
             ? this.officialModel ? getWheelTreadOcclusion(this.wheelSurface.mode) : null
             : resolveAmbientOcclusion(file, this.imported, this.native, this.officialModel, this.importedWheelNormal)
         : resolveAmbientOcclusion(file, this.imported, this.native, this.officialModel, this.importedWheelNormal);
+      const hasMaterialAO = this.materialOverlays.some(layer => layer.family === (file === 'Skin_AO.dds' ? 'skin' : file === 'Details_AO.dds' ? 'details' : 'wheels') && layer.ao);
+      const image = this.materialImage(file, wheel && hasMaterialAO ? attenuateMaterialAO(source, this.wheelSurface.strength) : source);
       const previous = this.textures.get(file);
       if (image && previous?.image === image) {
-        if (material.aoMap === previous.texture) material.aoMapIntensity = wheel ? this.wheelSurface.strength : 1;
+        if (material.aoMap === previous.texture) material.aoMapIntensity = wheel && !hasMaterialAO ? this.wheelSurface.strength : 1;
         continue;
       }
       if (previous) {
@@ -159,7 +179,7 @@ export class PreviewAmbientOcclusion {
         texture.needsUpdate = true;
         this.textures.set(file, { image, texture });
         material.aoMap = texture;
-        material.aoMapIntensity = wheel ? this.wheelSurface.strength : 1;
+        material.aoMapIntensity = wheel && !hasMaterialAO ? this.wheelSurface.strength : 1;
       }
       material.needsUpdate = true;
     }
@@ -168,6 +188,7 @@ export class PreviewAmbientOcclusion {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    this.materialComposites.clear(); this.materialOverlays = [];
     for (const [file, { texture }] of this.textures) {
       const material = this.material(file);
       if (material.aoMap === texture) {

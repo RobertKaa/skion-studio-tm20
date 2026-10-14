@@ -10,6 +10,7 @@ import { ILLUM_ROLES, MAPS, isDirtMask, mapIdFromFileName, type IllumRole, type 
 import { UV_GUIDE_ISLANDS } from './uvGuideData';
 import { ambientOcclusionFile, decodeAmbientOcclusion } from './three/previewAmbientOcclusion';
 import { HORN_FILE_NAME, MAX_HORN_SOURCE_BYTES, normalizeHornAudio, prepareHorn, type SkinHorn } from './horn';
+import { isTextureResolution, type TextureResolution } from './editor/resolution';
 import {
   SKIN3D_MESH_FILE,
   SKIN3D_PREVIEW_FILE,
@@ -56,6 +57,10 @@ function nextAnimationFrame(): Promise<void> {
 }
 
 export interface ExportSources {
+  /** Selected raster resolution; editable layer coordinates stay independent of it. */
+  textureResolution?: TextureResolution;
+  /** Optional per-channel caps, used by compact exports before allocating RGBA. */
+  mapResolutions?: Partial<Record<MapId, TextureResolution>>;
   horn?: SkinHorn | null;
   /** False exports black dirt masks, while leaving editable masks untouched. */
   dirtEnabled?: boolean;
@@ -84,10 +89,8 @@ export interface ExportSources {
   flush?: () => void;
   /**
    * Plafond FACULTATIF de résolution d'export (px), appliqué à CHAQUE map :
-   * la résolution effective devient `min(def.exportRes, maxExportRes)`. Permet
-   * d'offrir un réglage de qualité dans l'UI (ex. 2048 « Haute », 1024
-   * « Standard », 512 « Légère ») sans toucher aux maps.ts. Non fourni ⇒ chaque
-   * map garde son `exportRes`. Les maps en aplat sont de toute façon rétrécies.
+   * la résolution effective devient `min(textureResolution ?? def.exportRes, maxExportRes)`.
+   * Les maps en aplat sont de toute façon rétrécies.
    */
   maxExportRes?: number;
 }
@@ -392,6 +395,12 @@ export async function exportSkinZip(
   skinName: string,
   sources: ExportSources,
 ): Promise<Blob> {
+  if (sources.textureResolution !== undefined && !isTextureResolution(sources.textureResolution)) throw new Error('Résolution de texture invalide.');
+  if (sources.mapResolutions !== undefined && (sources.mapResolutions === null || typeof sources.mapResolutions !== 'object'
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(sources.mapResolutions))
+    || Object.entries(sources.mapResolutions).some(([id, size]) => !MAPS.some(map => map.id === id) || !isTextureResolution(size)))) {
+    throw new Error('Résolution de canal invalide.');
+  }
   // 1) Force le rendu synchrone de toutes les maps si l'appelant le fournit…
   sources.flush?.();
   // 2) …puis laisse fabric vider ses `requestRenderAll` en attente (2 frames)
@@ -401,10 +410,15 @@ export async function exportSkinZip(
 
   const images = {} as Record<MapId, RGBAImage>;
   for (const def of MAPS) {
+    const selected = Math.min(sources.textureResolution ?? def.exportRes, sources.mapResolutions?.[def.id] ?? Infinity);
     const res = sources.maxExportRes
-      ? Math.min(def.exportRes, sources.maxExportRes)
-      : def.exportRes;
-    images[def.id] = canvasToRGBA(sources.getMapCanvas(def.id), res);
+      ? Math.min(selected, sources.maxExportRes)
+      : selected;
+    const canvas = sources.getMapCanvas(def.id);
+    // Blank editable channels already have a tiny, exact preview. Avoid expanding
+    // them to 4096² only to shrink them again after the uniform-colour check.
+    const flat = def.id !== 'Details_I' && canvas.width === FLAT_MAP_RES && canvas.height === FLAT_MAP_RES ? canvasToRGBA(canvas, FLAT_MAP_RES) : null;
+    images[def.id] = flat && uniformColor(flat) ? flat : canvasToRGBA(canvas, res);
   }
   const iconTGA = sources.icon ? encodeTGA(canvasToRGBA(sources.icon, 256)) : undefined;
   const illumRolesByMap: Partial<Record<MapId, RGBAImage>> = {};

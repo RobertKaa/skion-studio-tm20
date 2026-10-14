@@ -35,6 +35,22 @@ __pycache__/
 
 # Local test suites and inspection utilities
 /scripts/test-*
+# Product regression coverage for the browser material workflow
+!/scripts/test-material-render.ts
+!/scripts/test-material-import.ts
+!/scripts/test-material-exr.ts
+!/scripts/test-material-library.ts
+!/scripts/test-material-layers.ts
+!/scripts/test-material-surfaces.ts
+!/scripts/test-materials-ui.tsx
+!/scripts/test-layer-reorder.ts
+!/scripts/test-layer-drag.tsx
+!/scripts/test-relief-prototype.ts
+!/scripts/test-relief-export.ts
+!/scripts/test-relief-dialog.tsx
+!/scripts/test-relief-preview.ts
+!/scripts/test-dds.ts
+!/scripts/test-preview-surface-textures.ts
 **/__tests__/
 **/*.test.ts
 **/*.test.tsx
@@ -52,6 +68,7 @@ __pycache__/
 # Blender sources and custom-skin construction tools (local only)
 /scripts/blender/
 /scripts/**/*.py
+!/scripts/prepare-relief-prototype.py
 /scripts/build-3d-skin.ps1
 /scripts/repack-skin-mesh.ts
 /scripts/pack-*.ts

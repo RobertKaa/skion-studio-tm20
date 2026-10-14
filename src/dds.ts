@@ -626,10 +626,13 @@ function decodeDDSInternal(buf: ArrayBuffer): RGBAImage | null {
     // BC5 à deux canaux. Attention à la convention de canaux selon le FourCC :
     //   - « ATI2 »/« A2XY » : sous-bloc 0 = VERT, sous-bloc 1 = ROUGE
     //     (ATI2 = BC5U avec R et G échangés — même convention qu'à l'encodage).
+    //   - « ATI2 » + marqueur « A2XY » dans dwRGBBitCount : second échange,
+    //     sous-bloc 0 = ROUGE, sous-bloc 1 = VERT (normales natives Nadeo).
     //   - « BC5U »          : sous-bloc 0 = ROUGE, sous-bloc 1 = VERT (standard).
-    // On décode ainsi chaque .dds vers R = rugosité, G = métal, quelle que soit
-    // la variante d'origine.
-    const swapped = !isFourCC('BC5U'); // ATI2 / A2XY => échangé
+    // NVIDIA Texture Tools 2024.1.1 documents this extra DDS swizzle code.
+    // Only ATI2 uses that marker; other formats keep their existing layout.
+    const nativeSwizzle = isFourCC('ATI2') && dv.getUint32(88, true) === fourCC('A2XY');
+    const swapped = !isFourCC('BC5U') && !nativeSwizzle;
     const firstChannel = swapped ? 1 : 0; // canal du sous-bloc 0
     const secondChannel = swapped ? 0 : 1; // canal du sous-bloc 1
     for (let by = 0; by < bh; by++) {
