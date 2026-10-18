@@ -9,13 +9,14 @@
   height: 100%;
   pointer-events: none;
   z-index: 3;
-  opacity: 0.85;
+  opacity: 1;
 }
 
 .uv-guide-overlay__poly {
   fill-opacity: 0.04;
   stroke-width: calc(1.25px / var(--uv-guide-zoom, 1));
-  stroke-opacity: 0.8;
+  stroke-opacity: 0.95;
+  filter: drop-shadow(0 0 .65px rgba(8, 16, 24, .9));
   vector-effect: non-scaling-stroke;
   stroke-linejoin: round;
   stroke-linecap: round;
@@ -28,10 +29,22 @@
   text-anchor: middle;
   dominant-baseline: middle;
   paint-order: stroke;
-  stroke: rgba(0, 0, 0, 0.6);
+  stroke: rgba(8, 16, 24, 0.85);
   stroke-width: calc(3px / var(--uv-guide-zoom, 1));
   stroke-linejoin: round;
   opacity: 0.9;
+}
+
+/* Atlas headings stay readable over white paint as well as the neutral base. */
+.uv-guide-overlay__atlas-frame text {
+  paint-order: stroke fill;
+  stroke: rgba(8, 16, 24, .85);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.uv-guide-overlay__atlas-frame > rect {
+  stroke-opacity: .5;
+  filter: drop-shadow(0 0 .65px rgba(8, 16, 24, .9));
 }
 
 .uv-guide-overlay__group--dimmed .uv-guide-overlay__poly {

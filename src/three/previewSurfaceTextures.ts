@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import type { RGBAImage } from '../dds';
 import type { Skin3DFile } from '../skin3d';
+import { cachedAtlasPixels } from '../realUvTextures';
+import type { AtlasSourceLayout } from '../realUvAtlas';
 import { composeMaterialSurface, type MaterialSurfaceOverlay } from '../materials/surfaceMaps';
 import {
   applyWheelRelief, decodeNormalVectors, getWheelTreadNormal, isWheelTreadPreset,
@@ -45,6 +47,7 @@ export class PreviewSurfaceTextures {
   private native = new Map<NormalTextureFile, RGBAImage>();
   private textures = new Map<NormalTextureFile, { image: RGBAImage; texture: THREE.DataTexture }>();
   private officialModel = true;
+  private atlasSource?:AtlasSourceLayout;
   private skinNormalEnabled = false;
   private wheelSurface = normalizeWheelSurface(undefined);
   private wheelTransform: { source: RGBAImage; strength: number; image: RGBAImage } | null = null;
@@ -115,6 +118,7 @@ export class PreviewSurfaceTextures {
     this.officialModel = official;
     this.sync();
   }
+  setAtlasSource(source?:AtlasSourceLayout){if(this.atlasSource===source)return;this.atlasSource=source;this.wheelTransform=null;this.sync();}
 
   /** Skin_N is bound only when the loaded custom mesh explicitly requests it. */
   setSkinNormalEnabled(enabled: boolean) {
@@ -137,8 +141,9 @@ export class PreviewSurfaceTextures {
     // The generated atlas is authored for the official Stadium UV islands.
     // Use the same explicit flat fallback as export on unknown custom UVs.
     if (isWheelTreadPreset(mode)) {
-      if (!this.officialModel) return SMOOTH_WHEEL_NORMAL;
+      if (!this.officialModel&&!this.atlasSource) return SMOOTH_WHEEL_NORMAL;
       source = getWheelTreadNormal(mode, this.native.get('Wheels_N.dds'));
+      if(this.atlasSource)source=cachedAtlasPixels(source,'wheels',this.atlasSource);
     }
     if (!source) return null;
     if (this.wheelTransform?.source === source && this.wheelTransform.strength === strength) return this.wheelTransform.image;
@@ -152,7 +157,8 @@ export class PreviewSurfaceTextures {
     for (const file of NORMAL_TEXTURE_FILES) {
       const material = file === 'Skin_N.dds' ? this.materials.skin : file === 'Details_N.dds' ? this.materials.details : this.materials.wheels;
       if (!material) continue;
-      const source = resolveNormalTexture(file, this.imported, this.native, this.officialModel);
+      const raw = resolveNormalTexture(file, this.imported, this.native, this.officialModel||!!this.atlasSource);
+      const source=raw&&this.atlasSource&&!this.imported.has(file)?cachedAtlasPixels(raw,file==='Details_N.dds'?'details':file==='Wheels_N.dds'?'wheels':'skin',this.atlasSource):raw;
       const image = file === 'Skin_N.dds' && !this.skinNormalEnabled ? null : this.materialImage(file, file === 'Wheels_N.dds' ? this.wheelImage(source) : source);
       const previous = this.textures.get(file);
       if (previous?.image === image) continue;

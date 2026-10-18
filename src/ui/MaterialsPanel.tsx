@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type { UvGuideFamily, UvGuideIsland } from '../uvGuideData';
-import { createMaterialDefinition, type MaterialChannel, type MaterialDefinition, type MaterialLayer, type MaterialTexture } from '../materials/types';
+import { UV_GUIDE_BY_FAMILY } from '../uvGuideData';
+import { detailsRegionOnSide, detailsSideLabel, detailsWholeSide } from '../detailsSides';
+import { panelCanvasRegion, panelGuide } from '../underbodyPanel';
+import { createMaterialDefinition, type MaterialChannel, type MaterialDefinition, type MaterialLayer, type MaterialTexture, type MaterialProjection } from '../materials/types';
 import { MATERIAL_PRESETS } from '../materials/presets';
 import { hasProceduralMaterialRelief, loadMaterialSources, renderMaterialLayer } from '../materials/render';
 import { listMaterials, removeMaterial, saveMaterial, setMaterialFavorite, type StoredMaterial } from '../materials/library';
@@ -18,6 +21,10 @@ const CHANNELS = Object.keys(CHANNEL_LABELS) as MaterialChannel[];
 const percent = (value: number) => `${Math.round(value * 100)} %`;
 const bytePercent = (value: number) => `${Math.round(value / 255 * 100)} %`;
 const fullRegion = { key: 'preview', label: 'Aperçu', polygons: [[{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }]] };
+const alignedPreset = (definition: MaterialDefinition, projection: MaterialProjection = 'surface'): MaterialDefinition => ({
+  ...definition,
+  transform: { ...definition.transform, projection, ...(definition.transform.mode === 'stretch' ? { mode: 'cover' as const } : {}) },
+});
 
 /** The swatch uses the same material renderer as the actual atlas. */
 function MaterialSwatch({ definition, family, large = false }: { definition: MaterialDefinition; family: UvGuideFamily; large?: boolean }) {
@@ -28,7 +35,8 @@ function MaterialSwatch({ definition, family, large = false }: { definition: Mat
     setUnavailable(false);
     void loadMaterialSources(definition).then(() => {
       if (disposed || !canvas.current) return;
-      const image = renderMaterialLayer({ definition, family, regions: [fullRegion], exclusions: [] }, 128).get('color');
+      const swatch = { ...definition, transform: { ...definition.transform, projection: 'uv' as const } };
+      const image = renderMaterialLayer({ definition: swatch, family, regions: [fullRegion], exclusions: [] }, 128).get('color');
       const context = canvas.current.getContext('2d');
       if (!image || !context) return;
       context.clearRect(0, 0, 128, 128);
@@ -55,9 +63,15 @@ export interface MaterialsPanelProps {
   onError(message: string): void;
 }
 
-export function MaterialsPanel({ family, islands, selectedRegion, selection, disabled, onApply, onChange, onChangeMask, onCommit, onError }: MaterialsPanelProps) {
-  const [draft, setDraft] = useState(() => selection?.definition ?? createMaterialDefinition('carbon'));
-  const [scope, setScope] = useState<Scope>(() => selection ? (selection.regions.length === 1 && selection.regions[0].key === selectedRegion?.key ? 'selected' : selection.regions.length ? 'parts' : 'all') : selectedRegion ? 'selected' : 'all');
+export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, selection, disabled, onApply, onChange, onChangeMask, onCommit, onError }: MaterialsPanelProps) {
+  const placement=selection?.atlasFrame?.placement;
+  const selectedRegion = selection?.atlasSide && !chosenRegion?.key.includes(`:side:${selection.atlasSide}`)
+    ||placement==='right'&&chosenRegion?.key!=='d_floor:panel:right'||placement==='base'&&chosenRegion?.key==='d_floor:panel:right'? null : chosenRegion;
+  const wholeSideKey = selection?.atlasFrame ? panelCanvasRegion(selection.atlasFrame.placement).key : selection?.atlasSide ? detailsWholeSide(selection.atlasSide).key : null;
+  const wheelPlacement=family==='wheels'&&islands.some(i=>i.key==='tyres:tread');
+  const autoAlignment: MaterialProjection = wheelPlacement ? /^tyres:(inner|outer)/.test(selectedRegion?.key ?? '') ? 'wheel-face' : 'wheel' : 'surface';
+  const [draft, setDraft] = useState(() => selection?.definition ?? alignedPreset(createMaterialDefinition('carbon'), autoAlignment));
+  const [scope, setScope] = useState<Scope>(() => selection ? (selection.regions.length === 1 && selection.regions[0].key === wholeSideKey ? 'all' : selection.regions.length === 1 && selection.regions[0].key === selectedRegion?.key ? 'selected' : selection.regions.length ? 'parts' : 'all') : selectedRegion ? 'selected' : 'all');
   const [regions, setRegions] = useState<string[]>(() => selection?.regions.map((region) => region.key) ?? []);
   const [exclusions, setExclusions] = useState<string[]>(() => selection?.exclusions.map((region) => region.key) ?? []);
   const [library, setLibrary] = useState<StoredMaterial[]>([]);
@@ -83,6 +97,10 @@ export function MaterialsPanel({ family, islands, selectedRegion, selection, dis
   onErrorRef.current = onError;
   const selectedDefinition = selection?.definition;
   const selectionPresent = !!selection;
+  useEffect(() => {
+    if (!selectionPresent && family === 'wheels') setDraft(previous => ['surface','wheel','wheel-face'].includes(previous.transform.projection ?? '')
+      ? { ...previous, transform: { ...previous.transform, projection: autoAlignment } } : previous);
+  }, [autoAlignment, family, selectionPresent]);
   const maskKey = selection ? JSON.stringify([selection.regions.map((region) => region.key), selection.exclusions.map((region) => region.key)]) : '';
 
   useEffect(() => {
@@ -93,10 +111,10 @@ export function MaterialsPanel({ family, islands, selectedRegion, selection, dis
       const [included, excluded] = JSON.parse(maskKey) as [string[], string[]];
       setRegions(included);
       setExclusions(excluded);
-      if (pendingMask.current !== maskKey) setScope(included.length === 1 && included[0] === selectedRegionRef.current?.key ? 'selected' : included.length ? 'parts' : 'all');
+      if (pendingMask.current !== maskKey) setScope(included.length === 1 && included[0] === wholeSideKey ? 'all' : included.length === 1 && included[0] === selectedRegionRef.current?.key ? 'selected' : included.length ? 'parts' : 'all');
       pendingMask.current = null;
     }
-  }, [maskKey]);
+  }, [maskKey, wholeSideKey]);
   useEffect(() => {
     if (!selectionPresent) {
       setRegions([]);
@@ -116,7 +134,9 @@ export function MaterialsPanel({ family, islands, selectedRegion, selection, dis
   }, []);
 
   const unavailable = disabled || busy;
-  const visibleIslands = islands.filter((island) => island.family === family);
+  const visibleIslands = placement==='right'?[panelGuide('right')]:selection?.atlasSide
+    ? UV_GUIDE_BY_FAMILY.details.map(island => detailsRegionOnSide(island, selection.atlasSide!))
+    : islands.filter((island) => island.family === family&&(placement!=='base'||island.key!=='d_floor:panel:right'));
   const visibleKeys = new Set(visibleIslands.map((island) => island.key));
   // Precise elements retain their names even when the parent guide only lists whole pieces.
   const retainedRegions = [...(selection?.family === family ? [...selection.regions, ...selection.exclusions] : []), ...(selectedRegion?.family === family ? [selectedRegion] : [])];
@@ -124,10 +144,13 @@ export function MaterialsPanel({ family, islands, selectedRegion, selection, dis
     visibleIslands.push({ ...region, family });
     visibleKeys.add(region.key);
   }
-  const targetRegions = scope === 'all' ? [] : scope === 'selected' ? (selectedRegion ? [selectedRegion.key] : []) : regions;
+  const targetRegions = scope === 'all' ? (wholeSideKey ? [wholeSideKey] : []) : scope === 'selected' ? (selectedRegion ? [selectedRegion.key] : []) : regions;
   const targetValid = scope === 'all' || targetRegions.length > 0;
   const textureEntries = CHANNELS.filter((channel) => draft.textures[channel]);
   const materialImageCount = new Set(Object.values(draft.textures).flatMap((source) => source ? [source.src] : [])).size;
+  const projection = draft.transform.projection ?? 'uv';
+  const onCar = projection !== 'uv';
+  const following = projection === 'surface' || projection === 'wheel' || projection === 'wheel-face';
 
   function change(next: MaterialDefinition, commit = false) {
     setDraft(next);
@@ -142,7 +165,7 @@ export function MaterialsPanel({ family, islands, selectedRegion, selection, dis
     setScope(nextScope);
     setRegions(nextRegions);
     setExclusions(nextExclusions);
-    const keys = nextScope === 'all' ? [] : nextScope === 'selected' ? (selectedRegion ? [selectedRegion.key] : []) : nextRegions;
+    const keys = nextScope === 'all' ? (wholeSideKey ? [wholeSideKey] : []) : nextScope === 'selected' ? (selectedRegion ? [selectedRegion.key] : []) : nextRegions;
     if (selection && (nextScope === 'all' || keys.length)) {
       pendingMask.current = JSON.stringify([keys, nextExclusions]);
       onChangeMask(keys, nextExclusions); onCommit();
@@ -206,11 +229,11 @@ export function MaterialsPanel({ family, islands, selectedRegion, selection, dis
       </div>
       <div className="materials-grid" role="tabpanel" aria-label={tab === 'presets' ? 'Matériaux prêts à utiliser' : tab === 'favorites' ? 'Matériaux favoris' : 'Mes matériaux'}>
         {tab === 'presets' ? MATERIAL_PRESETS.map((preset) => <button key={preset.id} type="button" className={`material-card${draft.preset === preset.id && draft.name === preset.definition.name ? ' is-active' : ''}`} disabled={unavailable} title={preset.hint}
-          onClick={() => change(structuredClone(preset.definition), true)}>
+          onClick={() => change(alignedPreset(structuredClone(preset.definition), autoAlignment), true)}>
           <MaterialSwatch definition={preset.definition} family={family} />
           <span>{preset.label}</span>
         </button>) : saved.map((item) => <div className="material-saved" key={item.id}>
-          <button type="button" className="material-card" disabled={unavailable} title={`Utiliser ${item.definition.name}`} onClick={() => change(structuredClone(item.definition), true)}>
+          <button type="button" className="material-card" disabled={unavailable} title={`Utiliser ${item.definition.name}`} onClick={() => change(alignedPreset(structuredClone(item.definition), autoAlignment), true)}>
             <MaterialSwatch definition={item.definition} family={family} /><span>{item.definition.name}</span>
           </button>
           <div className="material-saved-actions">
@@ -232,7 +255,9 @@ export function MaterialsPanel({ family, islands, selectedRegion, selection, dis
             if (!targetUnchanged(target)) return;
             const imported = await importMaterialFilesDetailed(files, { maxTextureSize: importQuality });
             if (!targetUnchanged(target)) return;
-            change(imported.definition, true);
+            const compatible=!['wheel','wheel-face'].includes(imported.definition.transform.projection??'')||wheelPlacement;
+            const next = imported.preservedPlacement&&compatible ? imported.definition : alignedPreset(imported.definition, autoAlignment);
+            change(next, true);
             setImportNotices(imported.notices);
             setStatus('Images importées. Vérifiez leur affectation dans « Images et canaux ».');
           });
@@ -261,10 +286,15 @@ export function MaterialsPanel({ family, islands, selectedRegion, selection, dis
   return <div className="materials-panel" aria-busy={busy}>
     <div className="materials-intro">
       <div className="materials-intro-title"><Icon name="layers" size={16} /><strong>Matériaux</strong><span className="materials-local-badge">Sans installation</span></div>
-      <p className="hint">{selection ? 'La couleur et la finition de ce matériau restent liées. Modifiez leur placement et leurs réglages ici.' : 'Un motif, ses images et sa finition réunis dans un seul calque.'}</p>
+      <p className="hint">Le motif épouse les courbes de la surface choisie : carrosserie, détails ou roues. Sa couleur et ses finitions se règlent ensemble.</p>
     </div>
     {selection ? currentMaterial : libraryPanel}
     {!selection && currentMaterial}
+    <div className={`material-surface-follow${following ? ' is-active' : ''}`} role="group" aria-label="Application sur la surface 3D">
+      <div className="material-surface-follow-title"><Icon name={family === 'wheels' ? 'circle' : 'box'} size={15} /><strong>{family === 'wheels' && following ? projection === 'wheel-face' ? 'Flanc vu de face' : 'Enroulement autour du pneu' : following ? 'Suivi de la surface 3D' : 'Placement depuis une vue ou la feuille UV'}</strong></div>
+      <p>{family === 'wheels' ? 'La bande de roulement se déroule sur un tour complet. Les flancs disposent d’un placement circulaire pour préserver les proportions des images.' : following ? 'Le motif suit le volume des pièces, avec des proportions et une échelle cohérentes. Les zones choisies délimitent son application.' : 'Pour que ce matériau accompagne les courbes, activez le suivi de surface. Vos images et les pièces sélectionnées sont conservées.'}</p>
+      {!following && <button type="button" className="btn btn-sm btn-full" disabled={unavailable} onClick={() => change(alignedPreset(draft, autoAlignment), true)}>{family === 'wheels' ? 'Adapter le motif aux roues' : 'Suivre la surface 3D'}</button>}
+    </div>
     {importNotices.length > 0 && <details className="materials-import-report" role="status" aria-live="polite" aria-label="Informations d’import"><summary><span>Import terminé · voir le détail</span><span className="materials-import-count" title="Images du matériau">{materialImageCount} image{materialImageCount > 1 ? 's' : ''}</span></summary><ul>{importNotices.map((notice, index) => <li key={`${index}:${notice}`}>{notice}</li>)}</ul></details>}
 
     <fieldset className="materials-fields" disabled={unavailable}>
@@ -282,19 +312,37 @@ export function MaterialsPanel({ family, islands, selectedRegion, selection, dis
     <details className="material-details" open>
       <summary>Placement du motif</summary>
       <fieldset className="materials-fields" disabled={unavailable}>
+        <label className="material-select-row">Alignement<select aria-label="Alignement de la matière" value={projection}
+          onChange={(event) => { const projection = event.target.value as MaterialDefinition['transform']['projection']; changeTransform({ projection, ...(['surface','wheel','wheel-face'].includes(projection ?? '') && draft.transform.mode === 'stretch' ? { mode: 'cover' as const } : {}) }); onCommit(); }}>
+          {wheelPlacement && <><option value="wheel">Pneu · enroulement 360°</option><option value="wheel-face">Flanc · vue circulaire</option></>}
+          {(family !== 'wheels' || projection === 'surface') && <option value="surface">{family === 'wheels' ? 'Pneu · suivi de surface' : 'Suivre la surface 3D'}</option>}
+          <option value="top">Voiture · dessus</option>
+          <option value="triplanar">Projection sur 3 axes</option>
+          <option value="side">Voiture · côté</option>
+          <option value="front">Voiture · face</option>
+          <option value="uv">Feuille UV</option>
+        </select></label>
+        <p className="hint material-placement-hint">{family === 'wheels' && following
+          ? projection === 'wheel-face' ? 'Pour une image ou un logo sur le flanc, choisissez Couvrir ou Contenir. Le placement suit une vue de face de la roue.' : 'Le placement utilise la largeur et la circonférence réelles du pneu. En mode Répéter, le pas et l’angle s’ajustent légèrement pour raccorder le motif après un tour, sans étirer l’image.'
+          : projection === 'surface'
+          ? 'Le motif accompagne les courbes de la pièce en préservant ses proportions. Répéter convient aux matières. Des raccords restent possibles aux courbes les plus fortes.'
+          : projection === 'triplanar'
+          ? 'Trois projections sont mélangées sur les courbes. Ce mode peut estomper ou dédoubler un motif : préférez Suivre la surface 3D pour un tissage.'
+          : onCar ? 'L’image traverse les pièces depuis cette vue. Pour une illustration sur le capot et les épaules, choisissez Dessus puis Couvrir.'
+          : 'L’image suit la feuille UV. Les pièces séparées sur cette feuille peuvent couper le motif en 3D.'}</p>
         <div className="material-fit" role="group" aria-label="Placement des textures">
-          {([['repeat', 'Répéter'], ['cover', 'Couvrir'], ['contain', 'Contenir'], ['stretch', 'Étirer']] as const).map(([mode, label]) => <button type="button" key={mode} aria-pressed={draft.transform.mode === mode} className={draft.transform.mode === mode ? 'is-active' : ''}
+          {([['repeat', 'Répéter'], ['cover', 'Couvrir'], ['contain', 'Contenir'], ['stretch', 'Étirer']] as const).map(([mode, label]) => <button type="button" key={mode} disabled={following && mode === 'stretch'} title={following && mode === 'stretch' ? 'Le suivi de surface conserve le format de l’image. Choisissez Couvrir ou Contenir.' : undefined} aria-pressed={(following && draft.transform.mode === 'stretch' ? 'cover' : draft.transform.mode) === mode} className={(following && draft.transform.mode === 'stretch' ? 'cover' : draft.transform.mode) === mode ? 'is-active' : ''}
             onClick={() => { changeTransform({ mode }); onCommit(); }}>{label}</button>)}
         </div>
-        <SliderField label="Taille du motif" value={draft.transform.size} min={8} max={2048} step={8} format={(size) => `${size} px`} title="Taille sur une texture de référence de 2048 px." onChange={(size) => changeTransform({ size })} onCommit={onCommit} />
+        <SliderField label="Taille du motif" value={draft.transform.size} min={8} max={2048} step={8} format={(size) => onCar ? `${Math.round(size / (draft.transform.mode === 'repeat' ? 2048 : 256) * 1000) / 10} %` : `${size} px`} title={onCar ? (draft.transform.mode === 'repeat' ? 'Largeur du motif par rapport à la longueur de la voiture.' : '100 % ajuste l’image à la voiture.') : 'Taille sur une texture de référence de 2048 px.'} onChange={(size) => changeTransform({ size })} onCommit={onCommit} />
         <SliderField label="Rotation" value={draft.transform.angle} min={-180} max={180} format={(angle) => `${angle}°`} onChange={(angle) => changeTransform({ angle })} onCommit={onCommit} />
-        <SliderField label="Décalage X" value={draft.transform.offsetX} min={-2048} max={2048} step={8} format={(offset) => `${offset} px`} onChange={(offsetX) => changeTransform({ offsetX })} onCommit={onCommit} />
-        <SliderField label="Décalage Y" value={draft.transform.offsetY} min={-2048} max={2048} step={8} format={(offset) => `${offset} px`} onChange={(offsetY) => changeTransform({ offsetY })} onCommit={onCommit} />
+        <SliderField label="Décalage X" value={draft.transform.offsetX} min={-2048} max={2048} step={8} format={(offset) => onCar ? `${Math.round(offset / 2048 * 1000) / 10} %` : `${offset} px`} onChange={(offsetX) => changeTransform({ offsetX })} onCommit={onCommit} />
+        <SliderField label="Décalage Y" value={draft.transform.offsetY} min={-2048} max={2048} step={8} format={(offset) => onCar ? `${Math.round(offset / 2048 * 1000) / 10} %` : `${offset} px`} onChange={(offsetY) => changeTransform({ offsetY })} onCommit={onCommit} />
         <div className="material-check-row">
           <label><input type="checkbox" checked={draft.transform.flipX} onChange={(event) => { changeTransform({ flipX: event.target.checked }); onCommit(); }} />Miroir X</label>
           <label><input type="checkbox" checked={draft.transform.flipY} onChange={(event) => { changeTransform({ flipY: event.target.checked }); onCommit(); }} />Miroir Y</label>
         </div>
-        <p className="hint">Augmentez la taille si le motif paraît lisse en 3D. Toutes les images suivent le même placement.</p>
+        <p className="hint">Toutes les images utilisent le même placement. {onCar ? 'Les zones choisies limitent la peinture sans déplacer le motif. Les pièces qui partagent les mêmes UV restent liées.' : 'Augmentez la taille si le motif paraît lisse en 3D.'}</p>
       </fieldset>
     </details>
 
@@ -367,7 +415,7 @@ export function MaterialsPanel({ family, islands, selectedRegion, selection, dis
           {visibleIslands.length === 0 && <p className="hint">Aucune pièce nommée pour cette surface. Choisissez « Tout ».</p>}
         </div>}
         {scope === 'parts' && regions.length === 0 && <p className="hint">Cochez au moins une pièce pour appliquer le matériau.</p>}
-        {scope === 'all' && <p className="material-zone-summary">Toute la surface {family === 'skin' ? 'Carrosserie' : family === 'details' ? 'Détails' : 'Roues'}.</p>}
+        {scope === 'all' && <p className="material-zone-summary">{placement==='right'?'Tout le panneau inférieur droit.':placement==='base'?'Tous les détails, sauf le panneau inférieur droit transféré.':selection?.atlasSide ? `Tous les détails du côté ${detailsSideLabel(selection.atlasSide)}.` : `Toute la surface ${family === 'skin' ? 'Carrosserie' : family === 'details' ? 'Détails' : 'Roues'}.`}</p>}
         {visibleIslands.length > 0 && <details className="material-exclusions"><summary>Exclure des pièces {exclusions.length > 0 && `(${exclusions.length})`}</summary><div className="material-region-list" aria-label="Pièces exclues">
           {visibleIslands.map((island) => <label key={island.key}><input type="checkbox" checked={exclusions.includes(island.key)} onChange={(event) => changeMask(scope, regions, event.target.checked ? [...exclusions, island.key] : exclusions.filter((key) => key !== island.key))} /><span>{island.label}</span></label>)}
         </div></details>}

@@ -8,6 +8,7 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { DemandRenderLoop } from './DemandRenderLoop';
 import { StudioEnvironment } from './StudioEnvironment';
 import { StadiumEnvironment } from './StadiumEnvironment';
 import { STUDIO_LIGHTING, lightingPreset, previewLighting, resolvePreviewEnvironment, type PreviewEnvironment } from '../previewEnvironment';
@@ -18,6 +19,7 @@ import { VehicleRigPreview, REST_VEHICLE_POSE, poseIsActive, type VehiclePose } 
 import { MAPS, MAP_BY_ID, isDirtMask, type IllumRole, type MapId } from '../maps';
 import { previewDirtPixels } from '../dirt';
 import { speedLightMask } from '../skinZip';
+import type { DetailsLayout } from '../detailsSides';
 import { lightIsOn, roleFromAlpha } from '../illumination';
 import { continuousImageUV, imageIslandAt } from '../editor/imagePlacement';
 import { bakeProjection, type DecalProjection, type PixelSource, type ProjectionTriangle, type SurfaceAnchor, type Vec3 } from './decalProjection';
@@ -29,7 +31,10 @@ import { ExportColorPreview, type ExportMaterialImage } from './ExportColorPrevi
 import { decodeSurfaceMaterial } from '../material';
 import type { WheelSurfaceSettings } from '../wheelSurface';
 import type { Skin3DFile } from '../skin3d';
-import { hasExperimentalSkinNormalShader, previewMaterialSlot } from './materialSlots';
+import { hasExperimentalSkinNormalShader, previewMeshMaterialSlot } from './materialSlots';
+import type { UvGuideIsland } from '../uvGuideData';
+import { planUvFocus, uvFocusView, type UvFocusPlan } from './uvFocus';
+import { REAL_UV_ATLAS, type UvAtlasVersion } from '../realUvAtlas';
 
 /** Modèle servi statiquement depuis public/models/ (fiable en dev et prod). */
 const CAR_MODEL_RESOURCE_PATH = `${import.meta.env?.BASE_URL ?? '/'}models/car/`;
@@ -55,6 +60,7 @@ export interface Paint3DHandler {
 
 export type Interaction3D = 'navigate' | 'paint' | 'image' | 'place';
 export interface PreviewViewState { position: Vec3; target: Vec3 }
+export interface UvPreviewFocus { label: string; isolated: boolean; occurrence: number; occurrences: number }
 export interface Image3DHandler {
   begin: (family: PaintFamily, u: number, v: number, anchor: SurfaceAnchor) => boolean | 'projection';
   move: (family: PaintFamily, u: number, v: number, anchor: SurfaceAnchor) => boolean | void;
@@ -65,15 +71,10 @@ export interface Image3DHandler {
   transformEnd?: () => void;
 }
 
-function materialSlot(name: string): MaterialSlot {
-  return previewMaterialSlot(name);
-}
-
 function slotFromObject(mesh: THREE.Mesh): MaterialSlot {
   const mat = mesh.material;
   const matName = (Array.isArray(mat) ? mat[0]?.name : mat?.name) ?? '';
-  const fromMaterial = materialSlot(matName);
-  return fromMaterial === 'other' ? materialSlot(mesh.name) : fromMaterial;
+  return previewMeshMaterialSlot(matName, mesh.name);
 }
 
 function fitModelToGround(root: THREE.Object3D): number {
@@ -96,6 +97,9 @@ function fitModelToGround(root: THREE.Object3D): number {
 
 export class CarPreview {
   onModelReady: (() => void) | null = null;
+  onUvFocusChange: ((focus: UvPreviewFocus | null) => void) | null = null;
+  private uvFocus: { region: UvGuideIsland; plan: UvFocusPlan; root: THREE.Group; isolated: boolean; previous: PreviewViewState; minDistance: number; near: number } | null = null;
+  private uvFocusScene: { projection: readonly ProjectionTriangle[]; triangles: readonly ProjectionTriangle[] } | null = null;
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
@@ -129,6 +133,8 @@ export class CarPreview {
   /** Rôle des zones peintes hors vitesse. Les feux arrière restent allumés. */
   private illumRole: IllumRole = 'always';
   private illumination = new Map<MapId, { source: HTMLCanvasElement; roles?: HTMLCanvasElement; canvas: HTMLCanvasElement; texture?: THREE.CanvasTexture }>();
+  private detailsLayout?: DetailsLayout;
+  private uvAtlas?:UvAtlasVersion;
   private carRoot = new THREE.Group();
   /** Racine du modèle courant (FBX officiel ou GLB custom), pour la remplacer. */
   private modelRoot: THREE.Object3D | null = null;
@@ -137,7 +143,7 @@ export class CarPreview {
   private importedMaterials: THREE.Material[] = [];
   private loadingEl: HTMLDivElement;
   private loading = true;
-  private raf = 0;
+  private frameLoop?: DemandRenderLoop;
   private resizeObserver: ResizeObserver;
   private container: HTMLElement;
   private disposed = false;
@@ -195,6 +201,8 @@ export class CarPreview {
   private onDblClick = (e: MouseEvent) => this.handleDblClick(e);
   private onKeyDown = (e: KeyboardEvent) => this.handleKey(e, true);
   private onKeyUp = (e: KeyboardEvent) => this.handleKey(e, false);
+  private onControlsChange = () => this.requestRender();
+  private onVisibilityChange = () => this.updateRenderVisibility();
   private onBlur = () => {
     this.finishInteraction();
     this.moveKeys.clear();
@@ -239,6 +247,8 @@ export class CarPreview {
     this.controls.screenSpacePanning = true;
     this.controls.panSpeed = 1.1;
     this.controls.addEventListener('start', this.onControlsStart);
+    this.controls.addEventListener('change', this.onControlsChange);
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
     this.applyMouseButtons();
 
     const dom = this.renderer.domElement;
@@ -250,6 +260,7 @@ export class CarPreview {
     dom.addEventListener('pointerenter', this.onPointerEnter);
     dom.addEventListener('pointerleave', this.onPointerLeave);
     dom.addEventListener('dblclick', this.onDblClick);
+    dom.addEventListener('webglcontextrestored', this.onControlsChange);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('blur', this.onBlur);
@@ -290,12 +301,12 @@ export class CarPreview {
       { skin: this.skinMat, details: this.detailsMat, wheels: this.wheelsMat },
       this.renderer.capabilities.getMaxAnisotropy(),
     );
-    void this.surfaceTextures.loadNativeTextures();
+    void this.surfaceTextures.loadNativeTextures().then(() => this.requestRender());
     this.ambientOcclusion = new PreviewAmbientOcclusion(
       { skin: this.skinMat, details: this.detailsMat, wheels: this.wheelsMat },
       this.renderer.capabilities.getMaxAnisotropy(),
     );
-    void this.ambientOcclusion.loadNativeTextures();
+    void this.ambientOcclusion.loadNativeTextures().then(() => this.requestRender());
     this.exportColorPreview = new ExportColorPreview(
       { Skin_B: this.skinMat, Details_B: this.detailsMat, Wheels_B: this.wheelsMat },
       this.renderer.capabilities.getMaxAnisotropy(),
@@ -323,17 +334,25 @@ export class CarPreview {
     // The loading overlay reports startup errors; explicit replacements must reject.
     void this.loadCarModel().catch(() => {});
 
-    const loop = (now: number) => {
-      this.raf = requestAnimationFrame(loop);
+    this.frameLoop = new DemandRenderLoop((now: number) => {
       const dt = this.lastFrame ? Math.min(0.05, (now - this.lastFrame) / 1000) : 0;
       this.lastFrame = now;
       this.applyKeyboardMove(dt);
-      this.controls.update();
+      const moving = this.controls.update();
       this.updateGroundVisibility();
       this.renderer.render(this.scene, this.camera);
       this.updateProjectionGuide();
-    };
-    this.raf = requestAnimationFrame(loop);
+      return moving || this.moveKeys.size > 0;
+    });
+    this.updateRenderVisibility();
+    this.requestRender();
+  }
+
+  private requestRender() { this.frameLoop?.invalidate(); }
+
+  private updateRenderVisibility() {
+    this.lastFrame = 0;
+    this.frameLoop?.setActive(!document.hidden && this.container.clientWidth > 0 && this.container.clientHeight > 0);
   }
 
   private async loadCarModel(): Promise<boolean> {
@@ -360,10 +379,10 @@ export class CarPreview {
    * de la Stadium Car officielle. Les matériaux sont rebranchés sur les mêmes
    * atlas (le nom doit contenir skin / detail / wheel / glass).
    */
-  async loadCustomPreview(buffer: ArrayBuffer, options: { nativeSurfaceLayout?: boolean } = {}): Promise<void> {
+  async loadCustomPreview(buffer: ArrayBuffer, options: { nativeSurfaceLayout?: boolean; detailsLayout?: DetailsLayout } = {}): Promise<void> {
     embeddedGlbData(buffer);
     const generation = ++this.loadGeneration;
-    if (!await this.installModel(buffer, 'glb', generation)) throw new Error('Le chargement du modèle personnalisé a été interrompu.');
+    if (!await this.installModel(buffer, 'glb', generation, options.detailsLayout)) throw new Error('Le chargement du modèle personnalisé a été interrompu.');
     if (options.nativeSurfaceLayout) {
       this.surfaceTextures.setOfficialModel(true);
       this.ambientOcclusion.setOfficialModel(true);
@@ -392,7 +411,7 @@ export class CarPreview {
     });
   }
 
-  private async installModel(buffer: ArrayBuffer, kind: 'fbx' | 'glb', generation: number) {
+  private async installModel(buffer: ArrayBuffer, kind: 'fbx' | 'glb', generation: number, detailsLayout?: DetailsLayout) {
     const model = await this.parseModel(buffer, kind);
     if (this.disposed || generation !== this.loadGeneration) return false;
     let hasMesh = false;
@@ -400,6 +419,10 @@ export class CarPreview {
     if (!hasMesh) throw new Error('Le modèle ne contient aucun maillage de voiture.');
 
     this.detachModel();
+    if (this.detailsLayout !== detailsLayout) {
+      this.detailsLayout = detailsLayout;
+      this.syncIllumPreview('Details_I');
+    }
     let skinNormals = false;
     model.traverse((obj) => {
       if (!(obj instanceof THREE.Mesh)) return;
@@ -422,6 +445,10 @@ export class CarPreview {
     this.surfaceTextures?.setOfficialModel(kind === 'fbx');
     this.ambientOcclusion?.setOfficialModel(kind === 'fbx');
     this.modelRoot = model;
+    this.uvAtlas=undefined;model.traverse(object=>{if(object instanceof THREE.Mesh&&object.geometry.getAttribute('_source_uv'))this.uvAtlas=REAL_UV_ATLAS;});
+    this.surfaceTextures.setAtlasSource(this.uvAtlas?detailsLayout??'stock':undefined);
+    this.ambientOcclusion.setAtlasSource(this.uvAtlas?detailsLayout??'stock':undefined);
+    this.syncIllumPreview();
     this.carRoot.add(model);
     this.vehicleRig = new VehicleRigPreview(model);
     this.vehiclePose = { ...REST_VEHICLE_POSE };
@@ -435,10 +462,13 @@ export class CarPreview {
     if (this.pendingView) this.restoreViewState(this.pendingView);
     this.hideLoadingOverlay();
     this.onModelReady?.();
+    this.requestRender();
     return true;
   }
 
   private detachModel() {
+    this.clearUvFocus(false);
+    this.uvFocusScene = null;
     if (!this.modelRoot) return;
     this.playerDisplay?.dispose(); this.playerDisplay = null;
     this.vehicleRig?.dispose(); this.vehicleRig = null;
@@ -561,6 +591,8 @@ export class CarPreview {
   }
 
   private resize() {
+    this.updateRenderVisibility();
+    this.requestRender();
     const w = this.container.clientWidth || 1;
     const h = this.container.clientHeight || 1;
     this.renderer.setSize(w, h);
@@ -571,7 +603,10 @@ export class CarPreview {
     // Vue jamais déplacée par l'utilisateur (vignette → grande vue 3D, repli d'un
     // panneau…) : on garde la voiture bien cadrée pour le nouveau ratio. Une vue
     // déjà manipulée n'est jamais touchée.
-    if (aspectChanged && !this.userNavigated) this.applyHomeFraming();
+    if (aspectChanged && this.uvFocus) {
+      const direction = this.camera.position.clone().sub(this.controls.target).normalize();
+      this.restoreViewState(uvFocusView(this.uvFocus.plan.bounds, direction, this.camera.fov, aspect));
+    } else if (aspectChanged && !this.userNavigated) this.applyHomeFraming();
   }
 
   private onControlsStart = () => {
@@ -580,21 +615,25 @@ export class CarPreview {
 
   /** Relie les normales supplémentaires du skin importé, sans modifier ses DDS. */
   setSurfaceTextures(files: readonly Skin3DFile[]) {
+    this.requestRender();
     this.surfaceTextures.setFiles(files);
     this.ambientOcclusion.setFiles(files);
   }
 
   setMaterialSurfaceOverlays(overlays: readonly MaterialSurfaceOverlay[]) {
+    this.requestRender();
     this.surfaceTextures.setMaterialOverlays(overlays);
     this.ambientOcclusion.setMaterialOverlays(overlays);
   }
 
   setWheelSurface(value: WheelSurfaceSettings) {
+    this.requestRender();
     this.surfaceTextures.setWheelSurface(value);
     this.ambientOcclusion.setWheelSurface(value);
   }
 
   setExportColorPreview(images: readonly ExportMaterialImage[]) {
+    this.requestRender();
     this.exportColorPreview.set(images);
     this.exportPreviewActive = true;
     // This multiplier belongs only to workshop inspection, never to the ZIP.
@@ -602,6 +641,7 @@ export class CarPreview {
   }
 
   clearExportColorPreview() {
+    this.requestRender();
     this.exportColorPreview.clear();
     this.exportPreviewActive = false;
     this.skinMat.clearcoat = this.skinNormalShader ? 0 : this.coatIntensity;
@@ -609,6 +649,7 @@ export class CarPreview {
 
   /** Branche/rafraîchit un canvas source comme texture d'une map. */
   setMapCanvas(id: MapId, source: HTMLCanvasElement, roles?: HTMLCanvasElement) {
+    this.requestRender();
     if (isDirtMask(id)) {
       this.dirtMasks.set(MAP_BY_ID[id].group, source);
       this.syncDirtPreview(MAP_BY_ID[id].group);
@@ -637,6 +678,7 @@ export class CarPreview {
 
   /** Preview never modifies the editor canvases used by export. */
   setDirtPreview(amount: number, enabled = true) {
+    this.requestRender();
     this.dirtAmount = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0;
     this.dirtEnabled = enabled;
     for (const family of ['skin', 'details', 'wheels'] as const) this.syncDirtPreview(family);
@@ -764,7 +806,7 @@ export class CarPreview {
     ctx.drawImage(source, 0, 0);
     {
       const img = ctx.getImageData(0, 0, w, h);
-      const mask = mapId === 'Details_I' ? speedLightMask(w, h) : null;
+      const mask = mapId === 'Details_I' ? speedLightMask(w, h, this.detailsLayout,this.uvAtlas) : null;
       const roles = state.roles?.getContext('2d', { willReadFrequently: true })?.getImageData(0, 0, w, h).data;
       const d = img.data;
       for (let p = 0, i = 0; i < d.length; p++, i += 4) {
@@ -790,6 +832,7 @@ export class CarPreview {
 
   /** Rôle des zones peintes (la vitesse n'est pas concernée). */
   setIllumRole(role: IllumRole) {
+    this.requestRender();
     this.illumRole = role;
     this.syncIllumPreview();
     this.applyEmissive();
@@ -797,6 +840,7 @@ export class CarPreview {
 
   /** Intensité du vernis (clearcoat) sur la carrosserie (0..1). */
   setCoatIntensity(v: number) {
+    this.requestRender();
     this.coatIntensity = Math.max(0, Math.min(1, v));
     this.skinMat.clearcoat = this.skinNormalShader ? 0 : this.exportPreviewActive ? 1 : this.coatIntensity;
     this.skinMat.needsUpdate = true;
@@ -804,12 +848,14 @@ export class CarPreview {
 
   /** Intensité globale de l'auto-illumination des détails (néon). */
   setEmissiveIntensity(v: number) {
+    this.requestRender();
     this.emissiveIntensity = Math.max(0, v);
     this.applyEmissive();
   }
 
   /** Simule le freinage : allume les zones « feux de frein », la vitesse reste visible. */
   setBraking(on: boolean) {
+    this.requestRender();
     this.braking = on;
     this.syncIllumPreview();
     this.applyEmissive();
@@ -824,6 +870,7 @@ export class CarPreview {
   getBraking(): boolean { return this.braking; }
 
   setEnvironment(value: PreviewEnvironment) {
+    this.requestRender();
     const next = resolvePreviewEnvironment(value);
     const preset = lightingPreset(next.mood);
     const lighting = previewLighting(next);
@@ -981,10 +1028,13 @@ export class CarPreview {
 
   hasVehicleRig() { return this.vehicleRig?.ready ?? false; }
   setVehiclePose(pose: VehiclePose) {
+    this.requestRender();
+    const changed = !this.vehiclePose || this.vehiclePose.steering !== pose.steering || this.vehiclePose.spin !== pose.spin || this.vehiclePose.reactor !== pose.reactor;
+    if (poseIsActive(pose)) this.clearUvFocus(false);
     this.vehiclePose = { ...pose };
     if (poseIsActive(pose)) this.setInteraction('navigate');
     this.vehicleRig?.apply(pose);
-    if (this.vehicleRig?.ready && !poseIsActive(pose)) this.projectionTriangles = null;
+    if (changed && this.vehicleRig?.ready) this.projectionTriangles = null;
     this.updateProjectionGuide();
   }
 
@@ -1069,7 +1119,9 @@ export class CarPreview {
       return;
     }
     if (key in CarPreview.MOVE_KEYS) {
+      if (!this.moveKeys.size) this.lastFrame = 0;
       this.moveKeys.add(key);
+      this.requestRender();
       e.preventDefault();
     }
   }
@@ -1136,7 +1188,7 @@ export class CarPreview {
       -((e.clientY - rect.top) / rect.height) * 2 + 1,
     );
     this.raycaster.setFromCamera(this.pointerNdc, this.camera);
-    const hit = this.raycaster.intersectObject(this.carRoot, true)[0];
+    const hit = this.raycaster.intersectObject(this.uvFocus?.isolated ? this.uvFocus.root : this.carRoot, true).find(hit => hit.object instanceof THREE.Mesh);
     if (!hit) return;
     const delta = hit.point.clone().sub(this.controls.target);
     this.controls.target.copy(hit.point);
@@ -1206,6 +1258,7 @@ export class CarPreview {
 
   /** Revient au cadrage initial (touche F ou bouton « Recadrer »). */
   resetCamera() {
+    this.clearUvFocus(false);
     if (!this.carBounds) return;
     // Purge l'inertie (amortissement) d'un glisser encore en cours : sans cela,
     // le reste du mouvement continuerait à s'appliquer après le recadrage.
@@ -1220,6 +1273,7 @@ export class CarPreview {
 
   /** Look up at the chassis, with a slight tilt to keep camera orientation stable. */
   viewUnderbody() {
+    this.clearUvFocus(false);
     const view = this.computeHome(new THREE.Vector3(0, -1, 0.08).normalize(), 0.5);
     if (!view) return;
     this.restoreViewState({ position: view.position.toArray() as Vec3, target: view.target.toArray() as Vec3 });
@@ -1227,6 +1281,89 @@ export class CarPreview {
 
   getViewState(): PreviewViewState {
     return { position: this.camera.position.toArray() as Vec3, target: this.controls.target.toArray() as Vec3 };
+  }
+
+  /** Focus only changes preview/camera state. Exact selected triangles share the
+   * live paint material; isolated geometry is never added to carRoot or exports. */
+  focusUvRegion(region: UvGuideIsland, occurrence?: number): boolean {
+    if (!this.modelRoot || !this.carBounds) return false;
+    const previous = this.uvFocus?.previous ?? this.getViewState();
+    const minDistance = this.uvFocus?.minDistance ?? this.controls.minDistance, near = this.uvFocus?.near ?? this.camera.near;
+    const plan = planUvFocus(this.getUvFocusScene(), region, this.getViewState(), this.camera.fov, this.camera.aspect, occurrence);
+    if (!plan) { this.clearUvFocus(); return false; }
+    this.clearUvFocus(false);
+    const root = new THREE.Group(); root.name = 'uv-focus-preview';
+    const geometry = new THREE.BufferGeometry();
+    const order = plan.triangles.map(t => {
+      const face = new THREE.Vector3(...t.points[1]).sub(new THREE.Vector3(...t.points[0])).cross(new THREE.Vector3(...t.points[2]).sub(new THREE.Vector3(...t.points[0])));
+      return t.normals && face.dot(new THREE.Vector3(...t.normals[0])) < 0 ? [0,2,1] : [0,1,2];
+    });
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(plan.triangles.flatMap((t,i) => order[i].flatMap(j=>t.points[j])), 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(plan.triangles.flatMap((t,i) => order[i].flatMap(j=>t.uv[j])), 2));
+    if (plan.triangles.every(t => t.normals)) geometry.setAttribute('normal', new THREE.Float32BufferAttribute(plan.triangles.flatMap((t,i) => order[i].flatMap(j=>t.normals![j])), 3));
+    else geometry.computeVertexNormals();
+    // AO uses the same native UV set in the original meshes.
+    geometry.setAttribute('uv1', geometry.getAttribute('uv').clone());
+    const isolatedMesh = new THREE.Mesh(geometry, this.materialForSlot(region.family));
+    isolatedMesh.userData.paintSlot = region.family; root.add(isolatedMesh);
+    const outline = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 55), new THREE.LineBasicMaterial({ color: 0x7be4c7, transparent: true, opacity: .8, depthTest: false, depthWrite: false }));
+    outline.renderOrder = 20; root.add(outline); this.scene.add(root);
+    this.uvFocus = { region, plan, root, isolated: plan.visible < .55, previous, minDistance, near };
+    const span = plan.bounds.getSize(new THREE.Vector3()).length();
+    this.controls.minDistance = Math.min(minDistance, Math.max(.01, span * .08));
+    this.camera.near = Math.min(near, Math.max(.0001, span * .02)); this.camera.updateProjectionMatrix();
+    this.applyUvFocusVisibility(); this.restoreViewState({ position: plan.position, target: plan.target });
+    this.emitUvFocus(); return true;
+  }
+
+  private emitUvFocus() {
+    const focus = this.uvFocus;
+    this.onUvFocusChange?.(focus ? { label: focus.region.label, isolated: focus.isolated, occurrence: focus.plan.occurrence, occurrences: focus.plan.occurrences } : null);
+  }
+  private applyUvFocusVisibility() {
+    const focus = this.uvFocus; if (!focus) return;
+    if (this.modelRoot) this.modelRoot.visible = !focus.isolated;
+    focus.root.children[0].visible = focus.isolated;
+  }
+  setUvFocusIsolated(isolated: boolean) {
+    this.requestRender();
+    if (!this.uvFocus) return;
+    this.uvFocus.isolated = isolated; this.applyUvFocusVisibility(); this.emitUvFocus();
+  }
+  nextUvFocusOccurrence() {
+    if (this.uvFocus) this.focusUvRegion(this.uvFocus.region, this.uvFocus.plan.occurrence + 1);
+  }
+  clearUvFocus(restoreCamera = true) {
+    this.requestRender();
+    const focus = this.uvFocus; if (!focus) return;
+    this.uvFocus = null;
+    if (this.modelRoot) this.modelRoot.visible = true;
+    this.scene.remove(focus.root);
+    focus.root.traverse(object => {
+      if (object instanceof THREE.Mesh || object instanceof THREE.LineSegments) object.geometry.dispose();
+      if (object instanceof THREE.LineSegments) (object.material as THREE.Material).dispose();
+    });
+    // The selected mesh shares the editor material: never dispose that material.
+    this.controls.minDistance = focus.minDistance; this.camera.near = focus.near; this.camera.updateProjectionMatrix();
+    if (restoreCamera) this.restoreViewState(focus.previous);
+    this.emitUvFocus();
+  }
+
+  private getUvFocusScene(): readonly ProjectionTriangle[] {
+    const projection = this.getProjectionTriangles();
+    if (this.uvFocusScene?.projection === projection) return this.uvFocusScene.triangles;
+    const triangles = [...projection];
+    this.carRoot.traverse(object => {
+      if (!(object instanceof THREE.Mesh) || ['skin','details','wheels','glass'].includes(object.userData.paintSlot) || !object.visible) return;
+      const position=object.geometry.getAttribute('position'),index=object.geometry.index; if(!position)return;
+      const count=index?.count??position.count;
+      for(let i=0;i+2<count && triangles.length<=500_000;i+=3){
+        const points=[0,1,2].map(j=>new THREE.Vector3().fromBufferAttribute(position,index?index.getX(i+j):i+j).applyMatrix4(object.matrixWorld).toArray()) as [Vec3,Vec3,Vec3];
+        // Non-paintable seats/mechanics can obstruct a piece, never match UV selection.
+        triangles.push({family:'skin',points,uv:[[-100,-100],[-100,-100],[-100,-100]]});
+      }
+    });
+    this.uvFocusScene={projection,triangles};return triangles;
   }
 
   /** Conserve la vue de travail pendant une mise à jour à chaud du serveur de développement. */
@@ -1262,7 +1399,7 @@ export class CarPreview {
       -((e.clientY - rect.top) / rect.height) * 2 + 1,
     );
     this.raycaster.setFromCamera(this.pointerNdc, this.camera);
-    const hits = this.raycaster.intersectObject(this.carRoot, true);
+    const hits = this.raycaster.intersectObject(this.uvFocus?.isolated ? this.uvFocus.root : this.carRoot, true);
     for (const hit of hits) {
       if (!(hit.object instanceof THREE.Mesh) || !hit.uv) continue;
       const slot = hit.object.userData.paintSlot as MaterialSlot ?? slotFromObject(hit.object);
@@ -1297,7 +1434,7 @@ export class CarPreview {
       this.draggingImage = true;
       this.draggingProjection = result === 'projection';
       this.lastDragUV = hit;
-      this.dragIsland = imageIslandAt(hit.family, hit.u, hit.v);
+      this.dragIsland = imageIslandAt(hit.family, hit.u, hit.v, this.detailsLayout,this.uvAtlas);
       this.renderer.domElement.style.cursor = 'grabbing';
     } else {
       if (!this.paintHandler) return;
@@ -1335,7 +1472,7 @@ export class CarPreview {
         // On refuse ce saut pour conserver le logo sur sa zone ; « Replacer » permet de changer de pièce.
         const previous = this.lastDragUV;
         if ((previous && !continuousImageUV(previous, hit)) ||
-          (this.dragIsland && imageIslandAt(hit.family, hit.u, hit.v) !== this.dragIsland)) {
+          (this.dragIsland && imageIslandAt(hit.family, hit.u, hit.v, this.detailsLayout,this.uvAtlas) !== this.dragIsland)) {
           boundary();
           return;
         }
@@ -1347,6 +1484,10 @@ export class CarPreview {
 
   /** Triangles en espace monde avec leurs UV d'origine : une projection peut traverser plusieurs atlas. */
   projectImage(decal: DecalProjection, source: PixelSource, resolution?: number) {
+    return bakeProjection(this.getProjectionTriangles(), decal, source, resolution);
+  }
+
+  getProjectionTriangles(): readonly ProjectionTriangle[] {
     if (!this.projectionTriangles) {
       this.carRoot.updateMatrixWorld(true);
       const triangles: ProjectionTriangle[] = [];
@@ -1356,18 +1497,22 @@ export class CarPreview {
         if (family !== 'skin' && family !== 'details' && family !== 'wheels') return;
         const geometry = object.geometry;
         const position = geometry.getAttribute('position'); const uv = geometry.getAttribute('uv');
+        const sourceUv=geometry.getAttribute('_source_uv');
+        const atlasUv=geometry.getAttribute('_atlas_uv');
+        const normal = geometry.getAttribute('normal'), normalMatrix = new THREE.Matrix3().getNormalMatrix(object.matrixWorld);
         if (!position || !uv) return;
         const index = geometry.index;
         const count = index?.count ?? position.count;
         for (let i = 0; i + 2 < count; i += 3) {
           const ids = [0, 1, 2].map((offset) => index ? index.getX(i + offset) : i + offset);
-          triangles.push({ family, points: ids.map((id) => new THREE.Vector3().fromBufferAttribute(position, id).applyMatrix4(object.matrixWorld).toArray()) as [Vec3, Vec3, Vec3],
+          triangles.push({ family, ...(sourceUv?{sourceUv:ids.map(id=>[sourceUv.getX(id),sourceUv.getY(id)]) as ProjectionTriangle['uv']}:{}), ...(atlasUv?{atlasUv:ids.map(id=>[atlasUv.getX(id),atlasUv.getY(id)]) as ProjectionTriangle['uv']}:{}), points: ids.map((id) => new THREE.Vector3().fromBufferAttribute(position, id).applyMatrix4(object.matrixWorld).toArray()) as [Vec3, Vec3, Vec3],
+            ...(normal ? { normals: ids.map(id => new THREE.Vector3().fromBufferAttribute(normal, id).applyNormalMatrix(normalMatrix).toArray()) as [Vec3, Vec3, Vec3] } : {}),
             uv: ids.map((id) => [uv.getX(id), uv.getY(id)]) as ProjectionTriangle['uv'] });
         }
       });
       this.projectionTriangles = triangles;
     }
-    return bakeProjection(this.projectionTriangles, decal, source, resolution);
+    return this.projectionTriangles;
   }
 
   private handlePointerUp(e: PointerEvent) {
@@ -1383,7 +1528,11 @@ export class CarPreview {
   /** Capture carrée de la vue courante (pour Icon.tga). */
   snapshot(size: number): HTMLCanvasElement {
     this.updateGroundVisibility();
-    this.renderer.render(this.scene, this.camera);
+    // Selection outlines/isolation are working aids, absent from exported icons.
+    const focus = this.uvFocus;
+    if (focus) { focus.root.visible = false; if (this.modelRoot) this.modelRoot.visible = true; }
+    try { this.renderer.render(this.scene, this.camera); }
+    finally { if (focus) { focus.root.visible = true; this.applyUvFocusVisibility(); } }
     const src = this.renderer.domElement;
     const out = document.createElement('canvas');
     out.width = size;
@@ -1391,15 +1540,19 @@ export class CarPreview {
     const ctx = out.getContext('2d')!;
     const s = Math.min(src.width, src.height);
     ctx.drawImage(src, (src.width - s) / 2, (src.height - s) / 2, s, s, 0, 0, size, size);
+    this.requestRender(); // Restore selection/isolation after the clean icon capture.
     return out;
   }
 
   dispose() {
+    this.clearUvFocus(false);
+    this.uvFocusScene = null; this.projectionTriangles = null;
     this.vehicleRig?.dispose();
     this.projectionGuide?.remove();
     this.disposed = true;
     this.loadGeneration++;
-    cancelAnimationFrame(this.raf);
+    this.frameLoop?.dispose();
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
     this.resizeObserver.disconnect();
     const dom = this.renderer.domElement;
     dom.removeEventListener('pointerdown', this.onPointerDown);
@@ -1410,10 +1563,12 @@ export class CarPreview {
     dom.removeEventListener('pointerenter', this.onPointerEnter);
     dom.removeEventListener('pointerleave', this.onPointerLeave);
     dom.removeEventListener('dblclick', this.onDblClick);
+    dom.removeEventListener('webglcontextrestored', this.onControlsChange);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('blur', this.onBlur);
     this.controls.removeEventListener('start', this.onControlsStart);
+    this.controls.removeEventListener('change', this.onControlsChange);
     this.controls.dispose();
     this.playerDisplay?.dispose(); this.playerDisplay = null;
     this.carRoot.traverse((obj) => {

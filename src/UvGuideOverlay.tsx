@@ -11,6 +11,7 @@ import type { CSSProperties } from 'react';
 import { MAP_BY_ID, type MapId } from './maps';
 import { UV_GUIDE_BY_FAMILY, type UvGuideIsland } from './uvGuideData';
 import './uvGuideOverlay.css';
+import type { UvAtlasLayout } from './uvAtlasLayout';
 
 /** Espace de coordonnées interne du SVG (le cadre est carré : échelle uniforme). */
 const VB = 1000;
@@ -51,6 +52,7 @@ const LAMP_KEYS = new Set(['d_tail_hi', 'd_tail', 'd_head']);
 const FALLBACK = '#c9ced8';
 
 interface Props {
+  atlas?:UvAtlasLayout;
   /** Map active de l'éditeur ; sa famille (skin/details/wheels) sélectionne les îlots. */
   activeMap: MapId;
   /** Affiche ou masque le guide. */
@@ -121,7 +123,7 @@ function labelSpots(
   return out;
 }
 
-export function UvGuideOverlay({ activeMap, visible, focusedRegion = null, islands: providedIslands, selectedRegion, selectedElement, onSelect, zoom = 1 }: Props) {
+export function UvGuideOverlay({ activeMap, visible, focusedRegion = null, islands: providedIslands, selectedRegion, selectedElement, onSelect, zoom = 1, atlas }: Props) {
   if (!visible) return null;
   const mapDef = MAP_BY_ID[activeMap];
   const family = mapDef.group;
@@ -130,7 +132,7 @@ export function UvGuideOverlay({ activeMap, visible, focusedRegion = null, islan
   const lampsOnly = mapDef.kind === 'illum';
   // Isolation can target a single contour; highlight its named zone as well.
   const focusedKey = focusedRegion?.split(':element:')[0] ?? null;
-  const spots = labelSpots(islands, lampsOnly).filter((spot) => !focusedKey || spot.key === focusedKey);
+  const spots = atlas?[]:labelSpots(islands, lampsOnly).filter((spot) => !focusedKey || spot.key === focusedKey);
 
   return (
     <svg
@@ -140,6 +142,10 @@ export function UvGuideOverlay({ activeMap, visible, focusedRegion = null, islan
       preserveAspectRatio="none"
       aria-hidden={onSelect ? undefined : true}
     >
+      {atlas?.groups.map(group=><g key={`frame:${group.key}`} className="uv-guide-overlay__atlas-frame">
+        <rect x={group.x*VB} y={group.y*VB} width={group.w*VB} height={group.h*VB} rx={3} fill="none" stroke="#d6e7e0" strokeOpacity={.35} strokeWidth={.6}/>
+        <svg x={(group.x+.003)*VB} y={(group.y+.001)*VB} width={(group.w-.006)*VB} height={group.header*VB} overflow="hidden"><text x={3} y="55%" dominantBaseline="middle" fill="#e7fff7" fontSize={Math.min(11,group.header*VB*.7)} fontWeight={600} fontFamily="Segoe UI, sans-serif">{group.label}</text></svg>
+      </g>)}
       {islands.map((island) => {
         const color = COLORS[island.key] ?? FALLBACK;
         const focused = focusedKey === island.key || selectedRegion === island.key;

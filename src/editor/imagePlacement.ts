@@ -1,4 +1,11 @@
 import { UV_GUIDE_ISLANDS, type UvGuideFamily } from '../uvGuideData';
+import { independentDetailsGuides, type DetailsLayout } from '../detailsSides';
+import { panelAtlasGuides, UNDERBODY_PANEL_LAYOUT } from '../underbodyPanel';
+import { organizedAtlasGuides, type UvAtlasVersion } from '../realUvAtlas';
+
+const independent = independentDetailsGuides(UV_GUIDE_ISLANDS.filter(island => island.family === 'details'));
+const panels = panelAtlasGuides(UV_GUIDE_ISLANDS.filter(island => island.family === 'details'));
+const guides = (family: UvGuideFamily, layout?: DetailsLayout,uvAtlas?:UvAtlasVersion) => uvAtlas?organizedAtlasGuides(family,layout):family === 'details' && layout ? layout===UNDERBODY_PANEL_LAYOUT?panels:independent : UV_GUIDE_ISLANDS;
 
 function insidePolygon(points: { x: number; y: number }[], x: number, y: number): boolean {
   let inside = false;
@@ -11,14 +18,14 @@ function insidePolygon(points: { x: number; y: number }[], x: number, y: number)
 }
 
 /** UV de Three.js : origine en bas. Les guides et Fabric ont leur origine en haut. */
-export function imageIslandAt(family: UvGuideFamily, u: number, v: number): string | undefined {
+export function imageIslandAt(family: UvGuideFamily, u: number, v: number, layout?: DetailsLayout,uvAtlas?:UvAtlasVersion): string | undefined {
   const y = 1 - v;
-  return UV_GUIDE_ISLANDS.find((island) => island.family === family && island.polygons.some((points) => insidePolygon(points, u, y)))?.key;
+  return guides(family, layout,uvAtlas).find((island) => island.family === family && island.polygons.some((points) => insidePolygon(points, u, y)))?.key;
 }
 
 /** Distance du centre aux bords de sa pièce ; -1 s'il est hors du masque. */
-export function imageIslandClearance(family: UvGuideFamily, key: string, u: number, v: number): number {
-  const island = UV_GUIDE_ISLANDS.find((entry) => entry.family === family && entry.key === key);
+export function imageIslandClearance(family: UvGuideFamily, key: string, u: number, v: number, layout?: DetailsLayout,uvAtlas?:UvAtlasVersion): number {
+  const island = guides(family, layout,uvAtlas).find((entry) => entry.family === family && entry.key === key);
   const y = 1 - v;
   let clearance = -1;
   for (const points of island?.polygons ?? []) {

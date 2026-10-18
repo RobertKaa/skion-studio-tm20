@@ -52,7 +52,7 @@ export const MAPS: MapDef[] = [
     group: 'skin',
     workRes: TEXTURE_RESOLUTION,
     exportRes: TEXTURE_RESOLUTION,
-    defaultFill: '#c4c8cc',
+    defaultFill: '#555b63',
     description: 'Couleur de base de la carrosserie (RVB).',
   },
   {

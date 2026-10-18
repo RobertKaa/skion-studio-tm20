@@ -1,10 +1,15 @@
 import { FabricImage, Group, Rect, type StaticCanvas } from 'fabric';
+import { UNDERBODY_PANEL_LAYOUT, PANEL_BOUNDS, PANEL_SCALE, PANEL_SOURCE, panelPoint } from '../underbodyPanel';
+import type { DetailsLayout } from '../detailsSides';
+import { drawRealAtlas, drawSourceAtlas, realAtlasLayout, validAtlasSource, type AtlasSourceLayout } from '../realUvAtlas';
 
 export type BackgroundFit = 'cover' | 'contain' | 'stretch';
 export interface TextureBackgroundSettings {
+  uvAtlas?: { family:'skin'|'details'|'wheels'; source:AtlasSourceLayout; reverse?:boolean };
   name: string;
   fit: BackgroundFit;
   colorOpacity: number;
+  layout?: DetailsLayout;
 }
 export interface TextureBackgroundInfo extends TextureBackgroundSettings { src: string }
 type BackgroundGroup = Group & { textureBackground: TextureBackgroundSettings };
@@ -18,19 +23,22 @@ export function validTextureBackgroundSettings(value: unknown): value is Texture
   const data = value as Record<string, unknown>;
   return typeof data.name === 'string' && data.name.length > 0 && data.name.length <= 160 &&
     data.name === textureBackgroundName(data.name) && ['cover', 'contain', 'stretch'].includes(String(data.fit)) &&
-    typeof data.colorOpacity === 'number' && Number.isFinite(data.colorOpacity) && data.colorOpacity >= 0 && data.colorOpacity <= 1;
+    typeof data.colorOpacity === 'number' && Number.isFinite(data.colorOpacity) && data.colorOpacity >= 0 && data.colorOpacity <= 1 &&
+    (data.layout === undefined || data.layout === 'independent-v1' || data.layout === UNDERBODY_PANEL_LAYOUT) &&
+    (data.uvAtlas===undefined||!!data.uvAtlas&&typeof data.uvAtlas==='object'&&['skin','details','wheels'].includes((data.uvAtlas as Record<string,unknown>).family as string)&&validAtlasSource((data.uvAtlas as Record<string,unknown>).source)&&((data.uvAtlas as Record<string,unknown>).reverse===undefined||typeof (data.uvAtlas as Record<string,unknown>).reverse==='boolean'));
 }
 
 function backgroundGroup(canvas: StaticCanvas): BackgroundGroup | null {
   const group = canvas.backgroundImage as BackgroundGroup | undefined;
   if (!(group instanceof Group) || !validTextureBackgroundSettings(group.textureBackground)) return null;
   const children = group.getObjects();
-  return children.length === 2 && children[0] instanceof FabricImage && children[1] instanceof Rect ? group : null;
+  return children.length === (group.textureBackground.layout||group.textureBackground.uvAtlas ? 3 : 2) && children[0] instanceof FabricImage &&
+    (!(group.textureBackground.layout||group.textureBackground.uvAtlas) || children[1] instanceof FabricImage) && children.at(-1) instanceof Rect ? group : null;
 }
 
 export function readTextureBackground(canvas: StaticCanvas): TextureBackgroundInfo | null {
   const group = backgroundGroup(canvas);
-  return group ? { ...group.textureBackground, src: (group.item(0) as FabricImage).getSrc() } : null;
+  return group ? { ...group.textureBackground, src: (group.item(group.textureBackground.uvAtlas?1:0) as FabricImage).getSrc() } : null;
 }
 
 function fitImage(image: FabricImage, width: number, height: number, fit: BackgroundFit, grouped = false) {
@@ -53,19 +61,52 @@ function fitImage(image: FabricImage, width: number, height: number, fit: Backgr
   image.setCoords();
 }
 
+/** Preserve the full original source once; the second child is only this panel. */
+function panelBackground(image:FabricImage,width:number,height:number,fit:BackgroundFit):FabricImage {
+  fitImage(image,width,height,fit);
+  const fragment=document.createElement('canvas');fragment.width=Math.max(1,Math.ceil(PANEL_BOUNDS.w*width*PANEL_SCALE));fragment.height=Math.max(1,Math.ceil(PANEL_BOUNDS.h*height*PANEL_SCALE));
+  const ctx=fragment.getContext('2d')!;
+  ctx.scale(PANEL_SCALE,PANEL_SCALE);ctx.translate(-PANEL_BOUNDS.x*width,-PANEL_BOUNDS.y*height);
+  ctx.beginPath();PANEL_SOURCE.forEach((p,i)=>i?ctx.lineTo(p.x*width,p.y*height):ctx.moveTo(p.x*width,p.y*height));ctx.closePath();ctx.clip();
+  ctx.drawImage(image.getElement(),image.cropX,image.cropY,image.width,image.height,image.left,image.top,image.width*image.scaleX,image.height*image.scaleY);
+  image.set({left:image.left*PANEL_SCALE,top:image.top*PANEL_SCALE,scaleX:image.scaleX*PANEL_SCALE,scaleY:image.scaleY*PANEL_SCALE});
+  const point=panelPoint(PANEL_BOUNDS,'right');
+  return new FabricImage(fragment,{left:point.x*width,top:point.y*height,originX:'left',originY:'top',strokeWidth:0,selectable:false,evented:false,objectCaching:false});
+}
+
 /** Fabric draws its background image above its background color. Keep the image
  * and the translucent color together, below ordinary layers, at atlas precision. */
 export function createTextureBackground(image: FabricImage, width: number, height: number, color: string, settings: TextureBackgroundSettings): Group {
+  if(settings.uvAtlas){
+    const {uvAtlas,...nativeSettings}=settings;
+    const original=new FabricImage(image.getElement()),native=createTextureBackground(original,width,height,'#000000',{...nativeSettings,colorOpacity:0});
+    const source=document.createElement('canvas'),size=image.getOriginalSize(),ratio=Math.max(1,Math.min(4096,Math.max(size.width,size.height))/Math.max(width,height));source.width=Math.round(width*ratio);source.height=Math.round(height*ratio);
+    const context=source.getContext('2d')!;context.scale(ratio,ratio);native.render(context);
+    const arranged=document.createElement('canvas');arranged.width=source.width;arranged.height=source.height;(uvAtlas.reverse?drawSourceAtlas:drawRealAtlas)(arranged.getContext('2d')!,source,realAtlasLayout(uvAtlas.family,uvAtlas.source));
+    const visible=new FabricImage(arranged,{left:0,top:0,scaleX:1/ratio,scaleY:1/ratio,originX:'left',originY:'top',strokeWidth:0,objectCaching:false});
+    const hidden=new FabricImage(image.getElement(),{left:0,top:0,originX:'left',originY:'top',scaleX:1/Math.max(1,image.width),scaleY:1/Math.max(1,image.height),visible:false,objectCaching:false});
+    const overlay=new Rect({left:0,top:0,originX:'left',originY:'top',width,height,strokeWidth:0,fill:color,opacity:settings.colorOpacity,objectCaching:false});
+    const group=new Group([visible,hidden,overlay],{left:0,top:0,originX:'left',originY:'top',strokeWidth:0,selectable:false,evented:false,objectCaching:false}) as BackgroundGroup;
+    group.textureBackground={name:settings.name,fit:settings.fit,colorOpacity:settings.colorOpacity,uvAtlas,...(settings.layout?{layout:settings.layout}:{})};source.width=source.height=1;native.removeAll();native.dispose();return group;
+  }
   fitImage(image, width, height, settings.fit);
+  const images=[image];
+  if(settings.layout===UNDERBODY_PANEL_LAYOUT)images.push(panelBackground(image,width,height,settings.fit));
+  else if(settings.layout){
+    const other=new FabricImage(image.getElement());fitImage(other,width,height,settings.fit);
+    for(const [i,part] of [image,other].entries())part.set({left:(part.left??0)*.5+i*width/2,scaleX:part.scaleX*.5});
+    images.push(other);
+  }
   const overlay = new Rect({
     left: 0, top: 0, originX: 'left', originY: 'top', width, height, strokeWidth: 0,
     fill: color, opacity: settings.colorOpacity, selectable: false, evented: false, objectCaching: false,
   });
-  const group = new Group([image, overlay], {
+  const group = new Group([...images, overlay], {
     left: 0, top: 0, originX: 'left', originY: 'top', strokeWidth: 0,
     selectable: false, evented: false, objectCaching: false,
   }) as BackgroundGroup;
-  group.textureBackground = { ...settings };
+  group.textureBackground = { name: settings.name, fit: settings.fit, colorOpacity: settings.colorOpacity,
+    ...(settings.layout ? { layout: settings.layout } : {}) };
   return group;
 }
 
@@ -74,9 +115,25 @@ export function updateTextureBackground(canvas: StaticCanvas, changes: Partial<P
   if (!group) return;
   const settings = { ...group.textureBackground, ...changes };
   if (!validTextureBackgroundSettings(settings)) return;
-  if (changes.fit && changes.fit !== group.textureBackground.fit) fitImage(group.item(0) as FabricImage, group.width, group.height, changes.fit, true);
+  if (changes.fit && changes.fit !== group.textureBackground.fit) {
+    if(settings.uvAtlas){
+      const replacement=createTextureBackground(group.item(1) as FabricImage,canvas.width,canvas.height,canvas.backgroundColor as string,settings);
+      canvas.backgroundImage=replacement;group.removeAll();group.dispose();return;
+    }
+    if(settings.layout===UNDERBODY_PANEL_LAYOUT){
+      const image=group.item(0) as FabricImage,other=group.item(1) as FabricImage,updated=panelBackground(image,group.width,group.height,changes.fit);
+      image.set({left:image.left-group.width/2,top:image.top-group.height/2});
+      other.setElement(updated.getElement());other.set({width:updated.width,height:updated.height,left:updated.left-group.width/2,top:updated.top-group.height/2,scaleX:1,scaleY:1});
+    }else{
+    const count=settings.layout?2:1;
+    for(let i=0;i<count;i++){
+      const image=group.item(i) as FabricImage;fitImage(image,group.width,group.height,changes.fit,true);
+      if(settings.layout)image.set({left:((image.left??0)+group.width/2)*.5-group.width/2+i*group.width/2,scaleX:image.scaleX*.5});
+    }
+    }
+  }
   group.textureBackground = settings;
-  group.item(1).set({ fill: canvas.backgroundColor, opacity: settings.colorOpacity });
+  group.item(group.getObjects().length-1).set({ fill: canvas.backgroundColor, opacity: settings.colorOpacity });
   group.set('dirty', true);
 }
 

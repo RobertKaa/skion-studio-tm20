@@ -15,3 +15,11 @@ export function previewMaterialSlot(name: string): PreviewMaterialSlot {
 export function hasExperimentalSkinNormalShader(name: string): boolean {
   return /(?:^|_)DetailsDmgNormal_Skin(?:_lod\d+)?$/i.test(name);
 }
+
+/** Keep painting and surface projection consistent with the displayed atlas:
+ * the preview renders unnamed/custom materials with the Skin material. */
+export function previewMeshMaterialSlot(materialName: string, meshName: string): Exclude<PreviewMaterialSlot, 'other'> {
+  const material = previewMaterialSlot(materialName);
+  const slot = material === 'other' ? previewMaterialSlot(meshName) : material;
+  return slot === 'other' ? 'skin' : slot;
+}

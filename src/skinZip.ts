@@ -11,6 +11,10 @@ import { UV_GUIDE_ISLANDS } from './uvGuideData';
 import { ambientOcclusionFile, decodeAmbientOcclusion } from './three/previewAmbientOcclusion';
 import { HORN_FILE_NAME, MAX_HORN_SOURCE_BYTES, normalizeHornAudio, prepareHorn, type SkinHorn } from './horn';
 import { isTextureResolution, type TextureResolution } from './editor/resolution';
+import { createSkinZipEncoder } from './workers/skinZipClient';
+import { INDEPENDENT_DETAILS, type DetailsLayout } from './detailsSides';
+import { REAL_UV_ATLAS, mappedMaterialRegions, type UvAtlasVersion } from './realUvAtlas';
+import { UNDERBODY_PANEL_LAYOUT, panelPoint } from './underbodyPanel';
 import {
   SKIN3D_MESH_FILE,
   SKIN3D_PREVIEW_FILE,
@@ -42,6 +46,7 @@ function canvasToRGBA(source: HTMLCanvasElement, size: number): RGBAImage {
     ctx.drawImage(source, 0, 0, source.width, source.height, 0, 0, size, size);
   }
   const data = ctx.getImageData(0, 0, size, size).data;
+  c.width = c.height = 1;
   return { width: size, height: size, data };
 }
 
@@ -57,6 +62,9 @@ function nextAnimationFrame(): Promise<void> {
 }
 
 export interface ExportSources {
+  uvAtlas?:UvAtlasVersion;
+  detailsLayout?: DetailsLayout;
+  previewGlb?: ArrayBuffer;
   /** Selected raster resolution; editable layer coordinates stay independent of it. */
   textureResolution?: TextureResolution;
   /** Optional per-channel caps, used by compact exports before allocating RGBA. */
@@ -150,7 +158,7 @@ function polygonBox(poly: { x: number; y: number }[]) {
   return { x0, y0, x1, y1 };
 }
 
-export function speedLightPolygons(): { x: number; y: number }[][] {
+export function speedLightPolygons(layout?: import('./detailsSides').DetailsLayout,uvAtlas?:UvAtlasVersion): { x: number; y: number }[][] {
   const out: { x: number; y: number }[][] = [];
   for (const island of UV_GUIDE_ISLANDS) {
     if (island.family !== 'details') continue;
@@ -166,7 +174,8 @@ export function speedLightPolygons(): { x: number; y: number }[][] {
       if (hit) out.push(poly);
     }
   }
-  return out;
+  const polygons=layout===UNDERBODY_PANEL_LAYOUT?out.map(poly=>poly.map(p=>panelPoint(p,'base'))):layout ? out.flatMap(poly=>[0,.5].map(offset=>poly.map(p=>({x:offset+p.x*.5,y:p.y})))) : out;
+  return uvAtlas?mappedMaterialRegions([{key:'speed',label:'Vitesse',polygons}],'details',layout??'stock').flatMap(r=>r.polygons):polygons;
 }
 
 const rearLightMasks = new Map<string, Uint8Array>();
@@ -218,12 +227,12 @@ function parseHexColor(hex: string): [number, number, number] {
 }
 
 /** Îlots UV des feux arrière, là où le jeu affiche la vitesse. */
-export function speedLightMask(width: number, height: number): Uint8Array {
-  const key = `${width}x${height}`;
+export function speedLightMask(width: number, height: number, layout?: import('./detailsSides').DetailsLayout,uvAtlas?:UvAtlasVersion): Uint8Array {
+  const key = `${width}x${height}:${layout??'native'}`;
   const cached = rearLightMasks.get(key);
   if (cached) return cached;
   const mask = new Uint8Array(width * height);
-  for (const poly of speedLightPolygons()) fillUvPolygon(mask, width, height, poly);
+  for (const poly of speedLightPolygons(layout,uvAtlas)) fillUvPolygon(mask, width, height, poly);
   rearLightMasks.set(key, mask);
   return mask;
 }
@@ -265,6 +274,9 @@ export function applyIllumRole(
 }
 
 export interface BuildSkinZipOptions {
+  uvAtlas?:UvAtlasVersion;
+  detailsLayout?: DetailsLayout;
+  previewGlb?: ArrayBuffer;
   horn?: SkinHorn | null;
   dirtEnabled?: boolean;
   skinName: string;
@@ -333,35 +345,48 @@ function solidImage(size: number, [r, g, b, a]: [number, number, number, number]
  * lèverait une erreur (garantit qu'aucune map n'est silencieusement oubliée).
  * Séparé de `exportSkinZip` pour être testable en headless.
  */
-export async function buildSkinZipFromImages(
-  images: Record<MapId, RGBAImage>,
-  opts: BuildSkinZipOptions,
-): Promise<Blob> {
+export function encodeSkinMap(id: MapId, image: RGBAImage, opts: BuildSkinZipOptions): Uint8Array {
+  const def = MAPS.find(map => map.id === id);
+  if (!def || !image) throw new Error(`Map manquante à l'export : ${id}`);
+  let rgba = image;
+  if (isDirtMask(def.id) && opts.dirtEnabled === false) rgba = solidImage(4, [0, 0, 0, 255]);
+  if (def.kind === 'illum') {
+    // Les feux de vitesse sont toujours écrits, même si le reste du calque est noir.
+    rgba = applyIllumRole(
+      rgba,
+      opts.illumRole ?? 'always',
+      def.id === 'Details_I' ? speedLightMask(rgba.width, rgba.height, opts.detailsLayout,opts.uvAtlas) : undefined,
+      opts.speedColor ?? '#ffffff',
+      opts.illumRolesByMap?.[def.id] ?? (def.id === 'Details_I' ? opts.illumRoles : undefined),
+    );
+  }
+  // Map laissée en aplat (non éditée) → export minuscule (voir FLAT_MAP_RES).
+  const flat = uniformColor(rgba);
+  if (flat && rgba.width > FLAT_MAP_RES) {
+    rgba = solidImage(FLAT_MAP_RES, flat);
+  }
+  return new Uint8Array(encodeDDS(rgba, def.format, {
+    colorSpace: def.kind === 'basecolor' ? 'srgb' : 'linear',
+    mipmapAlpha: def.kind === 'illum' ? 'illumination-role' : 'average',
+  }));
+}
+
+export type EncodedSkinMaps = Partial<Record<MapId, Uint8Array>>;
+
+export async function buildSkinZipFromImages(images: Record<MapId, RGBAImage>, opts: BuildSkinZipOptions): Promise<Blob> {
+  const encoded: EncodedSkinMaps = {};
+  for (const def of MAPS) encoded[def.id] = encodeSkinMap(def.id, images[def.id], opts);
+  return buildSkinZipFromEncodedMaps(encoded, opts);
+}
+
+/** Retain compact DDS files, never all thirteen uncompressed RGBA atlases. */
+export async function buildSkinZipFromEncodedMaps(images: EncodedSkinMaps, opts: BuildSkinZipOptions): Promise<Blob> {
   const hornAudio = opts.horn ? normalizeHornAudio(opts.horn.data) : null;
   const zip = new JSZip();
   for (const def of MAPS) {
-    let rgba = images[def.id];
-    if (!rgba) throw new Error(`Map manquante à l'export : ${def.id}`);
-    if (isDirtMask(def.id) && opts.dirtEnabled === false) rgba = solidImage(4, [0, 0, 0, 255]);
-    if (def.kind === 'illum') {
-      // Les feux de vitesse sont toujours écrits, même si le reste du calque est noir.
-      rgba = applyIllumRole(
-        rgba,
-        opts.illumRole ?? 'always',
-        def.id === 'Details_I' ? speedLightMask(rgba.width, rgba.height) : undefined,
-        opts.speedColor ?? '#ffffff',
-        opts.illumRolesByMap?.[def.id] ?? (def.id === 'Details_I' ? opts.illumRoles : undefined),
-      );
-    }
-    // Map laissée en aplat (non éditée) → export minuscule (voir FLAT_MAP_RES).
-    const flat = uniformColor(rgba);
-    if (flat && rgba.width > FLAT_MAP_RES) {
-      rgba = solidImage(FLAT_MAP_RES, flat);
-    }
-    zip.file(def.fileName, encodeDDS(rgba, def.format, {
-      colorSpace: def.kind === 'basecolor' ? 'srgb' : 'linear',
-      mipmapAlpha: def.kind === 'illum' ? 'illumination-role' : 'average',
-    }));
+    const encoded = images[def.id];
+    if (!encoded) throw new Error(`Map manquante à l'export : ${def.id}`);
+    zip.file(def.fileName, encoded);
   }
   // Glass has no editable surface yet, but full-skin protection covers its dirt mask too.
   if (opts.dirtEnabled === false) zip.file('Glass_DirtMask.dds', encodeDDS(solidImage(4, [0, 0, 0, 255]), 'BC4'));
@@ -370,6 +395,11 @@ export async function buildSkinZipFromImages(
   }
   if (opts.meshGbx) {
     zip.file(SKIN3D_MESH_FILE, opts.meshGbx);
+  }
+  if (opts.detailsLayout||opts.uvAtlas) {
+    if ((opts.detailsLayout&&![INDEPENDENT_DETAILS,UNDERBODY_PANEL_LAYOUT].includes(opts.detailsLayout)) || (opts.uvAtlas&&opts.uvAtlas!==REAL_UV_ATLAS) || !opts.meshGbx || !opts.previewGlb) throw new Error('Modèle UV incomplet.');
+    zip.file(SKIN3D_PREVIEW_FILE, opts.previewGlb);
+    zip.file('skin3d.json', JSON.stringify({ version: 1, name: opts.skinName, detailsLayout: opts.detailsLayout,uvAtlas:opts.uvAtlas }));
   }
   for (const extra of opts.passthrough ?? []) {
     const name = baseName(extra.name);
@@ -408,42 +438,51 @@ export async function exportSkinZip(
   await nextAnimationFrame();
   await nextAnimationFrame();
 
-  const images = {} as Record<MapId, RGBAImage>;
-  for (const def of MAPS) {
-    const selected = Math.min(sources.textureResolution ?? def.exportRes, sources.mapResolutions?.[def.id] ?? Infinity);
-    const res = sources.maxExportRes
-      ? Math.min(selected, sources.maxExportRes)
-      : selected;
-    const canvas = sources.getMapCanvas(def.id);
-    // Blank editable channels already have a tiny, exact preview. Avoid expanding
-    // them to 4096² only to shrink them again after the uniform-colour check.
-    const flat = def.id !== 'Details_I' && canvas.width === FLAT_MAP_RES && canvas.height === FLAT_MAP_RES ? canvasToRGBA(canvas, FLAT_MAP_RES) : null;
-    images[def.id] = flat && uniformColor(flat) ? flat : canvasToRGBA(canvas, res);
-  }
-  const iconTGA = sources.icon ? encodeTGA(canvasToRGBA(sources.icon, 256)) : undefined;
-  const illumRolesByMap: Partial<Record<MapId, RGBAImage>> = {};
-  for (const def of MAPS.filter((map) => map.kind === 'illum')) {
-    const roleSource = sources.getIllumRoleCanvas?.(def.id);
-    if (!roleSource) continue;
-    const size = images[def.id].width;
-    const canvas = document.createElement('canvas');
-    canvas.width = canvas.height = size;
-    const ctx = canvas.getContext('2d')!;
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(roleSource, 0, 0, size, size);
-    illumRolesByMap[def.id] = { width: size, height: size, data: ctx.getImageData(0, 0, size, size).data };
-  }
-  return buildSkinZipFromImages(images, {
-    horn: sources.horn,
-    skinName,
-    dirtEnabled: sources.dirtEnabled,
-    illumRole: sources.illumRole,
-    illumRolesByMap,
-    speedColor: sources.speedColor,
-    iconTGA,
-    meshGbx: sources.meshGbx,
-    passthrough: sources.passthrough,
+  const options: BuildSkinZipOptions = {
+    horn: sources.horn, skinName, dirtEnabled: sources.dirtEnabled, illumRole: sources.illumRole, speedColor: sources.speedColor,
+    iconTGA: sources.icon ? encodeTGA(canvasToRGBA(sources.icon, 256)) : undefined,
+    meshGbx: sources.meshGbx, detailsLayout: sources.detailsLayout, uvAtlas: sources.uvAtlas, previewGlb: sources.previewGlb, passthrough: sources.passthrough,
+  };
+  const encoder = await createSkinZipEncoder(options, () => {
+    const encoded: EncodedSkinMaps = {};
+    return {
+      async addMap(id, image, roles) {
+        // Yield to the UI between channels when workers are unavailable.
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        encoded[id] = encodeSkinMap(id, image, { ...options, ...(roles ? { illumRolesByMap: { [id]: roles } } : {}) });
+      },
+      finish: () => buildSkinZipFromEncodedMaps(encoded, options),
+      dispose: () => { for (const def of MAPS) delete encoded[def.id]; },
+    };
   });
+  try {
+    for (const def of MAPS) {
+      if (isDirtMask(def.id) && sources.dirtEnabled === false) {
+        await encoder.addMap(def.id, solidImage(4, [0, 0, 0, 255]));
+        continue;
+      }
+      const selected = Math.min(sources.textureResolution ?? def.exportRes, sources.mapResolutions?.[def.id] ?? Infinity);
+      const res = sources.maxExportRes
+        ? Math.min(selected, sources.maxExportRes)
+        : selected;
+      const canvas = sources.getMapCanvas(def.id);
+      // Blank editable channels already have a tiny, exact preview. Avoid expanding
+      // them to 4096² only to shrink them again after the uniform-colour check.
+      const flat = def.id !== 'Details_I' && canvas.width === FLAT_MAP_RES && canvas.height === FLAT_MAP_RES ? canvasToRGBA(canvas, FLAT_MAP_RES) : null;
+      const image = flat && uniformColor(flat) ? flat : canvasToRGBA(canvas, res);
+      let roles: RGBAImage | undefined;
+      const roleSource = def.kind === 'illum' ? sources.getIllumRoleCanvas?.(def.id) : undefined;
+      if (roleSource) {
+        const roleCanvas = document.createElement('canvas'); roleCanvas.width = roleCanvas.height = image.width;
+        const ctx = roleCanvas.getContext('2d')!; ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(roleSource, 0, 0, image.width, image.height);
+        roles = { width: image.width, height: image.height, data: ctx.getImageData(0, 0, image.width, image.height).data };
+        roleCanvas.width = roleCanvas.height = 1;
+      }
+      await encoder.addMap(def.id, image, roles);
+    }
+    return await encoder.finish();
+  } finally { encoder.dispose(); }
 }
 
 export interface ImportFailure {
@@ -539,6 +578,8 @@ export async function importSkinZipFromBuffer(buf: ArrayBuffer): Promise<ImportR
   let preview: ArrayBuffer | null = null;
   let metaName: string | null = null;
   let parts: BlenderPart[] | undefined;
+  let detailsLayout: DetailsLayout | undefined;
+  let uvAtlas:UvAtlasVersion|undefined;
   const passthrough: Skin3DFile[] = [];
   // Decode a single candidate; prefer the game file at the root over archived alternatives.
   const hornCandidates = entries.filter((entry) => /^horn\.(wav|ogg|mp3)$/i.test(baseName(entry.name)));
@@ -573,7 +614,10 @@ export async function importSkinZipFromBuffer(buf: ArrayBuffer): Promise<ImportR
         if (size > 4 * 1024 * 1024) throw new Error('Métadonnées Blender trop volumineuses.');
         const metadata = await entry.async('string');
         if (metadata.length > 4 * 1024 * 1024) throw new Error('Métadonnées Blender trop volumineuses.');
-        const parsed = JSON.parse(metadata) as { name?: unknown; parts?: unknown };
+        const parsed = JSON.parse(metadata) as { name?: unknown; parts?: unknown; detailsLayout?: unknown;uvAtlas?:unknown };
+        if(parsed.uvAtlas!==undefined&&parsed.uvAtlas!==REAL_UV_ATLAS)throw new Error('Disposition UV inconnue.');uvAtlas=parsed.uvAtlas as UvAtlasVersion|undefined;
+        if (parsed.detailsLayout !== undefined && ![INDEPENDENT_DETAILS,UNDERBODY_PANEL_LAYOUT].includes(parsed.detailsLayout as DetailsLayout)) throw new Error('Disposition des détails inconnue.');
+        detailsLayout = parsed.detailsLayout as DetailsLayout | undefined;
         if (typeof parsed.name === 'string' && parsed.name.trim()) metaName = parsed.name.trim();
         if (parsed.parts !== undefined) { validateBlenderParts(parsed.parts); parts = parsed.parts; }
       } catch {
@@ -650,7 +694,7 @@ export async function importSkinZipFromBuffer(buf: ArrayBuffer): Promise<ImportR
       try { parts = blenderPartsFromGlb(preview); }
       catch (err) { result.failures.push({ path: SKIN3D_PREVIEW_FILE, reason: `Pièces non séparées : ${String(err)}` }); }
     }
-    result.skin3d = { mesh, preview, passthrough: uniquePassthrough, name: metaName, ...(parts?.length ? { parts } : {}) };
+    result.skin3d = { mesh, preview, passthrough: uniquePassthrough, name: metaName, ...(parts?.length ? { parts } : {}), ...(detailsLayout ? { detailsLayout } : {}),...(uvAtlas?{uvAtlas}:{}) };
   }
   return result;
 }

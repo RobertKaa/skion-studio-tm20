@@ -3,7 +3,7 @@
  * (localStorage, clé versionnée). Le parsing est défensif : toute valeur
  * absente ou invalide retombe sur la valeur par défaut, champ par champ.
  */
-import { DEFAULT_OPTIONS, THEME_CATALOG, type GeneratorOptions } from './generator';
+import { DEFAULT_OPTIONS, THEME_CATALOG, type GeneratorOptions } from './generatorCatalog';
 import { ILLUM_ROLES } from './maps';
 
 const STORAGE_KEY = 'tmskin.randomPrefs.v2';

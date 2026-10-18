@@ -10,6 +10,8 @@ import {
   FabricImage,
   FabricObject,
   Group,
+  FixedLayout,
+  LayoutManager,
   IText,
   Line,
   Path,
@@ -27,6 +29,7 @@ import { COPY_COMPATIBLE_TARGETS, MAPS, MAP_BY_ID, getRegionOrientation, SKIN_RE
 import { decodeIllumCodes, encodeIllumCodes, importLightPixels, imageLightBitmap, roleAlpha, roleFromAlpha, type IllumCodes, type ImageLight } from '../illumination';
 import { speedLightPolygons } from '../skinZip';
 import { UV_GUIDE_ISLANDS, type UvGuideIsland } from '../uvGuideData';
+import { WHEEL_PART_GUIDES } from '../wheelParts';
 import { paintIslandsForModel, uvElementAt, uvElementIsland, uvRegionAt, uvRegionBounds, type BlenderPart } from '../blenderParts';
 import { applyObjectPaint, applyObjectStyle, readObjectPaint } from './objectPaint';
 import { imageIslandAt, imageIslandClearance } from './imagePlacement';
@@ -36,10 +39,14 @@ import type { ProjectMaps } from '../projectFile';
 import { TEXTURE_RESOLUTION, MAX_TEXTURE_RESOLUTION, isTextureResolution, type TextureResolution, upgradeMapResolution, upgradeResolutionSnapshot } from './resolution';
 import { AdaptivePreview } from './adaptivePreview';
 import { createTextureBackground, readTextureBackground, syncTextureBackgroundCanvas, textureBackgroundName, updateTextureBackground, type BackgroundFit } from './textureBackground';
-import { isValidMaterialDefinition, isValidMaterialLayer, type MaterialDefinition, type MaterialLayer, type MaterialRegion, type MaterialRenderChannel } from '../materials/types';
+import { createMaterialDefinition, isValidMaterialDefinition, isValidMaterialLayer, type MaterialDefinition, type MaterialLayer, type MaterialRegion, type MaterialRenderChannel } from '../materials/types';
 import { loadMaterialSources, renderMaterialLayer, getMaterialSourceCanvas, pinMaterialSources } from '../materials/render';
+import { materialDragFrame } from '../materials/projection';
+import { DETAILS_SIDES, detailsRegionOnSide, detailsSideKey, detailsSideLabel, detailsSideOffset, detailsWholeSide, INDEPENDENT_DETAILS, materialDetailsSide, materialOnDetailsSide, type DetailsLayout } from '../detailsSides';
+import { UNDERBODY_PANEL_LAYOUT, PANEL_BOUNDS, panelFrame, panelGuide, panelCanvasRegion, materialOnPanelAtlas, type PanelPlacement } from '../underbodyPanel';
 import type { MaterialSurfaceOverlay } from '../materials/surfaceMaps';
 import { materialPngBytes } from '../materials/import';
+import { REAL_UV_ATLAS, realAtlasLayout, sourceAtlasGuides, organizedAtlasGuides, mappedMaterialRegions, placementMatrix, type UvAtlasVersion, type AtlasSourceLayout } from '../realUvAtlas';
 
 // Full-atlas groups/clips must retain detail even when rendered to a 4096² texture.
 // Fabric's default cache budget would silently downsample these layers.
@@ -119,7 +126,7 @@ const DEFAULT_VPT: TMat2D = [1, 0, 0, 1, 0, 0];
  * `mirrorOf` lie deux calques en miroir (symétrie) : l'un suit l'autre tant
  * que le mode symétrie est actif.
  */
-const CUSTOM_PROPS = ['id', 'name', 'selectable', 'evented', 'visible', 'mirrorOf', 'referenceOnly', 'illumRole', 'illumCodes', 'decal', 'linkedImageId', 'linkedImageKind', 'imageMaterial', 'imageMaterialEnabled', 'imageOrder', 'imageLight', 'imageLightEnabled', 'blenderPart', 'partColor', 'textureBackground', 'materialLayer'];
+const CUSTOM_PROPS = ['id', 'name', 'selectable', 'evented', 'visible', 'subTargetCheck', 'interactive', 'mirrorOf', 'referenceOnly', 'illumRole', 'illumCodes', 'decal', 'linkedImageId', 'linkedImageKind', 'imageMaterial', 'imageMaterialEnabled', 'imageOrder', 'imageLight', 'imageLightEnabled', 'blenderPart', 'partColor', 'textureBackground', 'materialLayer'];
 const MATERIAL_PLACEHOLDER = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAABmJLR0QA/wD/AP+gvaeTAAAAC0lEQVQImWNgAAIAAAUAAWJVMogAAAAASUVORK5CYII=';
 
 /** Calque verrouillé des feux arrière : seule sa couleur se règle. */
@@ -228,17 +235,237 @@ export class EditorCore {
   elementContextMenuHandler: ((context: ElementCopyContext | null) => void) | null = null;
   regionPrecision: 'element' | 'piece' = 'element';
   private blenderParts: BlenderPart[] = [];
+  private detailsLayout?: DetailsLayout;
+  private uvAtlas?:UvAtlasVersion;
+  setUvAtlas(layout?:UvAtlasVersion){this.uvAtlas=layout;}
+  setDetailsLayout(layout?: DetailsLayout) { this.detailsLayout=layout; }
+
+  clearSelection() {
+    this.canvas.discardActiveObject(); this.canvas.requestRenderAll();
+    this.emit('selection'); this.emit('layers');
+  }
 
   setBlenderParts(parts: BlenderPart[] = []) { this.blenderParts = parts; }
 
+  /** Stage editable copies first. The caller then installs the matching model
+   * and starts a new project history, so Undo cannot restore the former atlas. */
+  async splitDetailsSides() {
+    if(this.detailsLayout)return;
+    const staged=new Map<MapId,{objects:FabricObject[];background?:FabricObject}>();
+    for(const [id,state] of this.maps){
+      if(MAP_BY_ID[id].group!=='details')continue;
+      const res=MAP_BY_ID[id].workRes,objects:FabricObject[]=[];
+      for(const source of state.canvas.getObjects()){
+        const original=source as EditorObject;
+        if(original.linkedImageId||this.isSpeedLight(source))continue;
+        // Physical decals are baked again against the new model, as one owner.
+        if(original.decal){objects.push(source);continue;}
+        for(const side of DETAILS_SIDES){
+          const copy=await source.clone(CUSTOM_PROPS) as EditorObject;
+          copy.id=nextId();copy.mirrorOf=undefined;
+          copy.name=`${original.name||'Élément'} · ${detailsSideLabel(side)}`;
+          if(original.blenderPart)copy.blenderPart=detailsSideKey(original.blenderPart,side);
+          if(original.materialLayer)copy.materialLayer=materialOnDetailsSide(original.materialLayer,side);
+          else{
+            const matrix:TMat2D=[.5,0,0,1,detailsSideOffset(side)*res,0];
+            util.applyTransformToObject(copy,util.multiplyTransformMatrices(matrix,copy.calcTransformMatrix()));
+            if(copy.clipPath?.absolutePositioned)util.applyTransformToObject(copy.clipPath,util.multiplyTransformMatrices(matrix,copy.clipPath.calcTransformMatrix()));
+            copy.setCoords();
+          }
+          objects.push(copy);
+        }
+      }
+      let background:FabricObject|undefined;
+      const info=readTextureBackground(state.canvas);
+      if(info){
+        const image=await FabricImage.fromURL(info.src);
+        background=createTextureBackground(image,state.canvas.width,state.canvas.height,state.canvas.backgroundColor as string,{...info,layout:INDEPENDENT_DETAILS});
+      }else if(state.canvas.backgroundImage){
+        // Unknown legacy backgrounds remain editable images with their exact
+        // source, rather than flattening the existing drawing into a bitmap.
+        for(const side of DETAILS_SIDES){
+          const copy=await state.canvas.backgroundImage.clone(CUSTOM_PROPS) as EditorObject;
+          copy.id=nextId();copy.name=`Fond importé · ${detailsSideLabel(side)}`;
+          util.applyTransformToObject(copy,util.multiplyTransformMatrices([.5,0,0,1,detailsSideOffset(side)*res,0],copy.calcTransformMatrix()));
+          objects.unshift(copy);
+        }
+      }
+      staged.set(id,{objects,background});
+    }
+    this.detailsLayout=INDEPENDENT_DETAILS;
+    for(const [id,{objects,background}] of staged){
+      const state=this.maps.get(id)!;const old=state.suspendHistory;state.suspendHistory=true;
+      try{
+        state.canvas.discardActiveObject();state.canvas.remove(...state.canvas.getObjects());state.canvas.add(...objects);
+        state.canvas.backgroundImage?.dispose();state.canvas.backgroundImage=background;
+        syncTextureBackgroundCanvas(state.canvas);
+        if(id==='Details_I')this.ensureSpeedLight(state);
+      }finally{state.suspendHistory=old;}
+      this.pushHistory(id);this.markTextureDirty(id);state.canvas.requestRenderAll();
+    }
+    this.clipIslandKey=null;this.projectionBakes.clear();this.materialBakes.clear();
+    this.emit('layers');this.emit('selection');this.emit('dirty');
+  }
+
   getGuideIslands(family = MAP_BY_ID[this.activeMap].group): UvGuideIsland[] {
-    return paintIslandsForModel(this.blenderParts, family);
+    return paintIslandsForModel(this.blenderParts, family, this.detailsLayout,this.uvAtlas);
+  }
+
+  private remapPanelObject(object:FabricObject,placement:PanelPlacement,mapId:MapId) {
+    const frame=panelFrame(placement),res=MAP_BY_ID[mapId].workRes,matrix:TMat2D=[frame.scale,0,0,frame.scale,frame.x*res,frame.y*res];
+    const clip=object.clipPath;
+    if(clip){
+      const original=clip.absolutePositioned?clip.calcTransformMatrix():util.multiplyTransformMatrices(object.calcTransformMatrix(),clip.calcTransformMatrix());
+      util.applyTransformToObject(clip,util.multiplyTransformMatrices(matrix,original));clip.absolutePositioned=true;
+    }
+    util.applyTransformToObject(object,util.multiplyTransformMatrices(matrix,object.calcTransformMatrix()));
+    const region=panelCanvasRegion(placement),limit=new Polygon(region.polygons[0].map(p=>({x:p.x*res,y:p.y*res})),{absolutePositioned:true,strokeWidth:0,fill:'#fff'});
+    if(clip)limit.clipPath=clip;object.clipPath=limit;object.setCoords();
+  }
+
+  /** Repack the original atlas once; only the first shared Dessous contour
+   * receives an additional independently editable counterpart. */
+  async splitUnderbodyPanel() {
+    if(this.detailsLayout)throw new Error('Ouvrez le projet d’origine pour séparer uniquement ce panneau.');
+    const staged=new Map<MapId,{objects:FabricObject[];background?:FabricObject}>();
+    for(const [id,state] of this.maps){
+      if(MAP_BY_ID[id].group!=='details')continue;
+      const res=MAP_BY_ID[id].workRes,objects:FabricObject[]=[];
+      const sources=[...state.canvas.getObjects()];
+      if(state.canvas.backgroundImage&&!readTextureBackground(state.canvas))sources.unshift(state.canvas.backgroundImage);
+      for(const source of sources){
+        const original=source as EditorObject;
+        if(original.linkedImageId||this.isSpeedLight(source))continue;
+        if(original.decal){objects.push(source);continue;}
+        const bounds=source.getBoundingRect(),touches=bounds.left< (PANEL_BOUNDS.x+PANEL_BOUNDS.w)*res&&bounds.left+bounds.width>PANEL_BOUNDS.x*res
+          &&bounds.top<(PANEL_BOUNDS.y+PANEL_BOUNDS.h)*res&&bounds.top+bounds.height>PANEL_BOUNDS.y*res;
+        const exactPanel=Math.abs(bounds.left-PANEL_BOUNDS.x*res)<2&&Math.abs(bounds.top-PANEL_BOUNDS.y*res)<2
+          &&Math.abs(bounds.width-PANEL_BOUNDS.w*res)<2&&Math.abs(bounds.height-PANEL_BOUNDS.h*res)<2;
+        for(const placement of touches?['base','right'] as const:['base'] as const){
+          const copy=await source.clone(CUSTOM_PROPS) as EditorObject;
+          copy.id=placement==='base'&&original.id?original.id:nextId();
+          if(placement==='right'){
+            copy.mirrorOf=undefined;copy.name=`Panneau inférieur droit · ${original.name||'Dessin'}`;copy.blenderPart=panelGuide('right').key;
+          }else if(copy.blenderPart==='d_floor:element:0'||exactPanel){
+            copy.name=`Panneau inférieur gauche · ${original.name||'Dessin'}`;copy.blenderPart=panelGuide('left').key;copy.mirrorOf=undefined;
+          }
+          if(original.materialLayer){
+            copy.materialLayer=materialOnPanelAtlas(original.materialLayer,placement);
+            if(!copy.materialLayer.regions.length)continue;
+          }else this.remapPanelObject(copy,placement,id);
+          objects.push(copy);
+        }
+      }
+      const info=readTextureBackground(state.canvas);
+      const background=info?createTextureBackground(await FabricImage.fromURL(info.src),state.canvas.width,state.canvas.height,state.canvas.backgroundColor as string,
+        {...info,layout:UNDERBODY_PANEL_LAYOUT}):undefined;
+      staged.set(id,{objects,background});
+    }
+    this.detailsLayout=UNDERBODY_PANEL_LAYOUT;
+    for(const [id,{objects,background}]of staged){
+      const state=this.maps.get(id)!;state.suspendHistory=true;
+      try{state.canvas.discardActiveObject();state.canvas.remove(...state.canvas.getObjects());state.canvas.add(...objects);
+        state.canvas.backgroundImage?.dispose();state.canvas.backgroundImage=background;syncTextureBackgroundCanvas(state.canvas);if(id==='Details_I')this.ensureSpeedLight(state);
+      }finally{state.suspendHistory=false;}
+      this.pushHistory(id);this.markTextureDirty(id);state.canvas.requestRenderAll();
+    }
+    this.clipIslandKey=null;this.projectionBakes.clear();this.materialBakes.clear();this.emit('layers');this.emit('selection');this.emit('dirty');
+  }
+
+  /** Migrate the actual editable scene, not a display copy of its texture.
+   * Every existing drawing is clipped and transformed into its new UV pieces. */
+  async reorganizeUvAtlas(reverse=false) {
+    if(reverse?!this.uvAtlas:!!this.uvAtlas)return;
+    this.commitMaterialLayers();const sourceLayout=this.detailsLayout??'stock';
+    const staged=new Map<MapId,{objects:FabricObject[];background?:FabricObject}>();let count=0;
+    for(const [id,state]of this.maps){
+      const family=MAP_BY_ID[id].group,res=MAP_BY_ID[id].workRes,layout=realAtlasLayout(family,sourceLayout),objects:FabricObject[]=[];
+      const sources=[...state.canvas.getObjects()];const info=readTextureBackground(state.canvas);
+      if(state.canvas.backgroundImage&&!info)sources.unshift(state.canvas.backgroundImage);
+      for(const source of sources){
+        const original=source as EditorObject;if(original.linkedImageId||this.isSpeedLight(source))continue;
+        if(original.materialLayer){const copy=await source.clone(CUSTOM_PROPS) as EditorObject;
+          const {nativeAtlas,organizedAtlas,...layer}=copy.materialLayer!;
+          copy.materialLayer=reverse?{...layer,...(nativeAtlas?{}:{organizedAtlas:sourceLayout})}:{...layer,...(organizedAtlas?{}:{nativeAtlas:sourceLayout})};objects.push(copy);continue;}
+        if(original.decal){objects.push(await source.clone(CUSTOM_PROPS));continue;}
+        const bounds=source.getBoundingRect(),pieces:FabricObject[]=[];
+        for(const placement of layout.placements){
+          const b=reverse?placement.bounds:placement.part.bounds;if(bounds.left>=(b.x+b.w)*res||bounds.left+bounds.width<=b.x*res||bounds.top>=(b.y+b.h)*res||bounds.top+bounds.height<=b.y*res)continue;
+          if(++count>4000)throw new Error('Ce projet contient trop de fragments pour conserver ses calques éditables après réorganisation. Le projet initial est conservé.');
+          // Prune disjoint children before cloning. A migrated drawing contains
+          // one bounded group per chart; cloning all of them for every chart
+          // would otherwise grow quadratically on each return trip.
+          const intersects=(object:FabricObject)=>{const r=object.getBoundingRect();return r.left<(b.x+b.w)*res&&r.left+r.width>b.x*res&&r.top<(b.y+b.h)*res&&r.top+r.height>b.y*res;};
+          const prune=(object:FabricObject,json:Record<string,unknown>):Record<string,unknown>|null=>{
+            if(!intersects(object))return null;
+            if(object instanceof Group&&Array.isArray(json.objects)){json.objects=object.getObjects().map((child,i)=>prune(child,(json.objects as Record<string,unknown>[])[i])).filter(Boolean);if(!(json.objects as unknown[]).length)return null;}
+            return json;
+          };
+          const serialized=prune(source,source.toObject(CUSTOM_PROPS));if(!serialized)continue;
+          const [copy]=await util.enlivenObjects<EditorObject>([serialized]);
+          const forward=placementMatrix(placement,res),matrix=reverse?util.invertTransform(forward):forward,clip=copy.clipPath;
+          if(clip){const global=clip.absolutePositioned?clip.calcTransformMatrix():util.multiplyTransformMatrices(copy.calcTransformMatrix(),clip.calcTransformMatrix());util.applyTransformToObject(clip,util.multiplyTransformMatrices(matrix,global));clip.absolutePositioned=true;}
+          util.applyTransformToObject(copy,util.multiplyTransformMatrices(matrix,copy.calcTransformMatrix()));
+          const target=reverse?placement.part.bounds:placement.bounds,limit=new Rect({left:target.x*res,top:target.y*res,width:target.w*res,height:target.h*res,originX:'left',originY:'top',strokeWidth:0,fill:'#fff'});
+          // Fabric composes nested clips in the object's local frame. Keeping
+          // an absolute clip inside another absolute clip loses that frame.
+          const inverse=util.invertTransform(copy.calcTransformMatrix());
+          util.applyTransformToObject(limit,util.multiplyTransformMatrices(inverse,limit.calcTransformMatrix()));
+          if(clip){const relative=util.multiplyTransformMatrices(inverse,clip.calcTransformMatrix());clip.absolutePositioned=false;util.applyTransformToObject(clip,util.multiplyTransformMatrices(util.invertTransform(limit.calcTransformMatrix()),relative));limit.clipPath=clip;}
+          const suffix=` · ${placement.part.region.label}`;
+          copy.clipPath=limit;copy.mirrorOf=undefined;copy.id=nextId();copy.name=reverse||original.name?.endsWith(suffix)?original.name||'Dessin':`${original.name||'Dessin'}${suffix}`;copy.setCoords();
+          const linked=original.imageMaterialEnabled||original.imageLight&&original.imageLightEnabled!==false||!!original.illumCodes;
+          pieces.push(linked?copy:this.boundedUvFragment(copy,target,res));
+        }
+        if(!pieces.length)continue;
+        const linked=original.imageMaterialEnabled||original.imageLight&&original.imageLightEnabled!==false||!!original.illumCodes;
+        if(pieces.length===1||linked){if(pieces.length===1){(pieces[0] as EditorObject).id=original.id??nextId();(pieces[0] as EditorObject).name=original.name||'Dessin';}objects.push(...pieces);}
+        else{const group=new Group(pieces,{subTargetCheck:true,interactive:true,objectCaching:false}) as EditorObject;group.id=original.id??nextId();group.name=original.name||'Dessin';group.illumRole=original.illumRole;group.referenceOnly=original.referenceOnly;group.selectable=source.selectable;group.evented=source.evented;objects.push(group);}
+      }
+      const settings=info?{name:info.name,fit:info.fit,colorOpacity:info.colorOpacity,...(info.layout?{layout:info.layout}:{})}:undefined;
+      const undoBackground=info?.uvAtlas&&!!info.uvAtlas.reverse!==reverse;
+      const background=info?createTextureBackground(await FabricImage.fromURL(info.src),res,res,state.canvas.backgroundColor as string,{...settings!,...(undoBackground?{}:{uvAtlas:{family,source:sourceLayout,...(reverse?{reverse:true}:{})}})}):undefined;
+      staged.set(id,{objects,background});
+    }
+    this.uvAtlas=reverse?undefined:REAL_UV_ATLAS;this.symmetry=false;this.clipIslandKey=null;
+    for(const [id,{objects,background}]of staged){const state=this.maps.get(id)!;state.suspendHistory=true;
+      try{state.canvas.discardActiveObject();state.canvas.remove(...state.canvas.getObjects());state.canvas.add(...objects);state.canvas.backgroundImage=background;syncTextureBackgroundCanvas(state.canvas);if(id==='Details_I')this.ensureSpeedLight(state);}
+      finally{state.suspendHistory=false;}
+      // Conversion is a project copy: per-map Undo must never restore old UVs
+      // beneath a model that already uses the new atlas.
+      this.resetMapBaseline(id);this.markTextureDirty(id);state.canvas.requestRenderAll();
+    }
+    this.projectionBakes.clear();this.materialBakes.clear();this.emit('layers');this.emit('selection');this.emit('dirty');
+  }
+
+  restoreUvAtlas(){return this.reorganizeUvAtlas(true);}
+
+  /** Bound the cache to the chart, even when its editable source fills an atlas.
+   * A full-size cached drawing per tiny clip can otherwise consume gigabytes. */
+  private boundedUvFragment(object:FabricObject,box:{x:number;y:number;w:number;h:number},res:number):FabricObject {
+    const matrix=object.calcTransformMatrix(),clip=object.clipPath;object.clipPath=undefined;
+    const fragment=new Group([object],{left:box.x*res,top:box.y*res,width:box.w*res,height:box.h*res,originX:'left',originY:'top',strokeWidth:0,objectCaching:true,subTargetCheck:true,interactive:true,layoutManager:new LayoutManager(new FixedLayout())}) as EditorObject;
+    const inverse=util.invertTransform(fragment.calcTransformMatrix());
+    util.applyTransformToObject(object,util.multiplyTransformMatrices(inverse,matrix));
+    if(clip){util.applyTransformToObject(clip,util.multiplyTransformMatrices(util.multiplyTransformMatrices(inverse,matrix),clip.calcTransformMatrix()));clip.absolutePositioned=false;fragment.clipPath=clip;}
+    const source=object as EditorObject;fragment.id=source.id;fragment.name=source.name;fragment.illumRole=source.illumRole;fragment.referenceOnly=source.referenceOnly;fragment.selectable=object.selectable;fragment.evented=object.evented;fragment.setCoords();return fragment;
   }
 
   private findIsland(key: string): UvGuideIsland | undefined {
+    if(this.uvAtlas){
+      const match=/^(.*):element:(\d+)$/.exec(key),base=match?.[1]??key;
+      const island=(['skin','details','wheels'] as const).flatMap(f=>this.getGuideIslands(f)).find(i=>i.key===base);return island?(match?uvElementIsland(island,Number(match[2]))??undefined:island):undefined;
+    }
     const element = /^(.*):element:(\d+)$/.exec(key);
     if (element) { const island = this.findIsland(element[1]); return island ? uvElementIsland(island, Number(element[2])) ?? undefined : undefined; }
-    return this.blenderParts.find((i) => i.key === key) ?? UV_GUIDE_ISLANDS.find((i) => i.key === key);
+    const side=/^(.*):side:(left|right)$/.exec(key);
+    if(this.detailsLayout===INDEPENDENT_DETAILS&&side){
+      if(side[1]==='details')return {...detailsWholeSide(side[2] as 'left'|'right'),family:'details'};
+      const original=UV_GUIDE_ISLANDS.find(i=>i.key===side[1]&&i.family==='details');
+      return original?detailsRegionOnSide(original,side[2] as 'left'|'right'):undefined;
+    }
+    if(this.detailsLayout){const current=this.getGuideIslands('details').find(i=>i.key===key);if(current)return current;}
+    return this.blenderParts.find((i) => i.key === key) ?? WHEEL_PART_GUIDES.find(i => i.key === key) ?? UV_GUIDE_ISLANDS.find((i) => i.key === key);
   }
   /** Lissage du pinceau libre (0 = aucun, 1 = max) — contrôle le decimate fabric. */
   brushSmoothing = 0.35;
@@ -267,10 +494,12 @@ export class EditorCore {
     st: MapState;
     path: MutablePath;
     pts: { x: number; y: number }[];
+    clipKey?: string;
   } | null = null;
-  private imageDrag: { mapId: MapId; image: FabricImage; pointer: Point; center: Point; islandKey?: string; clearance: number; changed: boolean; patternOffset?: { x: number; y: number } } | null = null;
+  private imageDrag: { mapId: MapId; image: FabricImage; pointer: Point; center: Point; islandKey?: string; clearance: number; changed: boolean; patternOffset?: { x: number; y: number }; worldFrame?: ReturnType<typeof materialDragFrame> } | null = null;
   private projectionDrag: { image: FabricImage & EditorObject; mapId: MapId; pointer: Vec3; center: Vec3; changed: boolean } | null = null;
   projectionBaker: ((decal: DecalProjection, source: PixelSource) => Map<DecalFamily, ProjectionBitmap>) | null = null;
+  materialGeometry: (() => readonly import('../three/decalProjection').ProjectionTriangle[]) | null = null;
   private textureResolution: TextureResolution = TEXTURE_RESOLUTION;
   private projectionSources = new Map<string, PixelSource>();
   private projectionBakes = new Map<string, { key: string; bitmaps: Map<DecalFamily, ProjectionBitmap> }>();
@@ -1020,6 +1249,7 @@ export class EditorCore {
   }
 
   private onWheel(e: WheelEvent) {
+    if ((e.target as Element | null)?.closest?.('.uv-parts-board, .uv-global-atlas')) return;
     if (!this.isPointerOverViewport(e)) return;
     if (this.shouldResizeBrushOnWheel(e)) {
       e.preventDefault();
@@ -1035,6 +1265,7 @@ export class EditorCore {
   }
 
   private onPanDown(e: MouseEvent) {
+    if ((e.target as Element | null)?.closest?.('.uv-parts-board, .uv-global-atlas')) return;
     if (!this.isPanTrigger(e)) return;
     e.preventDefault();
     e.stopPropagation();
@@ -1604,6 +1835,7 @@ export class EditorCore {
     const name = textureBackgroundName(file.name);
     const background = createTextureBackground(image, c.width, c.height, c.backgroundColor as string, {
       name, fit: previous?.fit ?? 'cover', colorOpacity: previous?.colorOpacity ?? 0,
+      ...(!this.uvAtlas&&this.detailsLayout&&MAP_BY_ID[mapId].group==='details'?{layout:this.detailsLayout}:{}),
     });
     c.backgroundImage?.dispose();
     c.backgroundImage = background;
@@ -1731,6 +1963,21 @@ export class EditorCore {
     const localHeight = Math.abs(Math.sin(radians)) * width + Math.abs(Math.cos(radians)) * height;
     const role = this.illumToolRole;
     const image = await this.loadEditableImage(file);
+    const wheelMode=key.startsWith('tyres:tread')?'wheel':/^tyres:(inner|outer)/.test(key)?'wheel-face':null;
+    if(mapId==='Wheels_B'&&wheelMode){
+      const geometry=this.materialGeometry?.(),sequence=++this.materialUpdateSequence;
+      if(!geometry?.length){image.dispose();throw new Error('Attendez le chargement du modèle 3D pour adapter cette image.');}
+      const object=image as FabricImage&EditorObject;object.name=textureBackgroundName(file.name);
+      try{
+        const layer=await this.wheelImageMaterial(object,wheelMode,key,geometry);
+        if(sequence!==this.materialUpdateSequence||this.materialGeometry?.()!==geometry)throw new Error('Le projet a changé pendant le chargement de l’image. Réessayez.');
+        object.id??=nextId();object.materialLayer=layer;object.name=`Matériau · ${layer.definition.name}`;object.imageOrder=Date.now()*1000+idCounter;
+        const suspended=state.suspendHistory;state.suspendHistory=true;try{state.canvas.add(image);}finally{state.suspendHistory=suspended;}
+        this.refreshLinkedImages();this.pushHistory(mapId);
+        if(this.activeMap===mapId){state.canvas.setActiveObject(image);this.setTool('select');}
+        this.emit('layers');this.emit('selection');this.flushTexture();return image;
+      }catch(error){this.pinMaterialOwnerSources();image.dispose();throw error;}
+    }
     // Extend beyond the contour by one texel to avoid a second antialiased edge on the image.
     const scale = Math.max((localWidth + 2) / image.width, (localHeight + 2) / image.height);
     image.set({
@@ -1754,9 +2001,47 @@ export class EditorCore {
     return image;
   }
 
-  getSelectionMaterialLayer(): MaterialLayer | null {
+  getSelectionMaterialLayer(sourceFrame=false): MaterialLayer | null {
     const layer = (this.getSelection() as EditorObject | null)?.materialLayer;
-    return layer ? structuredClone(layer) : null;
+    if(layer&&sourceFrame&&this.uvAtlas){const source=this.detailsLayout??'stock';const {nativeAtlas,...copy}=structuredClone(layer);return nativeAtlas?copy:{...copy,organizedAtlas:source};}
+    const atlas=layer?.nativeAtlas??layer?.organizedAtlas;
+    return layer ? structuredClone(atlas?{...layer,regions:mappedMaterialRegions(layer.regions,layer.family,atlas,!!layer.organizedAtlas),exclusions:mappedMaterialRegions(layer.exclusions,layer.family,atlas,!!layer.organizedAtlas)}:layer) : null;
+  }
+
+  /** Promote an existing flat tyre image to one editable, geometry-aware
+   * material. Keep its identity/order/opacity and its image, with Undo intact. */
+  async adaptSelectionToWheel(mode:'wheel'|'wheel-face',key=mode==='wheel'?'tyres:tread':'tyres:outer'):Promise<boolean> {
+    const image=this.getSelection() as (FabricImage&EditorObject)|null;
+    if(this.activeMap!=='Wheels_B'||!(image instanceof FabricImage)||image.materialLayer||image.linkedImageId||image.decal)return false;
+    const geometry=this.materialGeometry?.();if(!geometry?.length)throw new Error('Attendez le chargement du modèle 3D pour adapter cette image.');
+    const sequence=++this.materialUpdateSequence;
+    const layer=await this.wheelImageMaterial(image,mode,key,geometry);
+    if(sequence!==this.materialUpdateSequence||this.getSelection()!==image||this.activeMap!=='Wheels_B'||this.materialGeometry?.()!==geometry){this.pinMaterialOwnerSources();return false;}
+    image.materialLayer=layer;image.imageMaterialEnabled=false;image.imageLightEnabled=false;image.imageLight=undefined;
+    image.clipPath=undefined;image.blenderPart=undefined;image.name=`Matériau · ${layer.definition.name}`;
+    this.materialBakes.delete(image.id!);this.refreshLinkedImages();this.pushHistory('Wheels_B');
+    this.emit('layers');this.emit('selection');this.flushTexture();return true;
+  }
+
+  private async wheelImageMaterial(image:FabricImage&EditorObject,mode:'wheel'|'wheel-face',key:string,geometry:readonly import('../three/decalProjection').ProjectionTriangle[]):Promise<MaterialLayer> {
+    const regions=this.materialRegions([key],'wheels');
+    if(!Number.isFinite(image.width)||!Number.isFinite(image.height)||image.width<1||image.height<1||image.width>8192||image.height>8192||image.width*image.height>32*1024*1024)throw new Error('Dimensions de l’image de roue invalides.');
+    const canvas=document.createElement('canvas');canvas.width=Math.round(image.width);canvas.height=Math.round(image.height);
+    canvas.getContext('2d')!.drawImage(image.getElement(),0,0,canvas.width,canvas.height);
+    const source=canvas.toDataURL('image/png');canvas.width=canvas.height=1;
+    const definition=createMaterialDefinition();definition.name=textureBackgroundName(image.name??'Image de la roue');definition.color='#ffffff';
+    const finish=image.imageMaterialEnabled&&image.imageMaterial?image.imageMaterial:this.defaultImageMaterial('Wheels_B');
+    definition.roughness=finish.roughness;definition.metalness=finish.metalness;
+    definition.transform={...definition.transform,projection:mode,mode:mode==='wheel'?'repeat':'contain',size:256};
+    definition.textures.color={src:source,name:'Image de la roue.png',component:'luminance',invert:false};
+    if(image.imageLightEnabled&&image.imageLight){definition.emissionStrength=image.imageLight.strength;definition.emissionRole=image.imageLight.role;definition.textures.emission={...definition.textures.color};}
+    const layer:MaterialLayer={definition:this.runtimeMaterialDefinition(definition),family:'wheels',regions,exclusions:[]};
+    this.pinMaterialOwnerSources(layer.definition);
+    try{await loadMaterialSources(layer.definition);}catch(error){this.pinMaterialOwnerSources();throw error;}
+    // Validate this wheel geometry before changing the existing object/history.
+    try{renderMaterialLayer(layer,32,geometry).forEach(canvas=>{canvas.width=canvas.height=1;});}
+    catch(error){this.pinMaterialOwnerSources();throw error;}
+    return layer;
   }
 
   private materialRegions(keys: string[], family: MaterialLayer['family']): MaterialRegion[] {
@@ -1790,13 +2075,14 @@ export class EditorCore {
     return result;
   }
 
-  async addMaterialLayer(definition: MaterialDefinition, regions: string[] = [], exclusions: string[] = []) {
+  async addMaterialLayer(definition: MaterialDefinition, regions: string[] = [], exclusions: string[] = [], nativeAtlas?:AtlasSourceLayout, organizedAtlas?:AtlasSourceLayout) {
     if (!isValidMaterialDefinition(definition)) throw new Error('Matériau invalide.');
     const family = MAP_BY_ID[this.activeMap].group;
     const sequence = ++this.materialUpdateSequence;
     definition = this.runtimeMaterialDefinition(definition);
-    const layer: MaterialLayer = { definition, family,
-      regions: this.materialRegions(regions, family), exclusions: this.materialRegions(exclusions, family) };
+    const resolve=(keys:string[])=>nativeAtlas||organizedAtlas?keys.flatMap(key=>{const match=/^(.*):element:(\d+)$/.exec(key),guides=nativeAtlas?sourceAtlasGuides(family,nativeAtlas):organizedAtlasGuides(family,organizedAtlas==='stock'?undefined:organizedAtlas),island=guides.find(i=>i.key===(match?.[1]??key));return island?[match?uvElementIsland(island,Number(match[2]))!:island]:[];}):this.materialRegions(keys,family);
+    const layer: MaterialLayer = { definition, family, ...(nativeAtlas?{nativeAtlas}:{}), ...(organizedAtlas?{organizedAtlas}:{}),
+      regions: resolve(regions), exclusions: resolve(exclusions) };
     if (!isValidMaterialLayer(layer)) throw new Error('Masque du matériau invalide.');
     this.pinMaterialOwnerSources(definition);
     try { await loadMaterialSources(definition); } catch (error) { this.pinMaterialOwnerSources(); throw error; }
@@ -1818,13 +2104,14 @@ export class EditorCore {
     const image = this.getSelection() as (FabricImage & EditorObject) | null;
     if (!image?.materialLayer) return;
     if (!isValidMaterialDefinition(definition)) throw new Error('Matériau invalide.');
+    if(!isValidMaterialLayer({...image.materialLayer,definition}))throw new Error('Ce placement ne correspond pas à la surface du matériau.');
     definition = this.runtimeMaterialDefinition(definition);
     const sequence = ++this.materialUpdateSequence;
     this.pinMaterialOwnerSources(definition);
     try { await loadMaterialSources(definition); } catch (error) { this.pinMaterialOwnerSources(); throw error; }
     if (sequence !== this.materialUpdateSequence || this.getSelection() !== image) return;
     image.materialLayer = { ...image.materialLayer, definition: structuredClone(definition) };
-    image.name = `Matériau · ${definition.name}`;
+    image.name = `Matériau · ${definition.name}${image.materialLayer.atlasSide ? ` · ${detailsSideLabel(image.materialLayer.atlasSide)}` : ''}`;
     this.materialInteractive = true;
     this.refreshLinkedImages();
     const mapId = this.imageOwners().find((owner) => owner.image === image)!.mapId;
@@ -1838,7 +2125,10 @@ export class EditorCore {
     const image = this.getSelection() as EditorObject | null;
     if (!image?.materialLayer) return;
     const family = image.materialLayer.family;
-    const layer = { ...image.materialLayer, regions: this.materialRegions(regions, family), exclusions: this.materialRegions(exclusions, family) };
+    const side = image.materialLayer.atlasSide;
+    const frame=image.materialLayer.atlasFrame;
+    const sourceRegions=(keys:string[])=>image.materialLayer?.nativeAtlas?keys.flatMap(key=>{const match=/^(.*):element:(\d+)$/.exec(key),base=match?.[1]??key,island=sourceAtlasGuides(family,image.materialLayer!.nativeAtlas).find(i=>i.key===base);return island?[match?uvElementIsland(island,Number(match[2]))!:island]:[];}):image.materialLayer?.organizedAtlas?mappedMaterialRegions(this.materialRegions(keys,family),family,image.materialLayer.organizedAtlas):this.materialRegions(keys,family);
+    const layer = { ...image.materialLayer, regions: !regions.length && frame ? [panelCanvasRegion(frame.placement)] : !regions.length && side ? [detailsWholeSide(side)] : sourceRegions(regions), exclusions: sourceRegions(exclusions) };
     if (!isValidMaterialLayer(layer)) throw new Error('Masque du matériau invalide.');
     image.materialLayer = layer;
     this.refreshLinkedImages(); this.pushHistory(this.activeMap);
@@ -1856,6 +2146,10 @@ export class EditorCore {
 
   private renderMaterialOwner(image: FabricImage & EditorObject, wanted: Set<string>) {
     const layer = image.materialLayer!;
+    const geometry = this.materialGeometry?.();
+    // A restored project can precede the async model load. The model-ready
+    // callback rebuilds these owners as soon as their shared 3D frame exists.
+    if (layer.definition.transform.projection && layer.definition.transform.projection !== 'uv' && !geometry?.length) return;
     const size = this.materialInteractive ? Math.min(512, this.getTextureResolution()) : this.getTextureResolution();
     this.materialBakes ??= new Map();
     this.materialSourceKeys ??= new Map();
@@ -1867,7 +2161,7 @@ export class EditorCore {
     const key = JSON.stringify([{ ...layer, definition: { ...layer.definition, textures } }, size, image.opacity]);
     let bake = this.materialBakes.get(image.id!);
     if (bake?.key !== key) {
-      const channels = renderMaterialLayer(layer, size);
+      const channels = renderMaterialLayer(layer, size, geometry);
       const surface = (channel: 'normal' | 'ao') => {
         const canvas = channels.get(channel);
         if (!canvas) return undefined;
@@ -1877,7 +2171,8 @@ export class EditorCore {
       };
       const surfaces = { family: layer.family, normal: layer.family === 'skin' ? undefined : surface('normal'), ao: surface('ao') };
       // Keep only the selected bounds in Fabric; five full 4096px buffers per small piece would waste memory.
-      const points = layer.regions.flatMap(region => region.polygons.flat());
+      const atlas=layer.nativeAtlas??layer.organizedAtlas;
+      const points = (atlas?mappedMaterialRegions(layer.regions,layer.family,atlas,!!layer.organizedAtlas):layer.regions).flatMap(region => region.polygons.flat());
       const x = points.length ? Math.max(0, Math.floor(Math.min(...points.map(point => point.x)) * size) - 1) : 0;
       const y = points.length ? Math.max(0, Math.floor(Math.min(...points.map(point => point.y)) * size) - 1) : 0;
       const right = points.length ? Math.min(size, Math.ceil(Math.max(...points.map(point => point.x)) * size) + 1) : size;
@@ -2092,7 +2387,10 @@ export class EditorCore {
         this.markTextureDirty(id); state.canvas.requestRenderAll();
       }
       const materialOwners = this.imageOwners().filter(({ image }) => image.materialLayer);
-      const surfaces = materialOwners.filter(({ image }) => image.visible !== false).map(({ image }) => this.materialBakes.get(image.id!)!.surfaces);
+      const surfaces = materialOwners.filter(({ image }) => image.visible !== false).flatMap(({ image }) => {
+        const bake = this.materialBakes.get(image.id!);
+        return bake ? [bake.surfaces] : [];
+      });
       if (surfaces.length !== this.materialSurfaces?.length || surfaces.some((surface, index) => surface !== this.materialSurfaces[index])) this.materialSurfaces = surfaces;
       const alive = new Set(materialOwners.map(({ image }) => image.id));
       for (const id of this.materialBakes?.keys() ?? []) if (!alive.has(id)) this.materialBakes.delete(id);
@@ -2101,7 +2399,7 @@ export class EditorCore {
   }
 
   rebuildProjectionsForModel() {
-    this.projectionBakes.clear(); this.refreshLinkedImages(); this.flushTexture(); this.emit('layers'); this.emit('selection'); this.emit('dirty');
+    this.projectionBakes.clear(); this.materialBakes.clear(); this.refreshLinkedImages(); this.flushTexture(); this.emit('layers'); this.emit('selection'); this.emit('dirty');
   }
 
   private upsertLinkedImage(owner: FabricImage & EditorObject, mapId: MapId, bitmap: PixelSource | HTMLCanvasElement, kind: 'color' | 'material' | 'light' | 'coat' | 'dirt', wanted: Set<string>, frame?: { x: number; y: number; size: number }) {
@@ -2218,7 +2516,7 @@ export class EditorCore {
   }
 
   /** Sélection dans l'atlas depuis un clic sur la voiture. Les calques verrouillés sont ignorés. */
-  beginImageDrag(mapId: MapId, x: number, y: number): boolean {
+  beginImageDrag(mapId: MapId, x: number, y: number, anchor?: SurfaceAnchor): boolean {
     this.endImageDrag();
     const canvas = this.maps.get(mapId)!.canvas;
     const point = new Point(x, y);
@@ -2234,24 +2532,32 @@ export class EditorCore {
     canvas.setActiveObject(image);
     const center = image.getCenterPoint();
     const res = MAP_BY_ID[mapId].workRes;
-    const islandKey = image.clipPath ? imageIslandAt(MAP_BY_ID[mapId].group, center.x / res, 1 - center.y / res) : undefined;
+    const islandKey = image.clipPath ? imageIslandAt(MAP_BY_ID[mapId].group, center.x / res, 1 - center.y / res, this.detailsLayout,this.uvAtlas) : undefined;
+    const projection = (image as EditorObject).materialLayer?.definition.transform.projection;
     this.imageDrag = { mapId, image, pointer: point, center,
+      ...(anchor && projection && projection !== 'uv' && this.materialGeometry ? { worldFrame: materialDragFrame(projection, this.materialGeometry(), anchor, MAP_BY_ID[mapId].group) } : {}),
       ...((image as EditorObject).materialLayer ? { patternOffset: { x: (image as EditorObject).materialLayer!.definition.transform.offsetX, y: (image as EditorObject).materialLayer!.definition.transform.offsetY } } : {}),
       islandKey,
-      clearance: islandKey ? Math.min(imageIslandClearance(MAP_BY_ID[mapId].group, islandKey, center.x / res, 1 - center.y / res), .45 * Math.min(image.getScaledWidth(), image.getScaledHeight()) / res) : 0,
+      clearance: islandKey ? Math.min(imageIslandClearance(MAP_BY_ID[mapId].group, islandKey, center.x / res, 1 - center.y / res, this.detailsLayout,this.uvAtlas), .45 * Math.min(image.getScaledWidth(), image.getScaledHeight()) / res) : 0,
       changed: false };
     canvas.requestRenderAll();
     this.emit('selection');
     return true;
   }
 
-  moveImageDrag(x: number, y: number) {
+  moveImageDrag(x: number, y: number, anchor?: SurfaceAnchor) {
     const drag = this.imageDrag;
     if (!drag) return false;
     const layer = (drag.image as EditorObject).materialLayer;
     if (layer && drag.patternOffset) {
-      const offsetX = Math.max(-16384, Math.min(16384, drag.patternOffset.x + x - drag.pointer.x));
-      const offsetY = Math.max(-16384, Math.min(16384, drag.patternOffset.y + y - drag.pointer.y));
+      const world = drag.worldFrame;
+      const delta = world && anchor ? anchor.point.map((value,i)=>value-world.point[i]) : null;
+      const nativeScale=layer.nativeAtlas?1/realAtlasLayout(layer.family,layer.nativeAtlas).placements[0].matrix[0]:layer.organizedAtlas?realAtlasLayout(layer.family,layer.organizedAtlas).placements[0].matrix[0]:1;
+      const uvScale = !layer.definition.transform.projection || layer.definition.transform.projection === 'uv' ? layer.atlasSide?2:layer.atlasFrame?1/panelFrame(layer.atlasFrame.placement).scale:1 : 1;
+      const dx = delta && world ? delta.reduce((sum,value,i)=>sum+value*world.right[i],0)*world.scale : (x-drag.pointer.x)*uvScale*nativeScale;
+      const dy = delta && world ? -delta.reduce((sum,value,i)=>sum+value*world.up[i],0)*world.scale : (y-drag.pointer.y)*(layer.atlasFrame?uvScale:1)*nativeScale;
+      const offsetX = Math.max(-16384, Math.min(16384, drag.patternOffset.x + dx));
+      const offsetY = Math.max(-16384, Math.min(16384, drag.patternOffset.y + dy));
       if (offsetX === layer.definition.transform.offsetX && offsetY === layer.definition.transform.offsetY) return true;
       (drag.image as EditorObject).materialLayer = { ...layer, definition: { ...layer.definition, transform: { ...layer.definition.transform, offsetX, offsetY } } };
       drag.changed = true; this.materialInteractive = true;
@@ -2266,8 +2572,8 @@ export class EditorCore {
     );
     // Le point saisi n'est pas forcément le centre du logo. On vérifie aussi ce centre
     // pour qu'un glisser par un bord ne pousse pas l'image hors de son masque.
-    if (drag.islandKey && imageIslandAt(MAP_BY_ID[drag.mapId].group, next.x / res, 1 - next.y / res) !== drag.islandKey) return false;
-    if (drag.islandKey && imageIslandClearance(MAP_BY_ID[drag.mapId].group, drag.islandKey, next.x / res, 1 - next.y / res) + .00001 < drag.clearance) return false;
+    if (drag.islandKey && imageIslandAt(MAP_BY_ID[drag.mapId].group, next.x / res, 1 - next.y / res, this.detailsLayout,this.uvAtlas) !== drag.islandKey) return false;
+    if (drag.islandKey && imageIslandClearance(MAP_BY_ID[drag.mapId].group, drag.islandKey, next.x / res, 1 - next.y / res, this.detailsLayout,this.uvAtlas) + .00001 < drag.clearance) return false;
     if (next.eq(drag.image.getCenterPoint())) return true;
     drag.image.setXY(next, 'center', 'center');
     drag.image.setCoords();
@@ -2633,7 +2939,7 @@ export class EditorCore {
       const codes = MAP_BY_ID[id].kind === 'illum'
         ? original.illumCodes ? decodeIllumCodes(original.illumCodes) : new Uint8Array(source.width * source.height).fill(roleAlpha(original.illumRole ?? this.illumToolRole))
         : undefined;
-      const images = await this.splitPartImages(id, raster, paintIslandsForModel(this.blenderParts, MAP_BY_ID[id].group), codes);
+      const images = await this.splitPartImages(id, raster, paintIslandsForModel(this.blenderParts, MAP_BY_ID[id].group, this.detailsLayout,this.uvAtlas), codes);
       images.forEach((image) => image.set({ left: image.left * source.scaleX, top: image.top * source.scaleY, scaleX: source.scaleX, scaleY: source.scaleY,
         opacity: source.opacity, visible: source.visible, selectable: source.selectable, evented: source.evented }));
       const index = state.canvas.getObjects().indexOf(source); const wasSuspended = state.suspendHistory; state.suspendHistory = true;
@@ -2747,6 +3053,7 @@ export class EditorCore {
       .map((o) => {
         const obj = o as EditorObject;
         const owner = obj.linkedImageId ? owners.get(obj.linkedImageId) : obj;
+        const side = owner?.materialLayer ? materialDetailsSide(owner.materialLayer) : undefined;
         return {
           id: obj.id ?? '',
           name: obj.name || this.defaultName(obj),
@@ -2756,13 +3063,29 @@ export class EditorCore {
           selected: active.has(obj),
           linked: !!obj.linkedImageId,
           ...(owner?.materialLayer ? { material: {
-            name: owner.materialLayer.definition.name,
+            name: side ? `${owner.materialLayer.atlasSide?'Côté':'Panneau'} ${detailsSideLabel(side)} · ${owner.materialLayer.definition.name}` : owner.materialLayer.definition.name,
             ownerId: owner.id ?? '',
             linked: !!obj.linkedImageId,
           } } : {}),
         };
       })
       .reverse();
+  }
+
+  /** Expose migrated vector/image fragments for individual editing. */
+  async ungroupSelection():Promise<boolean> {
+    const canvas=this.canvas,group=canvas.getActiveObject();if(!(group instanceof Group)||group instanceof ActiveSelection||this.isSpeedLight(group)||!group.selectable)return false;
+    const matrix=group.calcTransformMatrix(),masks=group.clipPath?await Promise.all(group.getObjects().map(()=>group.clipPath!.clone(CUSTOM_PROPS))):[];
+    if(canvas.getActiveObject()!==group){masks.forEach(mask=>mask.dispose());return false;}
+    const state=this.maps.get(this.activeMap)!,index=canvas.getObjects().indexOf(group);state.suspendHistory=true;
+    try{canvas.discardActiveObject();const children=group.removeAll();canvas.remove(group);
+      children.forEach((child,i)=>{const object=child as EditorObject,mask=masks[i];
+        if(mask){const inverse=util.invertTransform(object.calcTransformMatrix());util.applyTransformToObject(mask,util.multiplyTransformMatrices(util.multiplyTransformMatrices(inverse,matrix),mask.calcTransformMatrix()));mask.absolutePositioned=false;
+          const previous=object.clipPath;if(previous){const local=previous.absolutePositioned?util.multiplyTransformMatrices(inverse,previous.calcTransformMatrix()):previous.calcTransformMatrix();previous.absolutePositioned=false;util.applyTransformToObject(previous,util.multiplyTransformMatrices(util.invertTransform(mask.calcTransformMatrix()),local));mask.clipPath=previous;}object.clipPath=mask;}
+        object.id??=nextId();object.illumRole??=(group as EditorObject).illumRole;object.selectable=true;object.evented=true;object.setCoords();canvas.insertAt(index+i,object);});
+      if(children.length)canvas.setActiveObject(children[0]);group.dispose();
+    }finally{state.suspendHistory=false;}
+    this.refreshLinkedImages();this.pushHistory(this.activeMap);this.flushTexture();canvas.requestRenderAll();this.emit('layers');this.emit('selection');return true;
   }
 
   private defaultName(obj: FabricObject): string {
@@ -3137,14 +3460,48 @@ export class EditorCore {
     this.emit('selection');
   }
 
+  /** The livery generator describes the stock atlas; keep its new drawings
+   * editable on both independent sides without touching existing layers. */
+  generatedObjects(id: MapId, make: () => FabricObject): FabricObject[] {
+    const nativeObjects=()=>{
+    if (!this.detailsLayout || MAP_BY_ID[id].group !== 'details') return [make()];
+    if(this.detailsLayout===UNDERBODY_PANEL_LAYOUT)return (['base','right'] as const).map(placement=>{const object=make();this.remapPanelObject(object,placement,id);return object;});
+    return DETAILS_SIDES.map(side => {
+      const object = make() as EditorObject;
+      const matrix: TMat2D = [.5,0,0,1,detailsSideOffset(side)*MAP_BY_ID[id].workRes,0];
+      util.applyTransformToObject(object, util.multiplyTransformMatrices(matrix, object.calcTransformMatrix()));
+      if (object.clipPath?.absolutePositioned) util.applyTransformToObject(object.clipPath, util.multiplyTransformMatrices(matrix, object.clipPath.calcTransformMatrix()));
+      object.name = `${object.name || 'Élément'} · ${detailsSideLabel(side)}`;
+      return object;
+    });
+    };
+    if(!this.uvAtlas)return nativeObjects();
+    const res=MAP_BY_ID[id].workRes,result:FabricObject[]=[];
+    for(const p of realAtlasLayout(MAP_BY_ID[id].group,this.detailsLayout??'stock').placements)for(const object of nativeObjects()){
+      const b=object.getBoundingRect(),source=p.part.bounds;
+      if(b.left>=(source.x+source.w)*res||b.left+b.width<=source.x*res||b.top>=(source.y+source.h)*res||b.top+b.height<=source.y*res)continue;
+      const matrix=placementMatrix(p,res),clip=object.clipPath;
+      if(clip){const global=clip.absolutePositioned?clip.calcTransformMatrix():util.multiplyTransformMatrices(object.calcTransformMatrix(),clip.calcTransformMatrix());util.applyTransformToObject(clip,util.multiplyTransformMatrices(matrix,global));clip.absolutePositioned=true;}
+      util.applyTransformToObject(object,util.multiplyTransformMatrices(matrix,object.calcTransformMatrix()));
+      const limit=new Rect({left:p.bounds.x*res,top:p.bounds.y*res,width:p.bounds.w*res,height:p.bounds.h*res,originX:'left',originY:'top',strokeWidth:0,fill:'#fff'}),inverse=util.invertTransform(object.calcTransformMatrix());
+      util.applyTransformToObject(limit,util.multiplyTransformMatrices(inverse,limit.calcTransformMatrix()));
+      if(clip){const relative=util.multiplyTransformMatrices(inverse,clip.calcTransformMatrix());clip.absolutePositioned=false;util.applyTransformToObject(clip,util.multiplyTransformMatrices(util.invertTransform(limit.calcTransformMatrix()),relative));limit.clipPath=clip;}
+      object.clipPath=limit;result.push(this.boundedUvFragment(object,p.bounds,res));
+    }
+    if(result.length<2)return result;
+    const group=new Group(result,{objectCaching:false,subTargetCheck:true,interactive:true}) as EditorObject;group.name=(result[0] as EditorObject).name;return[group];
+  }
+
   // --------------------------------------------------- peinture directe sur la 3D
 
   /**
    * Démarre un trait de pinceau à la position (x, y) en pixels du canvas de la
    * map `mapId`. Chaque trait devient un seul calque `Path` éditable/annulable.
    */
-  paintBegin(mapId: MapId, x: number, y: number, opts: { color: string; size: number }) {
+  paintBegin(mapId: MapId, x: number, y: number, opts: { color: string; size: number; clipKey?: string; name?: string }) {
     if (this.stroke3d) this.paintEnd();
+    const explicitClip = opts.clipKey ? this.buildIslandClip(opts.clipKey, mapId) : undefined;
+    if (opts.clipKey && !explicitClip) return;
     const st = this.maps.get(mapId)!;
     st.suspendHistory = true;
     const path = new Path(brushPathData([{ x, y }]), {
@@ -3157,10 +3514,11 @@ export class EditorCore {
       evented: true,
       strokeUniform: true,
     }) as MutablePath;
-    (path as FabricObject & { name?: string }).name = 'Peinture 3D';
-    if (this.clipIslandKey) this.applyClip(path, mapId);
+    (path as FabricObject & { name?: string }).name = opts.name ?? 'Peinture 3D';
+    if (explicitClip) path.clipPath = explicitClip;
+    else if (this.clipIslandKey) this.applyClip(path, mapId);
     st.canvas.add(path);
-    this.stroke3d = { mapId, st, path, pts: [{ x, y }] };
+    this.stroke3d = { mapId, st, path, pts: [{ x, y }], clipKey: opts.clipKey };
     st.canvas.requestRenderAll();
     this.flushTexture();
   }
@@ -3187,7 +3545,7 @@ export class EditorCore {
     s.path.setCoords();
     s.st.canvas.requestRenderAll();
     this.pushHistory(s.mapId);
-    if (this.symmetry) void this.createMirror(s.path, s.st.canvas, s.mapId);
+    if (this.symmetry) void this.createMirror(s.path, s.st.canvas, s.mapId, s.clipKey);
     this.emit('layers');
     this.flushTexture();
   }
@@ -3266,7 +3624,7 @@ export class EditorCore {
     try {
       if (existing.length) c.remove(...existing);
       const res = MAP_BY_ID.Details_I.workRes;
-      const parts = speedLightPolygons().map(
+      const parts = speedLightPolygons(this.detailsLayout,this.uvAtlas).map(
         (poly) =>
           new Polygon(
             poly.map((p) => ({ x: p.x * res, y: p.y * res })),
@@ -3318,12 +3676,12 @@ export class EditorCore {
     }
 
     (obj as FabricObject & { name?: string }).name = frac.label
-      ? `Remplissage · ${frac.label}`
+      ? effKey?.startsWith('d_floor:panel:') ? `Panneau inférieur ${effKey.endsWith(':left')?'gauche':'droit'}` : effKey?.startsWith('d_floor:side:') ? `Dessous ${effKey.includes(':left') ? 'gauche' : 'droit'}` : `Remplissage · ${frac.label}`
       : 'Remplissage pièce';
     c.add(obj);
     c.setActiveObject(obj);
     this.setTool('select');
-    if (this.symmetry) void this.createMirror(obj, c, this.activeMap, effKey);
+    if (this.symmetry && !effKey?.includes(':side:') && !effKey?.includes(':panel:')) void this.createMirror(obj, c, this.activeMap, effKey);
     c.requestRenderAll();
     this.emit('layers');
     this.emit('selection');
@@ -3332,7 +3690,7 @@ export class EditorCore {
   // -------------------------------------------------------------- précision
 
   setSymmetry(on: boolean) {
-    this.symmetry = on;
+    this.symmetry = on && !this.uvAtlas;
   }
 
   setClipIsland(key: string | null) {

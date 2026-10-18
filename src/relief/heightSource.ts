@@ -1,5 +1,10 @@
 import type { RGBAImage } from '../dds';
 import { isLocalMaterialSource, type MaterialLayer, type MaterialTexture } from '../materials/types';
+import { createMaterialProjector } from '../materials/projection';
+import { canonicalDetailsMaterial, detailsSideOffset } from '../detailsSides';
+import { panelFrame, panelReferenceMaterial, insidePanel } from '../underbodyPanel';
+import type { ProjectionTriangle } from '../three/decalProjection';
+import { atlasCoordinateMap, organizedAtlasGeometry } from '../realUvAtlas';
 
 export interface HeightSource { width: number; height: number; bits: 8 | 16; values: Float32Array }
 const fail = () => { throw new Error('La carte de hauteur PNG est invalide ou dépasse les limites (4K, 64 Mo).'); };
@@ -110,20 +115,37 @@ export async function localPNGAspect(src: string): Promise<number> {
 /** Inverse of the material renderer's repeat placement. Preserve source samples
  * independently of export quality; the rendered alpha retains region masks.
  */
-export function createHeightSampler(source: HeightSource, layer: MaterialLayer, mask: RGBAImage, aspect = source.height / source.width): (u: number, v: number) => number {
-  const transform = layer.definition.transform, texture = layer.definition.textures.height!;
-  const points = layer.regions.flatMap(region => region.polygons.flat());
-  const centerX = points.length ? (Math.min(...points.map(p=>p.x))+Math.max(...points.map(p=>p.x)))*1024 : 1024;
-  const centerY = points.length ? (Math.min(...points.map(p=>p.y))+Math.max(...points.map(p=>p.y)))*1024 : 1024;
-  const angle = -transform.angle * Math.PI / 180, cos = Math.cos(angle), sin = Math.sin(angle);
-  const wrap = (x: number, n: number) => ((x % n) + n) % n;
-  const alpha = (u: number, v: number) => {
+function heightMaskAlpha(mask: RGBAImage) {
+  return (u: number, v: number) => {
     const x = Math.max(0, Math.min(1, u)) * (mask.width - 1), y = (1 - Math.max(0, Math.min(1, v))) * (mask.height - 1);
     const a = Math.floor(x), b = Math.floor(y), tx = x - a, ty = y - b;
     const pixel = (px: number, py: number) => mask.data[(Math.min(py, mask.height - 1) * mask.width + Math.min(px, mask.width - 1)) * 4 + 3] / 255;
     return pixel(a,b)*(1-tx)*(1-ty)+pixel(a+1,b)*tx*(1-ty)+pixel(a,b+1)*(1-tx)*ty+pixel(a+1,b+1)*tx*ty;
   };
+}
+
+export function createProjectedHeightSampler(source: HeightSource, layer: MaterialLayer, mask: RGBAImage, geometry: readonly ProjectionTriangle[], aspect = source.height/source.width): (u:number,v:number)=>number {
+  if(layer.organizedAtlas){const {organizedAtlas,...authored}=layer,map=atlasCoordinateMap(layer.family,organizedAtlas),sample=createProjectedHeightSampler(source,authored,{width:1,height:1,data:new Uint8ClampedArray([255,255,255,255])},organizedAtlasGeometry(geometry,organizedAtlas),aspect),alpha=heightMaskAlpha(mask);return(u,v)=>sample(...map(u,v))*alpha(u,v);}
+  const projector=createMaterialProjector(layer,geometry,2048,{width:1,height:aspect});
+  if(!projector) return createHeightSampler(source,layer,mask,aspect);
+  const sample=projector.scalarSampler(source),alpha=heightMaskAlpha(mask),invert=layer.definition.textures.height!.invert;
+  return (u,v)=>{const value=sample(u,v);return (2*(invert?1-value:value)-1)*alpha(u,v);};
+}
+
+export function createHeightSampler(source: HeightSource, layer: MaterialLayer, mask: RGBAImage, aspect = source.height / source.width): (u: number, v: number) => number {
+  if(layer.organizedAtlas){const {organizedAtlas,...authored}=layer,map=atlasCoordinateMap(layer.family,organizedAtlas),sample=createHeightSampler(source,authored,{width:1,height:1,data:new Uint8ClampedArray([255,255,255,255])},aspect),alpha=heightMaskAlpha(mask);return(u,v)=>sample(...map(u,v))*alpha(u,v);}
+  const canonical=layer.atlasFrame?panelReferenceMaterial(layer):layer.atlasSide?canonicalDetailsMaterial(layer):layer;
+  const transform = canonical.definition.transform, texture = canonical.definition.textures.height!;
+  const points = canonical.regions.flatMap(region => region.polygons.flat());
+  const centerX = points.length ? (Math.min(...points.map(p=>p.x))+Math.max(...points.map(p=>p.x)))*1024 : 1024;
+  const centerY = points.length ? (Math.min(...points.map(p=>p.y))+Math.max(...points.map(p=>p.y)))*1024 : 1024;
+  const angle = -transform.angle * Math.PI / 180, cos = Math.cos(angle), sin = Math.sin(angle);
+  const wrap = (x: number, n: number) => ((x % n) + n) % n;
+  const alpha=heightMaskAlpha(mask);
   return (u, v) => {
+    const coverage=alpha(u,v);
+    if(layer.atlasFrame){const frame=panelFrame(layer.atlasFrame.placement);u=(u-frame.x)/frame.scale;v=1-((1-v-frame.y)/frame.scale);if(u<0||u>1||v<0||v>1||(layer.atlasFrame.placement==='right'&&!insidePanel(u,1-v)))return 0;}
+    if(layer.atlasSide){const offset=detailsSideOffset(layer.atlasSide);if(u<offset||u>offset+.5)return 0;u=(u-offset)*2;}
     // The validated 2K reference is stable across export qualities. Only the
     // alpha mask is rasterized at output quality; numeric height never is.
     const x = Math.max(0, Math.min(1,u)) * 2047 - centerX - transform.offsetX;
@@ -134,6 +156,6 @@ export function createHeightSampler(source: HeightSource, layer: MaterialLayer, 
     const value = (px: number, py: number) => source.values[wrap(py,source.height)*source.width+wrap(px,source.width)];
     let h = value(a,b)*(1-tx)*(1-ty)+value(a+1,b)*tx*(1-ty)+value(a,b+1)*(1-tx)*ty+value(a+1,b+1)*tx*ty;
     if (texture.invert) h = 1-h;
-    return (2*h-1)*alpha(u,v);
+    return (2*h-1)*coverage;
   };
 }

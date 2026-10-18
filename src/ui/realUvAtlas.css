@@ -1,0 +1,5 @@
+.surface-row { flex-wrap:wrap; gap:8px 12px; }
+.texture-bar { height:auto; min-height:94px; }
+.uv-atlas-badge { display:inline-flex; align-items:center; gap:5px; color:var(--accent); font-size:10px; white-space:nowrap; }
+.texture-layout-switch { margin-left:auto; }
+.uv-detail-return { margin-left:auto; }

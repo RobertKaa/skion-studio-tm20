@@ -4,6 +4,11 @@
 .materials-intro-title > svg { color: var(--accent); }
 .materials-local-badge { margin-left: auto; border: 1px solid var(--line); border-radius: 20px; padding: 2px 7px; color: var(--fg-3); font-size: 9px; white-space: nowrap; }
 .materials-panel .hint { font-size: 11px; color: var(--fg-3); line-height: 1.5; }
+.material-surface-follow { display: flex; flex-direction: column; gap: 7px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.material-surface-follow.is-active { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); background: color-mix(in srgb, var(--accent) 5%, var(--bg-0)); }
+.material-surface-follow-title { display: flex; align-items: center; gap: 7px; color: var(--fg-2); font-size: 11px; }
+.material-surface-follow.is-active .material-surface-follow-title { color: var(--accent); }
+.material-surface-follow p { margin: 0; color: var(--fg-3); font-size: 11px; line-height: 1.5; }
 .materials-library { display: flex; flex-direction: column; gap: 9px; }
 .materials-library-disclosure { border: 1px solid var(--line); border-radius: 8px; }
 .materials-library-disclosure > summary { display: flex; align-items: center; gap: 7px; padding: 10px; color: var(--fg-2); font-size: 11px; font-weight: 600; cursor: pointer; list-style: none; }
@@ -96,6 +101,7 @@
 .materials-panel button:focus-visible, .material-details > summary:focus-visible, .material-exclusions > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .materials-panel button:disabled { opacity: .42; cursor: default; }
 @media (max-width: 640px) {
+  .material-surface-follow .btn { min-height: 38px; white-space: normal; }
   .materials-library-disclosure > summary { min-height: 38px; }
   .materials-import-report > summary { min-height: 38px; }
   .materials-tabs > button, .material-fit > button, .material-scope > button { min-height: 38px; }

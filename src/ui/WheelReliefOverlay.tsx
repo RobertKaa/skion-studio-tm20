@@ -1,17 +1,20 @@
 import { useEffect, useRef } from 'react';
 import type { RGBAImage } from '../dds';
 import type { Skin3DFile } from '../skin3d';
-import { resolveWheelNormalImage, type WheelSurfaceSettings } from '../wheelSurface';
+import { resolveWheelNormalImage, isWheelTreadPreset, type WheelSurfaceSettings } from '../wheelSurface';
+import { cachedAtlasPixels } from '../realUvTextures';
+import type { AtlasSourceLayout } from '../realUvAtlas';
 import { createWheelReliefOverlay } from './wheelReliefShading';
 import './wheelReliefOverlay.css';
 
 /** Mounted inside canvas-overlays: its parent already applies the editor viewport. */
-export function WheelReliefOverlay({ visible, value, files, officialModel, technicalChannel }: {
+export function WheelReliefOverlay({ visible, value, files, officialModel, technicalChannel, atlasSource }: {
   visible: boolean;
   value: WheelSurfaceSettings;
   files: readonly Skin3DFile[];
   officialModel: boolean;
   technicalChannel: boolean;
+  atlasSource?:AtlasSourceLayout;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   // At most one shaded atlas is retained, not a cache entry for every slider step.
@@ -32,8 +35,9 @@ export function WheelReliefOverlay({ visible, value, files, officialModel, techn
     // Coalesce slider events and give the controls a paint before the source
     // resolves. Keep the previous guide during calculation instead of blinking.
     const timer = setTimeout(() => {
-      void resolveWheelNormalImage({ mode, strength }, files, officialModel).then((normal) => {
+      void resolveWheelNormalImage({ mode, strength }, files, officialModel||!!atlasSource).then((native) => {
         if (!current) return;
+        const normal=atlasSource&&isWheelTreadPreset(mode)?cachedAtlasPixels(native,'wheels',atlasSource):native;
         const image = cached.current?.normal === normal
           ? cached.current.image : createWheelReliefOverlay(normal);
         cached.current = { normal, image };
@@ -52,7 +56,7 @@ export function WheelReliefOverlay({ visible, value, files, officialModel, techn
       });
     }, 80);
     return () => { current = false; clearTimeout(timer); };
-  }, [enabled, mode, strength, files, officialModel]);
+  }, [enabled, mode, strength, files, officialModel,atlasSource]);
 
   if (!enabled) return null;
   return <canvas ref={canvas} width={1} height={1} aria-hidden="true"

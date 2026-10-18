@@ -14,6 +14,8 @@
 
 import { MAPS } from './maps';
 import type { BlenderPart } from './blenderParts';
+import type { DetailsLayout } from './detailsSides';
+import type { UvAtlasVersion } from './realUvAtlas';
 
 /** Mesh que le jeu charge à la place du visuel Stadium Car. */
 export const SKIN3D_MESH_FILE = 'MainBody.Mesh.gbx';
@@ -21,7 +23,7 @@ export const SKIN3D_MESH_FILE = 'MainBody.Mesh.gbx';
 /** Aperçu pour l'app (mêmes UV / matériaux que le FBX compilé). */
 export const SKIN3D_PREVIEW_FILE = 'preview.glb';
 
-/** Métadonnées du dossier projet (nom, date). Absentes du zip de jeu. */
+/** Métadonnées du projet ; le ZIP des côtés indépendants conserve aussi son atlas. */
 export const SKIN3D_META_FILE = 'skin3d.json';
 
 export interface Skin3DFile {
@@ -32,6 +34,8 @@ export interface Skin3DFile {
 
 /** Projet 3D chargé depuis un zip (dossier projet ou skin déjà compilé). */
 export interface Skin3DProject {
+  uvAtlas?: UvAtlasVersion;
+  detailsLayout?: DetailsLayout;
   parts?: BlenderPart[];
   mesh: Uint8Array;
   /** Absent si le zip ne contient que le mesh de jeu, sans aperçu. */

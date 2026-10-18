@@ -299,6 +299,33 @@ try {
   const heightBytes=await blobBytes(highPrecision.assets.get(heightOwner.materialLayer!.definition.textures.height!.src)!);
   assert.deepEqual(heightBytes,new Uint8Array(Buffer.from(png16,'base64')),'Material save preserves every original 16-bit PNG byte');
   assert.equal(heightBytes[24],16);
+  const projected=createMaterialDefinition();projected.name='Matière alignée';projected.color='#ffffff';
+  projected.transform={...projected.transform,projection:'top',mode:'stretch',size:256};
+  projected.textures.color={src:original,name:'Native.png',component:'r',invert:false};
+  core.materialGeometry=()=>[];
+  await core.addMaterialLayer(projected);
+  const projectedOwner=images('Skin_B').find(image=>image.materialLayer?.definition.name==='Matière alignée')!;
+  assert(projectedOwner,'A projected owner survives restoration before the model loads');
+  core.materialGeometry=()=>[
+    {family:'skin',points:[[-1,0,-1],[1,0,-1],[1,0,1]],uv:[[0,1],[1,1],[1,0]]},
+    {family:'skin',points:[[-1,0,-1],[1,0,1],[-1,0,1]],uv:[[0,1],[1,0],[0,0]]},
+  ];
+  core.rebuildProjectionsForModel();
+  assert.equal((projectedOwner.getElement() as HTMLCanvasElement).width,1024,'The model-ready callback rebuilds projected textures');
+  const worldProject=await core.captureProject();
+  const worldBundle=createBaseSkinProject({position:[3,2,4],target:[0,.5,0]});
+  worldBundle.document.editor={maps:worldProject.maps,speedColor:worldProject.speedColor,illumRole:worldProject.illumRole};
+  for(const [path,blob] of worldProject.assets)worldBundle.assets.set(path,await blobBytes(blob));
+  const worldSaved=await readProjectFile(await writeProjectFile(worldBundle));
+  const worldLayer=(worldSaved.document.editor.maps.Skin_B.objects as {materialLayer?:MaterialLayer}[]).find(object=>object.materialLayer?.definition.name==='Matière alignée')!.materialLayer!;
+  assert.equal(worldLayer.definition.transform.projection,'top','Project files preserve editable 3D alignment');
+  const pointer={point:[0,0,0] as [number,number,number],normal:[0,1,0] as [number,number,number],tangent:[1,0,0] as [number,number,number]};
+  assert(core.beginImageDrag('Skin_B',200,200,pointer));
+  core.moveImageDrag(1700,1800,{...pointer,point:[.1,0,0]});
+  const moved=core.getSelectionMaterialLayer()!.definition.transform;
+  assert(Math.abs(moved.offsetX-102.4)<1e-6 && moved.offsetY===0,'Crossing a UV seam moves the pattern by physical distance');
+  core.endImageDrag();core.commitMaterialLayers();
+  console.log('ok pending model restoration, projected export/rebuild, editable project roundtrip and physical 3D dragging across UV seams');
 } finally {
   core.commitMaterialLayers();
   for (const state of states.values()) { await state.canvas.dispose(); state.textureEl.width = state.textureEl.height = 0; }

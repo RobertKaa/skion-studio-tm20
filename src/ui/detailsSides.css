@@ -1,0 +1,8 @@
+.details-sides { padding: 12px; margin: 12px 0; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-0); }
+.details-sides-title { font-size: 12px; font-weight: 650; margin-bottom: 9px; }
+.details-sides .hint { margin: 8px 0 0; }
+.details-sides > .btn { margin-top: 10px; white-space: normal; }
+.details-sides-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.details-sides-actions .btn { padding-inline: 6px; white-space: normal; min-height: 36px; }
+.details-sides-actions .btn.is-active { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+@media (max-width: 380px) { .details-sides-actions { grid-template-columns: 1fr; } }

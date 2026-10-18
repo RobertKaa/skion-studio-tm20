@@ -8,7 +8,7 @@ export const MATERIAL_IMPORT_LIMITS = { files: 10, fileBytes: 64 * 1024 * 1024, 
   pixels: 16 * 1024 * 1024, totalPixels: 64 * 1024 * 1024, dimension: 8192, manifestBytes: 256 * 1024 } as const;
 export const MATERIAL_ARCHIVE_LIMITS = { entries: 256, archiveBytes: 256 * 1024 * 1024, expandedBytes: 512 * 1024 * 1024 } as const;
 export interface MaterialImportOptions { maxTextureSize?: 1024 | 2048 | 4096; targetChannel?: MaterialChannel }
-export interface MaterialImportResult { definition: MaterialDefinition; notices: string[] }
+export interface MaterialImportResult { definition: MaterialDefinition; notices: string[]; preservedPlacement?: boolean }
 const PACK_FORMAT = 'skion-material';
 const IMAGE_PATH = /^textures\/[a-zA-Z0-9][a-zA-Z0-9._-]{0,119}\.(?:png|jpe?g|webp)$/i;
 const DATA_PNG = /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/;
@@ -404,7 +404,7 @@ export async function importMaterialFilesDetailed(files: File[], options: Materi
     const file = files[0];
     if (!file.size || file.size > MATERIAL_ARCHIVE_LIMITS.archiveBytes) fail('archive vide ou trop volumineuse (256 Mo maximum).');
     const bytes = new Uint8Array(await file.arrayBuffer()); const entries = inspectMaterialZip(bytes, 'textures');
-    if (entries.some(entry => entry.name === 'material.json')) return { definition: await importMaterialPack(file, bytes), notices: [] };
+    if (entries.some(entry => entry.name === 'material.json')) return { definition: await importMaterialPack(file, bytes), notices: [], preservedPlacement: true };
     return importTextureArchive(file, bytes, entries, maxSize);
   }
   if (files.some(file => !file.size || file.size > MATERIAL_IMPORT_LIMITS.fileBytes) || files.reduce((sum, file) => sum + file.size, 0) > MATERIAL_IMPORT_LIMITS.totalBytes) fail('sélection trop volumineuse (64 Mo par image, 128 Mo au total).');

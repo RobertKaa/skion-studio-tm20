@@ -16,6 +16,64 @@ Puis ouvrir http://localhost:5173
 
 ## Fonctionnalités
 
+- **Réorganisation réelle des UV** : en vue 2D ou côte à côte, **Réorganiser les UV**
+  crée une copie du projet avec les éléments réellement déplacés et regroupés dans
+  le **Calque UV**. Images, textes, peinture, fonds recadrables et matières sont
+  migrés vers ces coordonnées ; le modèle d’aperçu et le modèle du ZIP utilisent
+  la même disposition. Les proportions et l’orientation des motifs sont conservées.
+  Les dessins répartis sur plusieurs pièces restent des groupes éditables ;
+  **Élément → Dégrouper les fragments UV** permet de les modifier séparément.
+  Le projet initial reste accessible dans **Mes projets**.
+  **UV d’origine**, à côté de l’indicateur **UV réorganisés**, effectue la conversion
+  inverse dans une nouvelle copie : les retouches actuelles, les matières, les fonds
+  recadrables et le relief 3D sont conservés. Les panneaux inférieurs indépendants
+  restent indépendants. La version réorganisée reste disponible dans **Mes projets**.
+  La conversion reconnaît la Stadium native et les variantes de relief de l’app,
+  avec leurs cinq niveaux de détail. Un modèle personnalisé inconnu est refusé
+  avant mutation. Pour séparer le panneau inférieur, effectuez cette opération
+  avant la réorganisation. La symétrie autour du centre de l’ancienne feuille est
+  désactivée sur les UV réorganisés. Aucun logiciel externe n’est requis.
+  `npm run test:real-uv` vérifie le modèle, les calques et les archives.
+- **Pièces UV rangées** : en vue 2D ou côte à côte, choisir **Pièces
+  rangées**. Tous les éléments sont regroupés par pièce, avec recherche et aperçus
+  à proportions conservées. Un clic sélectionne la forme pour les remplissages et
+  matières ; un double-clic la cadre dans l’atlas. Les trous restent attachés à leur
+  contour. Cette organisation est une vue de travail : textures, modèle et export
+  gardent leurs coordonnées. Les deux panneaux inférieurs indépendants sont reconnus.
+  Un clic cadre aussi la surface dans l’aperçu 3D : l’angle est choisi selon les faces
+  et les obstacles. Une pièce encore masquée s’affiche en **Vue isolée** ; **Voir le
+  contexte / Isoler** permet de basculer, **Tout revoir** restaure la vue précédente.
+  Les UV partagées proposent de passer à l’occurrence suivante (par exemple chacun
+  des quatre pneus). Ces aides sont temporaires et absentes des modèles et icônes exportés.
+- **Textures des pneus** : les trois zones **Bande de roulement**, **Flanc intérieur**
+  et **Flanc extérieur** se sélectionnent séparément. Les aperçus rangés montrent
+  le déroulé sur un tour et les flancs circulaires. Dans **Matières → Alignement**,
+  **Pneu · enroulement 360°** utilise le profil et la circonférence du modèle ; en
+  répétition, le pas et l’angle s’ajustent pour fermer le motif sans étirer l’image.
+  **Flanc · vue circulaire** convient aux images/logos vus de face. Les cartes PBR
+  suivent ce même placement. **Remplir avec une image** sur ces zones choisit
+  automatiquement ce placement et ouvre ses réglages dans **Matières**.
+  Une ancienne image des roues se convertit depuis
+  **Élément → Enrouler sur le pneu / Poser sur un flanc**, avec source et annulation
+  conservées. Les quatre pneus conservent les UV partagées du jeu. Les modèles
+  personnalisés sans disposition de pneus reconnue gardent leurs contours et le
+  suivi de surface générique. `npm run test:uv` vérifie ces comportements.
+
+- **Panneaux inférieurs gauche et droit indépendants** : dans **Détails → Peindre
+  une pièce**, choisir **Dessous → Élément 1**, puis **Séparer ce panneau gauche/droite**.
+  Seule cette grande forme UV, partagée par les deux flancs sur la voiture d’origine,
+  reçoit deux emplacements nommés **Panneau inférieur gauche** et **Panneau inférieur
+  droit**. Les 596 triangles de chaque côté gardent exactement leurs positions ;
+  aucun plancher ni autre détail n’est dédoublé. L’atlas d’origine est conservé une
+  fois à 82 % de sa taille pour réserver une bande à la seconde forme, à la même
+  échelle et sans étirement. Les dessins, sources, matières, normales, AO et feux
+  sont remappés ; le projet initial reste dans **Mes projets**. Le découpage est
+  conservé dans le projet et le ZIP, sur les cinq niveaux de détail du modèle.
+  La voiture standard et les modèles de relief préparés par l’app sont pris en charge,
+  sans Blender ni logiciel supplémentaire. Les anciennes copies de l’essai qui
+  divisait tous les détails en deux restent lisibles ; elles ne sont plus proposées
+  par le nouveau contrôle. Validation en jeu du découpage ciblé encore à effectuer.
+
 - **Matériaux dans le navigateur, sans Blender ni installation** : ouvrir **Matériaux**
   à gauche ou **Matières** dans l’inspecteur. Six presets (peinture satinée, carbone,
   métal brossé, caoutchouc, tissu et peinture usée) et des images PNG/JPG/WebP/EXR permettent
@@ -25,6 +83,41 @@ Puis ouvrir http://localhost:5173
   Répétition, taille, rotation, décalage et miroirs sont communs aux canaux. Appliquer
   à un élément UV, plusieurs pièces ou toute la surface, avec des exclusions ; glisser
   sur le matériau en 3D décale son motif en conservant son masque.
+  **Placement du motif → Alignement** raccorde les images en espace 3D :
+  **Voiture · dessus + Couvrir** pour une illustration sur le capot et les épaules ;
+  **Suivre la surface 3D + Répéter** pour une matière qui accompagne les courbes.
+  Ce suivi est le placement initial des presets, des images PNG/JPG/WebP/EXR,
+  des packs Blender et des matériaux choisis dans la bibliothèque. Il utilise
+  la géométrie de la carrosserie, des détails ou des roues sélectionnés. Les
+  packs Skion conservent leur placement enregistré ; un bouton visible permet
+  de convertir un matériau existant en suivi de surface sans perdre ses sources,
+  ses zones ou ses exclusions. Les matériaux de modèles personnalisés sans nom
+  de famille suivent le même atlas Skin que celui utilisé pour leur affichage.
+  Ce mode calcule un repère commun sur la géométrie. Les sommets qui se touchent
+  sont raccordés avant la résolution des proportions ; les petits jeux entre
+  panneaux sont reliés par leurs contours, même si leurs découpes diffèrent.
+  Les panneaux raccordés sont résolus ensemble pour que le motif ne reparte
+  pas à zéro sur les épaules ou les prises d’air. Les pièces plus éloignées
+  sont orientées et décalées vers leur voisin sans changer leurs proportions.
+  Une faible contrainte de densité limite les changements d’échelle locaux.
+  Le format de l’image est conservé, y compris dans les
+  anciens réglages « Étirer », interprétés comme « Couvrir ». La couleur, les finitions,
+  les normales et les hauteurs 16 bits utilisent les mêmes coordonnées. Sur une
+  surface doublement courbe, des déformations locales restent nécessaires ;
+  les retours fermés sous la voiture gardent une coupe, et les pièces éloignées
+  ou les UV réutilisés conservent leurs limites.
+  L’ancien mode **Envelopper en 3D**, maintenant nommé **Projection sur 3 axes**,
+  mélange trois vues et peut estomper ou dédoubler un tissage sur les courbes.
+  Les projections côté/face sont aussi disponibles. La position et l’échelle sont
+  communes à la voiture entière ; les masques ne recentrent pas le motif. Toutes
+  les cartes utilisent les mêmes coordonnées, avec les normales réorientées selon
+  les tangentes UV de chaque pièce. L’export contient les textures déjà reprojetées,
+  sans installation supplémentaire en jeu. Les anciens projets gardent leur mode
+  **Feuille UV**. Les pièces partageant un même îlot UV restent nécessairement liées ;
+  les faces qui réutilisent les mêmes texels partagent un placement unique pour
+  éviter les fragments de motif sur les jantes et les petites pièces. Une
+  projection de dessus s’étire sur les parois verticales, où le suivi de surface
+  convient mieux aux textures répétées.
   Un seul calque contrôle couleur et finitions liées, avec annulation et sauvegarde
   des originaux dans le projet. Dans **Calques**, une finition marquée **Lié au matériau**
   ouvre directement **Matières** au clic ; le bouton de réglages fait de même. La couleur,
@@ -60,6 +153,15 @@ Puis ouvrir http://localhost:5173
   temporairement en 512 × 512 px, puis retrouvent la résolution choisie après une courte
   pause. Les calques, images originales et exports conservent leur précision.
   Le bouton dans la barre d’options permet de garder la pleine qualité en permanence.
+- **Aperçu 3D à la demande** : les changements de peinture, lumière et caméra
+  déclenchent un rendu ; la vue se met au repos dès que la caméra est immobile.
+  Les panneaux masqués et les onglets en arrière-plan suspendent le rendu.
+- **Export en tâche de fond** : les canaux sont capturés puis compressés un par un
+  dans un worker local. L’interface reste réactive pendant l’encodage DDS et
+  l’assemblage du ZIP, avec une seule copie de pixels en transit. Les originaux,
+  résolutions, rôles lumineux, modèles et sons sont préservés.
+- **Chargement progressif** : le catalogue et le moteur de génération de livrées
+  se chargent à l’ouverture du générateur et à la première variation.
 - **Dessous de la voiture** : l’orbite 3D permet de passer sous le châssis. Le bouton
   **Voir le dessous** cadre directement cette zone pour peindre ou placer une image.
   Le sol s’efface sous la voiture et revient en remontant ; **Recadrer la vue** (`F`)
@@ -285,6 +387,7 @@ comme les outils de préparation des skins personnalisés.
 - `npm run dev` — serveur de développement
 - `npm run build` — build de production
 - `npm run test:desktop-ux` — navigation sans modification des calques, focus et raccourcis du dialogue de téléchargement, erreurs d’export et URLs temporaires
+- `npm run test:performance` — rendu 3D au repos/reprise, export séquentiel en worker, fichiers identiques, libération des buffers, erreurs et aperçu adaptatif
 - `npm run test:region-image` — remplissage image sur une sélection UV, contours et trous, proportions/orientation, treize canaux, historique, projet et sécurité
 - `npm run test:texture-size` — 1024/2048/4096, précision des originaux, UV/groupes/feux, projets, dimensions DDS, textures GPU et sélecteur accessible
 - `npx tsx scripts/test-dds.ts` — tests de l'encodeur DDS
@@ -404,3 +507,25 @@ L’outil local `scripts/repack-skin-mesh.ts` prépare ces archives à partir d�
 ZIP de jeu existant et d’un dossier contenant le mesh compilé et son aperçu.
 Le fichier facultatif `parts.json` conserve les contours UV nommés des pièces.
 Cet outil réassemble des fichiers ; il ne répare pas les animations du jeu.
+
+### Préparer les ressources de réorganisation UV (développement)
+
+`public/models/uv-atlas/manifest.json` et `recipes.bin` contiennent les recettes
+authentifiées. Le navigateur copie les attributs natifs, duplique uniquement les
+sommets partagés entre pièces et remplace les UV0 et indices associés. Positions,
+normales, UV secondaires, poids et animations sont conservés. Les contours
+incluent les marges nécessaires aux cinq LOD.
+
+Pour régénérer ces ressources, utiliser les mêmes sources/parser locaux que
+`prepare-relief-prototype.py` et les variantes de panneaux déjà préparées :
+
+```bash
+npx tsx scripts/prepare-uv-atlas-plans.ts guides
+python scripts/prepare-uv-atlas.py scan
+npx tsx scripts/prepare-uv-atlas-plans.ts plans
+python scripts/prepare-uv-atlas.py build
+npm run test:real-uv
+```
+
+Python et ces sources locales servent uniquement à préparer les ressources du
+projet. L’application publiée fonctionne entièrement dans le navigateur.

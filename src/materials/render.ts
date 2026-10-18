@@ -1,4 +1,9 @@
 import { getEnv } from 'fabric';
+import type { ProjectionTriangle } from '../three/decalProjection';
+import { createMaterialProjector } from './projection';
+import { drawRealAtlas, drawSourceAtlas, realAtlasLayout, sourceAtlasGeometry, organizedAtlasGeometry } from '../realUvAtlas';
+import { canonicalDetailsMaterial, detailsSideOffset } from '../detailsSides';
+import { panelFrame, panelReferenceMaterial, panelCanvasRegion, panelGuide } from '../underbodyPanel';
 import {
   isLocalMaterialSource, isValidMaterialDefinition, isValidMaterialLayer,
   type MaterialDefinition, type MaterialLayer, type MaterialRegion, type MaterialRenderChannel, type MaterialTexture,
@@ -165,11 +170,11 @@ export function createMaterialRenderSession() {
       loadQueue = pending.catch(() => {});
       return pending;
     },
-    render(layer: MaterialLayer, size: number) {
+    render(layer: MaterialLayer, size: number, geometry?: readonly ProjectionTriangle[]) {
       assertOpen(cache);
       const previous = renderCache;
       renderCache = cache;
-      try { return renderMaterialLayer(layer, size); } finally { renderCache = previous; }
+      try { return renderMaterialLayer(layer, size, geometry); } finally { renderCache = previous; }
     },
     dispose() {
       if (cache.disposed) return;
@@ -409,13 +414,54 @@ function solid(width: number, height: number, color: string): HTMLCanvasElement 
 }
 
 /** Draw all maps with one UV mask, one image frame and one transform. No network calls or async work. */
-export function renderMaterialLayer(layer: MaterialLayer, size: number): Map<MaterialRenderChannel, HTMLCanvasElement> {
+export function renderMaterialLayer(layer: MaterialLayer, size: number, geometry?: readonly ProjectionTriangle[]): Map<MaterialRenderChannel, HTMLCanvasElement> {
   if (!isValidMaterialLayer(layer)) throw new Error('Ce calque de matériau est invalide.');
   if (!Number.isInteger(size) || size < 1 || size > 4096) throw new Error('La résolution du matériau doit être comprise entre 1 et 4096.');
+  if(layer.nativeAtlas){
+    const {nativeAtlas,...source}=layer,maps=renderMaterialLayer(source,size,geometry?sourceAtlasGeometry(geometry):geometry),layout=realAtlasLayout(layer.family,nativeAtlas);
+    for(const [channel,image]of maps){const target=canvas(size);drawRealAtlas(context(target),image,layout);maps.set(channel,target);release(image);}return maps;
+  }
+  if(layer.organizedAtlas){
+    const {organizedAtlas,...source}=layer;
+    const charts=geometry?organizedAtlasGeometry(geometry,organizedAtlas):geometry;
+    const maps=renderMaterialLayer(source,size,charts),layout=realAtlasLayout(layer.family,organizedAtlas);
+    for(const [channel,image]of maps){const target=canvas(size);drawSourceAtlas(context(target),image,layout);maps.set(channel,target);release(image);}return maps;
+  }
+  if(layer.atlasFrame&&(!layer.definition.transform.projection||layer.definition.transform.projection==='uv')){
+    const maps=renderMaterialLayer(panelReferenceMaterial(layer),size,geometry),frame=panelFrame(layer.atlasFrame.placement);
+    const temporary=canvas(Math.ceil(size*frame.scale),Math.ceil(size*frame.scale)),mask=canvas(size),maskCtx=context(mask);
+    maskCtx.fillStyle='#fff';for(const region of layer.regions.length?layer.regions:[panelCanvasRegion(layer.atlasFrame.placement)])regionPath(maskCtx,region,size);
+    maskCtx.globalCompositeOperation='destination-out';for(const region of layer.exclusions)regionPath(maskCtx,region,size);
+    if(layer.atlasFrame.placement==='right'){
+      const limit=canvas(size);regionPath(context(limit),panelGuide('right'),size);maskCtx.globalCompositeOperation='destination-in';maskCtx.drawImage(limit,0,0);release(limit);
+    }
+    for(const image of maps.values()){
+      const ctx=context(temporary);ctx.clearRect(0,0,temporary.width,temporary.height);ctx.drawImage(image,0,0,temporary.width,temporary.height);
+      const target=context(image);target.clearRect(0,0,size,size);target.drawImage(temporary,frame.x*size,frame.y*size,size*frame.scale,size*frame.scale);
+      target.globalCompositeOperation='destination-in';target.globalAlpha=layer.definition.opacity;target.drawImage(mask,0,0);target.globalAlpha=1;target.globalCompositeOperation='source-over';
+    }
+    release(temporary);release(mask);return maps;
+  }
+  if (layer.atlasSide && (!layer.definition.transform.projection || layer.definition.transform.projection === 'uv')) {
+    const maps = renderMaterialLayer(canonicalDetailsMaterial(layer), size, geometry);
+    const half = canvas(Math.ceil(size/2), size), ctx = context(half);
+    for (const image of maps.values()) {
+      ctx.clearRect(0,0,half.width,size); ctx.drawImage(image,0,0,half.width,size);
+      const target=context(image);target.clearRect(0,0,size,size);
+      target.drawImage(half,detailsSideOffset(layer.atlasSide)*size,0,size/2,size);
+    }
+    half.width=half.height=0;
+    return maps;
+  }
   const { definition } = layer, textures = definition.textures;
   const reference = textures.color ?? textures.roughmetal ?? Object.values(textures)[0];
   const original = reference ? sourceFor(reference) : null;
   const frame = original ?? { width: 256, height: 256 };
+  const projector = createMaterialProjector(layer, geometry ?? [], size, frame);
+  const place = (target: HTMLCanvasElement, source: HTMLCanvasElement, normal = false, coverage = false) => {
+    if (projector) projector.place(target, source, normal, !coverage);
+    else placed(target, source, layer, frame);
+  };
   const mask = canvas(size), maskCtx = context(mask);
   maskCtx.fillStyle = '#ffffff';
   if (!layer.regions.length) maskCtx.fillRect(0, 0, size, size);
@@ -423,9 +469,12 @@ export function renderMaterialLayer(layer: MaterialLayer, size: number): Map<Mat
   maskCtx.globalCompositeOperation = 'destination-out';
   for (const region of layer.exclusions) regionPath(maskCtx, region, size);
   maskCtx.globalCompositeOperation = 'source-over';
+  if(layer.atlasFrame?.placement==='right'){
+    const limit=canvas(size);regionPath(context(limit),panelGuide('right'),size);maskCtx.globalCompositeOperation='destination-in';maskCtx.drawImage(limit,0,0);release(limit);maskCtx.globalCompositeOperation='source-over';
+  }
   const coverage = canvas(size);
   const coverageSource = original ?? solid(1, 1, '#ffffff');
-  placed(coverage, coverageSource, layer, frame);
+  place(coverage, coverageSource, false, true);
   maskCtx.globalCompositeOperation = 'destination-in'; maskCtx.drawImage(coverage, 0, 0); release(coverage);
   if (!original) release(coverageSource);
   const generated = procedural(definition), output = new Map<MaterialRenderChannel, HTMLCanvasElement>();
@@ -433,7 +482,7 @@ export function renderMaterialLayer(layer: MaterialLayer, size: number): Map<Mat
     if (channel === 'emission' && !textures.emission && definition.emissionStrength === 0) continue;
     if ((channel === 'normal' || channel === 'ao' || channel === 'height') && !textures[channel] && !generated.has(channel)) continue;
     const target = canvas(size), ctx = context(target);
-    if (channel === 'color') placed(target, textures.color ? colorImage(textures.color, definition.color, 1, size) : generated.get(channel)!, layer, frame);
+    if (channel === 'color') place(target, textures.color ? colorImage(textures.color, definition.color, 1, size) : generated.get(channel)!);
     else if (channel === 'roughmetal') {
       const packed = textures.roughmetal;
       const base = packed ? converted(sourceFor(packed), `packed:${packed.invert}:${definition.roughness}:${definition.metalness}`, (data, i) => {
@@ -442,26 +491,26 @@ export function renderMaterialLayer(layer: MaterialLayer, size: number): Map<Mat
         data[i + 1] = clamp(data[i + 1] * definition.metalness / 255);
         data[i + 2] = 0; data[i + 3] = 255;
       }, size) : generated.get(channel)!;
-      if (!textures.roughness && !textures.metalness) placed(target, base, layer, frame);
+      if (!textures.roughness && !textures.metalness) place(target, base);
       else {
         for (const [name, targetChannel] of [['roughness', 'red'], ['metalness', 'green']] as const) {
           const texture = textures[name];
           const separate = texture ? scalar(texture, targetChannel, definition[name] / 255, size) : converted(base, targetChannel, (data, i) => {
             data[i + (targetChannel === 'red' ? 1 : 0)] = 0; data[i + 2] = 0;
           }, size);
-          const part = canvas(size); placed(part, separate, layer, frame);
+          const part = canvas(size); place(part, separate);
           ctx.globalCompositeOperation = name === 'roughness' ? 'source-over' : 'screen'; ctx.drawImage(part, 0, 0); release(part);
         }
         ctx.globalCompositeOperation = 'source-over';
       }
-    } else if (channel === 'normal') placed(target, textures.normal ? normalImage(textures.normal, definition, size) : generated.get(channel)!, layer, frame);
-    else if (channel === 'ao') placed(target, scalar(textures.ao!, 'gray', definition.aoStrength, size), layer, frame);
-    else if (channel === 'height') placed(target, textures.height ? scalar(textures.height, 'gray', 1, size, 'multiply') : generated.get(channel)!, layer, frame);
+    } else if (channel === 'normal') place(target, textures.normal ? normalImage(textures.normal, definition, size) : generated.get(channel)!, true);
+    else if (channel === 'ao') place(target, scalar(textures.ao!, 'gray', definition.aoStrength, size));
+    else if (channel === 'height') place(target, textures.height ? scalar(textures.height, 'gray', 1, size, 'multiply') : generated.get(channel)!);
     else if (channel === 'emission') {
       const image = textures.emission ? colorImage(textures.emission, definition.emissionColor, definition.emissionStrength, size)
         : solid(1, 1, `rgb(${rgb(definition.emissionColor).map(value => clamp(value * definition.emissionStrength)).join(',')})`);
-      placed(target, image, layer, frame); if (!textures.emission) release(image);
-    } else placed(target, textures[channel] ? scalar(textures[channel]!, 'gray', definition[channel] / 255, size, 'multiply') : generated.get(channel)!, layer, frame);
+      place(target, image); if (!textures.emission) release(image);
+    } else place(target, textures[channel] ? scalar(textures[channel]!, 'gray', definition[channel] / 255, size, 'multiply') : generated.get(channel)!);
     // All outputs receive the exact same coverage; opaque channel maps cannot leak past the color image.
     ctx.globalCompositeOperation = 'destination-in'; ctx.globalAlpha = definition.opacity; ctx.drawImage(mask, 0, 0);
     ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; output.set(channel, target);

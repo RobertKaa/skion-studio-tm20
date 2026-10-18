@@ -2,13 +2,17 @@ import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { encodeDDS } from '../src/dds';
 import { PreviewSurfaceTextures, normalTextureFile } from '../src/three/previewSurfaceTextures';
-import { hasExperimentalSkinNormalShader, previewMaterialSlot } from '../src/three/materialSlots';
+import { hasExperimentalSkinNormalShader, previewMaterialSlot, previewMeshMaterialSlot } from '../src/three/materialSlots';
 
 assert.equal(previewMaterialSlot('_DetailsDmgNormal_Skin'), 'skin', 'The atlas suffix wins over the shader name');
 assert.equal(previewMaterialSlot('_DetailsDmgNormal_Wheels'), 'wheels');
 assert.equal(previewMaterialSlot('_SkinDmg_Skin'), 'skin');
 assert.equal(previewMaterialSlot('_SkinDmgDecal_Skin'), 'skin');
 assert.equal(previewMaterialSlot('Details'), 'details');
+assert.equal(previewMeshMaterialSlot('Material.001','Body'),'skin','A generic material uses the same paint family as its displayed Skin atlas');
+assert.equal(previewMeshMaterialSlot('Material.001','Wheels_Front'),'wheels','An explicit mesh family is retained');
+assert.equal(previewMeshMaterialSlot('_SkinDmg_Details','Skin'),'details','Explicit atlas names take precedence over the mesh name');
+assert.equal(previewMeshMaterialSlot('Glass','Body'),'glass','Glass never becomes a paintable texture surface');
 assert.equal(hasExperimentalSkinNormalShader('_DetailsDmgNormal_Skin'), true);
 assert.equal(hasExperimentalSkinNormalShader('_SkinDmg_Skin'), false);
 assert.equal(hasExperimentalSkinNormalShader('_DetailsDmgNormal_Details'), false);

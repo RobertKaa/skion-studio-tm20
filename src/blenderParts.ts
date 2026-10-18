@@ -1,4 +1,8 @@
 import { UV_GUIDE_BY_FAMILY, type UvGuideIsland, type UvGuideFamily } from './uvGuideData';
+import { independentDetailsGuides, type DetailsLayout } from './detailsSides';
+import { panelAtlasGuides, UNDERBODY_PANEL_LAYOUT } from './underbodyPanel';
+import { WHEEL_PART_GUIDES } from './wheelParts';
+import { organizedAtlasGuides, type UvAtlasVersion } from './realUvAtlas';
 
 export type BlenderPart = UvGuideIsland & { mesh: string; fillRule: 'evenodd' };
 const LABELS: Record<string, string> = {
@@ -13,8 +17,11 @@ const LABELS: Record<string, string> = {
 };
 
 /** Stock Stadium meshes retain the named guide zones; custom meshes add their own outlines. */
-export function paintIslandsForModel(parts: BlenderPart[] | undefined, family: UvGuideFamily): UvGuideIsland[] {
+export function paintIslandsForModel(parts: BlenderPart[] | undefined, family: UvGuideFamily, detailsLayout?: DetailsLayout, uvAtlas?:UvAtlasVersion): UvGuideIsland[] {
+  if(uvAtlas)return organizedAtlasGuides(family,detailsLayout);
   const custom = parts?.filter((part) => part.family === family && !/^[sd](Body|Details)_Lod/i.test(part.mesh)) ?? [];
+  if(family==='details'&&detailsLayout)return detailsLayout===UNDERBODY_PANEL_LAYOUT?panelAtlasGuides(UV_GUIDE_BY_FAMILY.details):independentDetailsGuides(UV_GUIDE_BY_FAMILY.details);
+  if(family==='wheels'&&(detailsLayout||!custom.length||custom.every(part=>/^wWheels?_Lod/i.test(part.mesh)||/^relief-native-\d+-.*_Wheels(?:_Lod\d+)?$/i.test(part.mesh))))return WHEEL_PART_GUIDES;
   return [...(family === 'wheels' && custom.length ? [] : UV_GUIDE_BY_FAMILY[family]), ...custom];
 }
 type Point = { x: number; y: number };

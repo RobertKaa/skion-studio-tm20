@@ -2,6 +2,7 @@ export type MaterialPreset = 'solid' | 'carbon' | 'brushed' | 'rubber' | 'fabric
 export type MaterialChannel = 'color' | 'roughness' | 'metalness' | 'roughmetal' | 'coat' | 'emission' | 'dirt' | 'normal' | 'ao' | 'height';
 export type MaterialTextureChannel = MaterialChannel;
 export type MaterialRenderChannel = 'color' | 'roughmetal' | 'coat' | 'emission' | 'dirt' | 'normal' | 'ao' | 'height';
+export type MaterialProjection = 'uv' | 'top' | 'side' | 'front' | 'triplanar' | 'surface' | 'wheel' | 'wheel-face';
 
 export interface MaterialTexture {
   src: string;
@@ -10,7 +11,8 @@ export interface MaterialTexture {
   invert: boolean;
 }
 
-/** Values are texture bytes; placement uses pixels in the reference 2048px UV atlas. */
+/** Texture bytes. Placement uses 2048 reference pixels in the UV sheet, or along
+ * the longest vehicle dimension for projections and surface coordinates. */
 export interface MaterialDefinition {
   version: 1;
   name: string;
@@ -34,6 +36,8 @@ export interface MaterialDefinition {
     offsetY: number;
     flipX: boolean;
     flipY: boolean;
+    /** Omitted in existing projects: preserve their original UV placement. */
+    projection?: MaterialProjection;
   };
   textures: Partial<Record<MaterialChannel, MaterialTexture>>;
 }
@@ -46,10 +50,17 @@ export interface MaterialRegion {
 }
 
 export interface MaterialLayer {
+  /** Original placement of a material migrated into the real reorganized atlas. */
+  nativeAtlas?: 'stock' | 'independent-v1' | 'underbody-panel-v1';
+  /** Keep materials authored after repacking editable when returning to native UVs. */
+  organizedAtlas?: 'stock' | 'independent-v1' | 'underbody-panel-v1';
   definition: MaterialDefinition;
   family: 'skin' | 'details' | 'wheels';
   regions: MaterialRegion[];
   exclusions: MaterialRegion[];
+  /** A migrated native UV material retains its original placement on one side. */
+  atlasSide?: 'left' | 'right';
+  atlasFrame?: { placement: 'base' | 'right'; reference: { x:number; y:number; w:number; h:number } };
 }
 
 export const MATERIAL_CHANNELS: readonly MaterialChannel[] = ['color', 'roughness', 'metalness', 'roughmetal', 'coat', 'emission', 'dirt', 'normal', 'ao', 'height'];
@@ -124,7 +135,8 @@ export function isValidMaterialDefinition(value: unknown, sourceValidator: (src:
     || !bounded(value.emissionStrength, 0, 1) || !bounded(value.opacity, 0, 1) || !bounded(value.normalStrength, 0, 2) || !bounded(value.aoStrength, 0, 1)
     || !['always', 'head', 'brake'].includes(value.emissionRole as string)) return false;
   const transform = value.transform;
-  if (!record(transform) || !exactKeys(transform, ['mode', 'size', 'angle', 'offsetX', 'offsetY', 'flipX', 'flipY'])
+  if (!record(transform) || !exactKeys(transform, ['mode', 'size', 'angle', 'offsetX', 'offsetY', 'flipX', 'flipY', 'projection'])
+    || (transform.projection !== undefined && !['uv', 'top', 'side', 'front', 'triplanar', 'surface', 'wheel', 'wheel-face'].includes(transform.projection as string))
     || !['repeat', 'cover', 'contain', 'stretch'].includes(transform.mode as string) || !bounded(transform.size, 8, 2048)
     || !bounded(transform.angle, -360, 360) || !bounded(transform.offsetX, -16384, 16384) || !bounded(transform.offsetY, -16384, 16384)
     || typeof transform.flipX !== 'boolean' || typeof transform.flipY !== 'boolean') return false;
@@ -152,8 +164,18 @@ function validRegions(value: unknown): value is MaterialRegion[] {
 }
 
 export function isValidMaterialLayer(value: unknown, sourceValidator?: (src: string) => boolean): value is MaterialLayer {
-  return record(value) && exactKeys(value, ['definition', 'family', 'regions', 'exclusions'])
+  const frame=record(value)&&value.atlasFrame;
+  const reference=record(frame)&&record(frame.reference)?frame.reference:null;
+  const validFrame=frame===undefined||(record(frame)&&exactKeys(frame,['placement','reference'])&&['base','right'].includes(String(frame.placement))
+    &&!!reference&&exactKeys(reference,['x','y','w','h'])&&['x','y'].every(key=>bounded(reference[key],-2,3))
+    &&['w','h'].every(key=>bounded(reference[key],.000001,5)));
+  return record(value) && exactKeys(value, ['definition', 'family', 'regions', 'exclusions', 'atlasSide','atlasFrame','nativeAtlas','organizedAtlas'])
+    && (value.nativeAtlas===undefined||['stock','independent-v1','underbody-panel-v1'].includes(String(value.nativeAtlas)))
+    && (value.organizedAtlas===undefined||value.nativeAtlas===undefined&&['stock','independent-v1','underbody-panel-v1'].includes(String(value.organizedAtlas)))
+    &&validFrame&&(value.atlasFrame===undefined||(value.family==='details'&&value.atlasSide===undefined))
+    && (value.atlasSide === undefined || (value.family === 'details' && ['left','right'].includes(value.atlasSide as string)))
     && ['skin', 'details', 'wheels'].includes(value.family as string) && isValidMaterialDefinition(value.definition, sourceValidator)
+    && (value.family==='wheels'||!['wheel','wheel-face'].includes(String((value.definition as MaterialDefinition).transform.projection)))
     && validRegions(value.regions) && validRegions(value.exclusions);
 }
 export const validMaterialLayer = isValidMaterialLayer;

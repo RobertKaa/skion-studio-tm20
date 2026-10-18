@@ -225,12 +225,13 @@ export async function exportReliefPrototype(
       map.id === 'Skin_B' ? result.options.textureResolution : Math.min(result.options.textureResolution, 2048),
     ])),
     getMapCanvas: id => maps.get(id)!, icon, meshGbx: result.project.mesh,
+    detailsLayout: result.project.detailsLayout, uvAtlas:result.project.uvAtlas, previewGlb: result.project.preview,
     passthrough: [...extras.values()],
   });
   const zip = await JSZip.loadAsync(await blob.arrayBuffer());
   zip.file('preview.glb', result.project.preview);
   const fitted = await fitReliefArchiveToBudget(zip, result.options.textureResolution, exportProfile =>
-    generateReliefArchive(zip, exportProfile, { version: 1, name: archiveName, [result.options.surfaceMethod ? 'relief' : 'prototype']: {
+    generateReliefArchive(zip, exportProfile, { version: 1, name: archiveName, ...(result.project.detailsLayout ? { detailsLayout: result.project.detailsLayout } : {}), ...(result.project.uvAtlas?{uvAtlas:result.project.uvAtlas}:{}), [result.options.surfaceMethod ? 'relief' : 'prototype']: {
       version: result.options.surfaceMethod ? '1.0.0' : 1, source: sourceName.slice(0, 160), ...result.options, ...result.stats,
       exportProfile, gameValidation: 'pending',
     } }, profile => [

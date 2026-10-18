@@ -9,12 +9,13 @@
     "lint": "oxlint",
     "test:desktop-ux": "tsx --tsconfig tsconfig.app.json scripts/test-desktop-ux.tsx && tsx scripts/test-pointer-zoom.ts",
     "test:layers": "tsx scripts/test-layer-reorder.ts && tsx --tsconfig tsconfig.app.json scripts/test-layer-drag.tsx",
+    "test:uv": "tsx scripts/test-uv-parts.ts && tsx scripts/test-uv-atlas-layout.ts && tsx scripts/test-uv-focus.ts && tsx --tsconfig tsconfig.app.json scripts/test-uv-parts-ui.tsx && tsx --tsconfig tsconfig.app.json scripts/test-uv-atlas-ui.tsx && tsx --tsconfig tsconfig.app.json scripts/test-uv-focus-ui.tsx && tsx scripts/test-wheel-material-projection.ts",
     "test:relief": "tsx scripts/test-relief-v1.ts && tsx scripts/test-relief-prototype.ts && tsx scripts/test-relief-preview.ts && tsx scripts/test-relief-export.ts && tsx --tsconfig tsconfig.app.json scripts/test-relief-dialog.tsx",
     "test:environment": "tsx scripts/test-preview-environment.ts && tsx scripts/test-project-file.ts",
     "test:reset": "tsx scripts/test-reset-skin.ts && tsx scripts/test-reset-model.ts && tsx scripts/test-project-file.ts",
     "test:projects": "tsx scripts/test-project-file.ts && tsx scripts/test-large-project.ts && tsx scripts/test-resolution.ts",
-    "test:performance": "tsx scripts/test-adaptive-preview.ts && tsx scripts/test-resolution.ts",
-    "test:underbody": "tsx scripts/test-underbody-view.ts && tsx scripts/test-decal-projection.ts && tsx scripts/test-preview-environment.ts",
+    "test:performance": "tsx scripts/test-app-optimisations.ts && tsx scripts/test-adaptive-preview.ts && tsx scripts/test-resolution.ts",
+    "test:underbody": "tsx scripts/test-underbody-panel.ts && tsx scripts/test-details-sides-model.ts && tsx scripts/test-details-sides.ts && tsx --tsconfig tsconfig.app.json scripts/test-details-sides-ui.tsx && tsx scripts/test-underbody-view.ts && tsx scripts/test-decal-projection.ts && tsx scripts/test-preview-environment.ts",
     "test:quality": "tsx scripts/test-dds.ts && tsx scripts/test-material.ts && tsx scripts/test-wheel-surface.ts && tsx scripts/test-wheel-treads.ts && tsx scripts/test-wheel-relief-overlay.ts && tsx scripts/test-preview-surface-textures.ts && tsx scripts/test-preview-ambient-occlusion.ts && tsx scripts/test-surface-texture-roundtrip.ts && tsx scripts/test-player-display.ts && tsx scripts/test-export-color-preview.ts && tsx scripts/test-export-material-preview.ts && tsx scripts/test-uv-guide-coverage.ts && tsx scripts/test-fuel-cap.ts && tsx scripts/test-export.ts",
     "test:generator": "tsx scripts/test-generator.ts",
     "test:element-copy": "tsx scripts/test-element-copy.ts",
@@ -22,9 +23,10 @@
     "test:texture-size": "tsx --tsconfig tsconfig.app.json scripts/test-texture-resolution.tsx",
     "test:horn": "tsx scripts/test-horn.ts",
     "test:background": "tsx scripts/test-texture-background.ts",
-    "test:materials": "tsx scripts/test-material-exr.ts && tsx scripts/test-material-render.ts && tsx scripts/test-material-import.ts && tsx scripts/test-material-library.ts && tsx scripts/test-material-layers.ts && tsx scripts/test-material-surfaces.ts && tsx --tsconfig tsconfig.app.json scripts/test-materials-ui.tsx",
+    "test:materials": "tsx scripts/test-material-exr.ts && tsx scripts/test-material-render.ts && tsx scripts/test-material-projection.ts && tsx scripts/test-material-proportions.ts && tsx scripts/test-material-import.ts && tsx scripts/test-material-library.ts && tsx scripts/test-material-layers.ts && tsx scripts/test-material-surfaces.ts && tsx --tsconfig tsconfig.app.json scripts/test-materials-ui.tsx",
     "preview": "vite preview",
-    "preview:gh": "vite build && vite preview --base /skion-studio-tm20/"
+    "preview:gh": "vite build && vite preview --base /skion-studio-tm20/",
+    "test:real-uv": "tsx scripts/test-real-uv-model.ts && tsx scripts/test-real-uv-fragments.ts && tsx scripts/test-real-uv-return.ts && tsx scripts/test-real-uv-editor.ts"
   },
   "dependencies": {
     "fabric": "^7.4.0",

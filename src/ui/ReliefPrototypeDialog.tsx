@@ -10,9 +10,10 @@ import {
 } from '../relief/engine';
 import type { ReliefMode, ReliefScope } from '../relief/types';
 import { RELIEF_GAME_ZIP_LIMIT_BYTES, reliefPrototypeName } from '../relief/export';
-import { createHeightSampler, loadHeightSource, localPNGAspect, type HeightSource } from '../relief/heightSource';
+import { createHeightSampler, createProjectedHeightSampler, loadHeightSource, localPNGAspect, type HeightSource } from '../relief/heightSource';
 import type { ReliefSettings } from '../relief/settings';
 import type { Skin3DFile } from '../skin3d';
+import type { ProjectionTriangle } from '../three/decalProjection';
 import { CarPreview, type PreviewViewState } from '../three/CarPreview';
 import { DEFAULT_WHEEL_SURFACE } from '../wheelSurface';
 import { SliderField } from './controls';
@@ -23,7 +24,7 @@ type PrototypePreview = Pick<CarPreview, 'setMapCanvas' | 'setSurfaceTextures' |
   | 'setDirtPreview' | 'loadCustomPreview' | 'getViewState' | 'restoreViewState' | 'resetCamera' | 'snapshot' | 'dispose'>;
 interface PrototypeMaterialSession {
   load(definition: MaterialDefinition): Promise<void>;
-  render(layer: MaterialLayer, size: number): Map<MaterialRenderChannel, HTMLCanvasElement>;
+  render(layer: MaterialLayer, size: number, geometry?: readonly ProjectionTriangle[]): Map<MaterialRenderChannel, HTMLCanvasElement>;
   dispose(): void;
 }
 export interface ReliefPrototypeRuntime {
@@ -39,6 +40,7 @@ export interface ReliefPrototypeDialogProps {
   name: string;
   maps: ReadonlyMap<MapId, HTMLCanvasElement>;
   material: MaterialLayer | null;
+  projectionGeometry?: readonly ProjectionTriangle[];
   surfaceFiles: readonly Skin3DFile[];
   onClose(): void;
   settings?: ReliefSettings | null;
@@ -119,7 +121,7 @@ function hoodAppearance(definition: MaterialDefinition, channels: Map<MaterialRe
 const nextPaint = () => new Promise<void>(resolve => window.setTimeout(resolve, 0));
 
 /** The workshop owns a separate preview and canvas copies; the editor is never modified. */
-export function ReliefPrototypeDialog({ name, maps, material, surfaceFiles, onClose, onExport, settings, onApply, runtime = DEFAULT_RUNTIME }: ReliefPrototypeDialogProps) {
+export function ReliefPrototypeDialog({ name, maps, material, projectionGeometry, surfaceFiles, onClose, onExport, settings, onApply, runtime = DEFAULT_RUNTIME }: ReliefPrototypeDialogProps) {
   const id = useId(), panel = useRef<HTMLDivElement>(null), previewHost = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null), preview = useRef<PrototypePreview | null>(null);
   const diagnostic = useRef<{ resolution: TextureQuality; kind: Source['kind']; atlas: RGBAImage } | null>(null);
@@ -215,10 +217,11 @@ export function ReliefPrototypeDialog({ name, maps, material, surfaceFiles, onCl
           await session.load(definition);
           if (!alive.current || generation.current !== ticket) return;
           const layer = { ...source.layer, definition, regions: scope === 'vehicle' ? [] : source.layer.regions, exclusions: scope === 'vehicle' ? [] : source.layer.exclusions };
-          rendered = session.render(layer, textureResolution);
+          rendered = session.render(layer, textureResolution, projectionGeometry);
           if (rendered.has('height')) heightAtlas = image(rendered.get('height')!);
           const height = definition.textures.height;
-          if (height && heightAtlas && definition.transform.mode === 'repeat' && mode !== 'normal' && !compare) {
+          const projected = !!definition.transform.projection && definition.transform.projection !== 'uv';
+          if (height && heightAtlas && (definition.transform.mode === 'repeat' || projected) && mode !== 'normal' && !compare) {
             if (numericHeight.current?.src !== height.src || numericHeight.current.component !== height.component) {
               const reference = definition.textures.color ?? definition.textures.roughmetal ?? Object.values(definition.textures)[0];
               numericHeight.current = { src: height.src, component: height.component, field: await loadHeightSource(height), aspect: await localPNGAspect(reference!.src) };
@@ -226,7 +229,8 @@ export function ReliefPrototypeDialog({ name, maps, material, surfaceFiles, onCl
             if (!alive.current || generation.current !== ticket) return;
             const field = numericHeight.current.field;
             if (field) {
-              heightSample = createHeightSampler(field, layer, heightAtlas, numericHeight.current.aspect);
+              heightSample = projected ? createProjectedHeightSampler(field, layer, heightAtlas, projectionGeometry ?? [], numericHeight.current.aspect)
+                : createHeightSampler(field, layer, heightAtlas, numericHeight.current.aspect);
               heightSourceBits = field.bits;
             }
           }
@@ -234,21 +238,28 @@ export function ReliefPrototypeDialog({ name, maps, material, surfaceFiles, onCl
           const targets = scope === 'vehicle'
             ? [['color', 'Skin_B'], ['color', 'Details_B'], ['color', 'Wheels_B'], ['roughmetal', 'Skin_R'], ['roughmetal', 'Details_R'], ['roughmetal', 'Wheels_R'], ['coat', 'Skin_CoatR']] as const
             : [['color', 'Skin_B'], ['roughmetal', 'Skin_R'], ['coat', 'Skin_CoatR']] as const;
-          if (scope === 'vehicle' || source.kind === 'imported' || source.kind === 'carbon') for (const [channel, map] of targets) {
-            const textures = source.layer.definition.textures;
-            if (source.kind === 'imported' && !(channel === 'color' ? textures.color
-              : channel === 'roughmetal' ? textures.roughmetal || textures.roughness || textures.metalness
-              : textures.coat || textures.color)) continue;
-            const target = owned.get(map), overlay = rendered.get(channel);
-            if (target && overlay) {
-              if (target.width !== textureResolution || target.height !== textureResolution) {
-                const enlarged = document.createElement('canvas'); enlarged.width = enlarged.height = textureResolution;
-                enlarged.getContext('2d')!.drawImage(target, 0, 0, textureResolution, textureResolution); release([target]); owned.set(map, enlarged);
+          const familyRenders = new Map<string, Map<MaterialRenderChannel, HTMLCanvasElement>>([['skin', rendered]]);
+          try {
+            if (scope === 'vehicle' || source.kind === 'imported' || source.kind === 'carbon') for (const [channel, map] of targets) {
+              const textures = source.layer.definition.textures;
+              if (source.kind === 'imported' && !(channel === 'color' ? textures.color
+                : channel === 'roughmetal' ? textures.roughmetal || textures.roughness || textures.metalness
+                : textures.coat || textures.color)) continue;
+              const family = map.startsWith('Details') ? 'details' : map.startsWith('Wheels') ? 'wheels' : 'skin';
+              if (projected && !familyRenders.has(family)) {
+                familyRenders.set(family, session.render({ ...layer, family }, textureResolution, projectionGeometry));
               }
-              overlaySurface(owned.get(map)!, overlay, template, scope);
-              await nextPaint(); if (!alive.current || generation.current !== ticket) return;
+              const target = owned.get(map), overlay = (familyRenders.get(family) ?? rendered).get(channel);
+              if (target && overlay) {
+                if (target.width !== textureResolution || target.height !== textureResolution) {
+                  const enlarged = document.createElement('canvas'); enlarged.width = enlarged.height = textureResolution;
+                  enlarged.getContext('2d')!.drawImage(target, 0, 0, textureResolution, textureResolution); release([target]); owned.set(map, enlarged);
+                }
+                overlaySurface(owned.get(map)!, overlay, template, scope);
+                await nextPaint(); if (!alive.current || generation.current !== ticket) return;
+              }
             }
-          }
+          } finally { for (const [family, channels] of familyRenders) if (family !== 'skin') release(channels.values()); }
         } else {
           if (diagnostic.current?.resolution !== textureResolution || diagnostic.current.kind !== source.kind) diagnostic.current = {
             resolution: textureResolution, kind: source.kind,
@@ -285,7 +296,7 @@ export function ReliefPrototypeDialog({ name, maps, material, surfaceFiles, onCl
       } finally { if (rendered) release(rendered.values()); }
     })(); }, 120);
     return () => { window.clearTimeout(timer); invalidate(); if (owned) release(owned.values()); };
-  }, [template, source, mode, strengthMm, compare, maps, surfaceFiles, buildKey, runtime, scope, textureResolution, exaggerated]);
+  }, [template, source, mode, strengthMm, compare, maps, surfaceFiles, buildKey, runtime, scope, textureResolution, exaggerated, projectionGeometry]);
 
   async function importFiles(files: File[]) {
     const ticket = ++importGeneration.current;

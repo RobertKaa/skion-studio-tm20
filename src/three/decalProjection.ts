@@ -18,9 +18,14 @@ export interface DecalProjection {
   material?: SurfaceMaterial;
 }
 export interface ProjectionTriangle {
+  /** Original chart coordinates retained after a real atlas repack (wheel metrics). */
+  sourceUv?: [[number, number], [number, number], [number, number]];
+  /** Alternate organized chart retained after returning to native UVs. */
+  atlasUv?: [[number, number], [number, number], [number, number]];
   family: DecalFamily;
   points: [Vec3, Vec3, Vec3];
   uv: [[number, number], [number, number], [number, number]];
+  normals?: [Vec3, Vec3, Vec3];
 }
 export interface PixelSource { width: number; height: number; data: Uint8ClampedArray }
 export interface ProjectionBitmap { width: number; height: number; data: Uint8ClampedArray; triangles: number }
@@ -56,7 +61,7 @@ function walkTriangle(points: [number, number][], w: number, h: number, visit: (
 }
 
 /** Projection orthographique dans les atlas existants. Aucun nouveau mesh n'est requis par le jeu. */
-export function bakeProjection(triangles: ProjectionTriangle[], decal: DecalProjection, source: PixelSource, resolution = TEXTURE_RESOLUTION): Map<DecalFamily, ProjectionBitmap> {
+export function bakeProjection(triangles: readonly ProjectionTriangle[], decal: DecalProjection, source: PixelSource, resolution = TEXTURE_RESOLUTION): Map<DecalFamily, ProjectionBitmap> {
   const output = new Map<DecalFamily, ProjectionBitmap>();
   if (!Number.isInteger(resolution) || resolution < 1 || resolution > MAX_TEXTURE_RESOLUTION ||
     !Number.isInteger(source.width) || !Number.isInteger(source.height) || source.width < 1 || source.height < 1 ||

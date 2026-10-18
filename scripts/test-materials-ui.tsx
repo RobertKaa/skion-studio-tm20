@@ -8,6 +8,7 @@ import { createMaterialDefinition, type MaterialDefinition, type MaterialLayer }
 import { createMaterialLibrary, type MaterialLibraryStorage, type StoredMaterial } from '../src/materials/library';
 import { getMaterialSourceCanvas, loadMaterialSources } from '../src/materials/render';
 import type { UvGuideIsland } from '../src/uvGuideData';
+import { WHEEL_PART_GUIDES } from '../src/wheelParts';
 
 // The desktop DOM provides a real Canvas2D backend. Styles are checked in the desktop browser.
 registerHooks({ load(url, context, next) {
@@ -122,6 +123,7 @@ try {
   assert(errors.some((error) => /bibliothèque locale.*indisponible/i.test(error)), 'Unavailable local storage is reported without blocking material creation');
   assert.equal(button('Ajouter le matériau').disabled, false);
   await click('Ajouter le matériau');
+  assert.equal(applications.at(-1)!.definition.transform.projection,'surface','A new material follows the actual model rather than its flat atlas');
   assert.deepEqual(applications.at(-1)!.regions, ['top'], 'A new material can target exactly the UV piece selected by the user');
 
   await click('Plusieurs');
@@ -148,7 +150,13 @@ try {
   assert.equal(editLibrary.querySelector('summary')!.textContent, 'Changer ou importer un matériau');
   assert(host.querySelector('.material-current')!.compareDocumentPosition(editLibrary) & desktop.Node.DOCUMENT_POSITION_FOLLOWING, 'The selected material appears before the optional replacement library');
   assert(labelled<HTMLInputElement>('Rugosité · image').compareDocumentPosition(editLibrary) & desktop.Node.DOCUMENT_POSITION_FOLLOWING, 'The existing material’s finish sliders appear before the optional library');
-  assert(host.textContent!.includes('La couleur et la finition de ce matériau restent liées.'));
+  assert(host.textContent!.includes('Sa couleur et ses finitions se règlent ensemble.'));
+  const legacySources=structuredClone(selection!.definition.textures);
+  await click('Suivre la surface 3D');
+  assert.equal(selection!.definition.transform.projection,'surface','A restored UV material can explicitly switch to surface following');
+  assert.deepEqual(selection!.definition.textures,legacySources,'Switching to surface following retains the original sources');
+  assert.deepEqual(selection!.regions.map(region=>region.key),['top']);
+  assert.deepEqual(selection!.exclusions.map(region=>region.key),['right']);
   await act(async () => editLibrary.querySelector('summary')!.click());
   assert.equal(editLibrary.open, true, 'The optional library stays available through an accessible native disclosure');
   assert.equal(labelled<HTMLInputElement>('Nom du matériau').value, 'Carbone personnel', 'Opening the library preserves the selected material’s draft');
@@ -165,6 +173,20 @@ try {
   assert.equal(selection!.definition.transform.angle, 37, 'An accessible placement slider edits the selected material');
   assert.equal(selection!.definition.roughness, 91);
   assert.equal(applications.length, appliedBeforeEdit, 'Editing an existing material does not add unintended layers');
+  await changeSelect('Alignement de la matière', 'top');
+  assert.equal(selection!.definition.transform.projection, 'top');
+  assert.deepEqual(selection!.regions.map(region=>region.key), ['top']);
+  assert.deepEqual(selection!.exclusions.map(region=>region.key), ['right']);
+  assert.equal(applications.length, appliedBeforeEdit, 'Changing the 3D alignment edits the existing owner');
+  await changeSelect('Alignement de la matière', 'uv');
+  assert.equal(selection!.definition.transform.projection, 'uv', 'Existing atlas artworks can retain their UV placement');
+  await changeSelect('Alignement de la matière', 'surface');
+  assert.equal(selection!.definition.transform.projection,'surface');
+  assert(host.textContent!.includes('Le motif accompagne les courbes de la pièce'));
+    assert(host.textContent!.includes('en préservant ses proportions'));
+    assert.equal((Array.from(host.querySelectorAll('button')).find(button=>button.textContent==='Étirer') as HTMLButtonElement).disabled,true,'Surface placement cannot stretch the source image independently along either axis');
+  assert(host.textContent!.includes('Projection sur 3 axes') && !host.textContent!.includes('envelopper en 3D'), 'The old blended projection no longer claims to follow the surface');
+  assert.deepEqual(selection!.regions.map(region=>region.key),['top'],'Surface alignment retains the editable piece mask');
 
   await click('Cette pièce');
   assert.deepEqual(masks.at(-1), { regions: ['left'], exclusions: ['right'] });
@@ -341,7 +363,7 @@ try {
   assert.equal(report.open, true, 'The import report can be expanded through its native accessible disclosure');
   assert(report.querySelectorAll('li').length >= 2, 'Import notices are shown as readable individual items');
   assert(/\.blend.*ignor|ignor.*\.blend/i.test(report.textContent!), 'The ZIP report explains that the Blender document was ignored');
-  assert(/hauteur conservée.*prototype/i.test(report.textContent!), 'The ZIP report explains height retention for the prototype');
+  assert(/hauteur conservée.*Textures et relief/i.test(report.textContent!), 'The ZIP report explains height retention for the relief workshop');
   assert.equal(selection!.definition.textures.height!.name, 'sample_displacement.png', 'A Blender height map remains available after importing the whole pack');
   assert(host.textContent!.includes('Clair : bosses ; sombre : creux.'), 'The height channel explains its numeric meaning');
   await changeSelect('Composante de Hauteur (prototype)', 'r');
@@ -372,6 +394,25 @@ try {
   assert.equal(heightExr.getContext('2d')!.getImageData(0, 0, 1, 1).data[0], 128, 'An EXR assigned to height remains numeric data with no sRGB correction');
   const heightReport = labelled<HTMLDetailsElement>('Informations d’import');
   assert(heightReport.textContent!.includes('sans correction de couleur'));
+  // A lone photo used to choose a top projection, even for vertical Details
+  // and Wheels. Every Materials import must enter the geometry-based path.
+  for(const surface of ['skin','details','wheels'] as const) {
+    family=surface;selectedRegion=null;
+    selection={definition:createMaterialDefinition('solid'),family,regions:[],exclusions:[]};
+    instanceKey=`surface-image-${surface}`;await act(async()=>draw());
+    await click('Importer des images ou un pack');
+    await chooseFile('Importer des images ou un pack de matériau',makeFile('my_texture.png'));
+    assert.equal(selection!.definition.transform.projection,'surface',`A standalone texture follows ${surface} geometry automatically`);
+    assert.equal(selection!.definition.transform.mode,'repeat','A Materials texture repeats at a physical scale rather than projecting a photograph from above');
+    assert.equal(selection!.definition.textures.color!.src,source,'The original image is retained');
+    assert(host.querySelector('.material-surface-follow.is-active'),'The active 3D surface placement is visible near the material controls');
+  }
+  islands.push(...WHEEL_PART_GUIDES);family='wheels';selection=null;selectedRegion=WHEEL_PART_GUIDES[1];instanceKey='wheel-flank';await act(async()=>draw());
+  assert.equal(labelled<HTMLSelectElement>('Alignement de la matière').value,'wheel-face','A named sidewall starts with the circular face placement');
+  assert(button('Étirer').disabled,'The wheel placement cannot stretch the source format');
+  await changeSelect('Alignement de la matière','wheel');assert(host.textContent!.includes('raccorder le motif après un tour'));
+  selectedRegion=WHEEL_PART_GUIDES[0];instanceKey='wheel-tread';await act(async()=>draw());
+  assert.equal(labelled<HTMLSelectElement>('Alignement de la matière').value,'wheel','The tread starts with physical 360 degree wrapping');
 } finally { await act(async () => root.unmount()); host.remove(); }
 
 // Exercise the durable library rules through its storage boundary: no browser installation needed.

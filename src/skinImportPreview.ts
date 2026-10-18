@@ -1,7 +1,8 @@
 import type { Skin3DProject } from './skin3d';
+import type { DetailsLayout } from './detailsSides';
 
 interface ImportPreview {
-  loadCustomPreview(buffer: ArrayBuffer): Promise<void>;
+  loadCustomPreview(buffer: ArrayBuffer, options?: { nativeSurfaceLayout?: boolean; detailsLayout?: DetailsLayout }): Promise<void>;
   loadOfficialModel(): Promise<void>;
 }
 
@@ -13,7 +14,7 @@ export async function loadSkinImportPreview(model: Skin3DProject | null, preview
   let warning: string | null = null;
   if (model?.preview) {
     try {
-      await preview.loadCustomPreview(model.preview);
+      await preview.loadCustomPreview(model.preview, { detailsLayout: model.detailsLayout, nativeSurfaceLayout: !!model.detailsLayout });
       return { model, warning };
     } catch (error) {
       warning = `Aperçu 3D illisible : ${error instanceof Error ? error.message : String(error)}.`;

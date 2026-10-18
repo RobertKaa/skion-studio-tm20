@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useId, useRef, useState, type RefObject } from 'react';
 import {
   FINISH_LABELS, NEON_LABELS, PATTERN_LABELS, THEME_CATALOG, THEME_LABELS,
-  type GenerationSummary, type GeneratorOptions,
-} from './generator';
+  type GeneratorOptions,
+} from './generatorCatalog';
+import type { GenerationSummary } from './generator';
 import { LIGHTING_PRESETS, type PreviewEnvironment } from './previewEnvironment';
 import { Icon } from './ui/Icon';
 import './randomModal.css';

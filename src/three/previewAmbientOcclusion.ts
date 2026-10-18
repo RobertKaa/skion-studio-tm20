@@ -4,6 +4,8 @@ import type { Skin3DFile } from '../skin3d';
 import { isWheelTreadPreset, normalizeWheelSurface, type WheelSurfaceSettings } from '../wheelSurface';
 import { getWheelTreadOcclusion } from '../wheelTreads';
 import { attenuateMaterialAO, composeMaterialSurface, type MaterialSurfaceOverlay } from '../materials/surfaceMaps';
+import { cachedAtlasPixels } from '../realUvTextures';
+import type { AtlasSourceLayout } from '../realUvAtlas';
 
 export const AO_TEXTURE_FILES = ['Skin_AO.dds', 'Details_AO.dds', 'Wheels_AO.dds'] as const;
 export type AmbientOcclusionFile = typeof AO_TEXTURE_FILES[number];
@@ -64,6 +66,7 @@ export class PreviewAmbientOcclusion {
   private native = new Map<AmbientOcclusionFile, RGBAImage>();
   private textures = new Map<AmbientOcclusionFile, { image: RGBAImage; texture: THREE.DataTexture }>();
   private officialModel = true;
+  private atlasSource?:AtlasSourceLayout;
   private importedWheelNormal = false;
   private wheelSurface = normalizeWheelSurface(undefined);
   private disposed = false;
@@ -114,6 +117,7 @@ export class PreviewAmbientOcclusion {
     this.officialModel = official;
     this.sync();
   }
+  setAtlasSource(source?:AtlasSourceLayout){if(this.atlasSource===source)return;this.atlasSource=source;this.sync();}
 
   /** Each generated tread uses its own prelight; imported/native AO is reserved for source relief. */
   setWheelSurface(value: WheelSurfaceSettings) {
@@ -147,13 +151,14 @@ export class PreviewAmbientOcclusion {
     for (const file of AO_TEXTURE_FILES) {
       const material = this.material(file);
       const wheel = file === 'Wheels_AO.dds';
-      const source = wheel
+      const raw = wheel
         ? this.wheelSurface.mode === 'smooth' || this.wheelSurface.strength === 0
           ? null
           : isWheelTreadPreset(this.wheelSurface.mode)
-            ? this.officialModel ? getWheelTreadOcclusion(this.wheelSurface.mode) : null
-            : resolveAmbientOcclusion(file, this.imported, this.native, this.officialModel, this.importedWheelNormal)
-        : resolveAmbientOcclusion(file, this.imported, this.native, this.officialModel, this.importedWheelNormal);
+            ? this.officialModel||this.atlasSource ? getWheelTreadOcclusion(this.wheelSurface.mode) : null
+            : resolveAmbientOcclusion(file, this.imported, this.native, this.officialModel||!!this.atlasSource, this.importedWheelNormal)
+        : resolveAmbientOcclusion(file, this.imported, this.native, this.officialModel||!!this.atlasSource, this.importedWheelNormal);
+      const source=raw&&this.atlasSource&&(wheel&&isWheelTreadPreset(this.wheelSurface.mode)||!this.imported.has(file))?cachedAtlasPixels(raw,file==='Skin_AO.dds'?'skin':file==='Details_AO.dds'?'details':'wheels',this.atlasSource,false):raw;
       const hasMaterialAO = this.materialOverlays.some(layer => layer.family === (file === 'Skin_AO.dds' ? 'skin' : file === 'Details_AO.dds' ? 'details' : 'wheels') && layer.ao);
       const image = this.materialImage(file, wheel && hasMaterialAO ? attenuateMaterialAO(source, this.wheelSurface.strength) : source);
       const previous = this.textures.get(file);
