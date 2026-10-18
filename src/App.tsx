@@ -86,6 +86,10 @@ const ReliefPrototypeDialog = lazy(() => import('./ui/ReliefPrototypeDialog').th
 const RandomModal = lazy(() => import('./RandomModal'));
 
 interface ReliefSession {
+  preferMaterial?:boolean;
+  layerId?:string;
+  baseVolume?:{mesh:Uint8Array;variant:'standard'|'normal'};
+  settings?:ReliefSettings;
   atlasSource?:AtlasSourceLayout;
   name: string;
   maps: Map<MapId, HTMLCanvasElement>;
@@ -1455,11 +1459,12 @@ export default function App() {
     catch (error) { notify(projectError(error)); }
   };
 
-  const openReliefPrototype = async () => {
+  const openReliefPrototype = async (requested?:{definition:MaterialDefinition;regions:string[];exclusions:string[]}) => {
     const editor = editorRef.current;
     if (!editor || !ready || busyRef.current) return;
     setBusy('Préparation de l’atelier de relief…');
     try {
+      if(!requested&&reliefSettings?.appearanceScope==='skin'&&!editor.getSelectionMaterialLayer())throw new Error('Sélectionnez le calque de matériau dont vous souhaitez modifier le volume.');
       await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
       const copy = (source: HTMLCanvasElement, data = false) => {
         const canvas = document.createElement('canvas'); canvas.width = source.width; canvas.height = source.height;
@@ -1474,8 +1479,13 @@ export default function App() {
       const wheelAO = await buildAtlasWheelOcclusionFile(wheelSurface, true,atlasSource);
       let prepared = await prototypeSurfaceFiles(await exportMaterialSurfaces(withWheelNormalFile(files, wheelNormal, wheelSurface, wheelAO), editor.getMaterialSurfaceOverlays(), editor.getTextureResolution(), true, wheelSurface, files.some(file => /^Wheels_N\.dds$/i.test(file.name))));
       if(atlasSource){for(const collection of [maps,roles])for(const [id,canvas]of collection){collection.set(id,transferAtlasCanvas(canvas,MAP_BY_ID[id].group,atlasSource,true));canvas.width=canvas.height=1;}prepared=await reorganizeSurfaceFiles(prepared,atlasSource,false,true);}
-      const material = editor.getSelectionMaterialLayer(!!atlasSource),geometry=previewRef.current?.getProjectionTriangles()??[];
-      setReliefSession({ name: skinName, maps, roles, atlasSource, material: material?.family === 'skin' ? material : null,
+      const material = requested?editor.materialForRelief(requested.definition,requested.regions,requested.exclusions):editor.getSelectionMaterialLayer(!!atlasSource),geometry=previewRef.current?.getProjectionTriangles()??[];
+      const layerScoped=!!requested||material?.family==='skin';
+      const layerId=material?.family==='skin'?(editor.getSelection() as (FabricObject&{id?:string})|null)?.id:undefined;
+      const priorVolume=layerScoped&&reliefSettings?.stats&&skin3dRef.current?await restoreNativeModel(skin3dRef.current):null;
+      const baseVolume=priorVolume?{mesh:priorVolume.mesh,variant:reliefSettings!.stats!.templateVariant}:undefined;
+      const settings=layerScoped&&layerId&&reliefSettings?.appliedLayers?.Skin_B===layerId?{...reliefSettings,material,sourceName:material!.definition.name}:undefined;
+      setReliefSession({ name: skinName, maps, roles, atlasSource, preferMaterial:layerScoped,layerId,baseVolume,settings,material: material?.family === 'skin' ? material : null,
         projectionGeometry: atlasSource?sourceAtlasGeometry(geometry):geometry,
         surfaceFiles: prepared, illumRole, speedColor, dirtEnabled, horn });
     } catch (error) { notify(`Atelier de relief indisponible : ${projectError(error)}`); }
@@ -1522,20 +1532,28 @@ export default function App() {
       // Material owners keep all linked channels editable. Existing paint layers
       // stay in place; reapplying replaces only the owners created by this tool.
       const definition = appearance ?? settings.material?.definition;
-      const families = settings.scope === 'vehicle' ? ['Skin_B','Details_B','Wheels_B'] as const : ['Skin_B'] as const;
-      if (settings.material && (definition!.preset !== 'solid' || definition!.textures.color)) for (const map of families) {
+      const layerScoped=settings.appearanceScope==='skin';
+      const targetId=layerScoped?reliefSessionRef.current?.layerId:undefined;
+      const families = settings.scope === 'vehicle'&&!layerScoped ? ['Skin_B','Details_B','Wheels_B'] as const : ['Skin_B'] as const;
+      if(targetId&&definition){
+        ed.setActiveMap('Skin_B');
+        await ed.updateMaterialLayerDefinition(targetId,definition);
+        appliedLayers.Skin_B=targetId;
+      }
+      else if (settings.material && (definition!.preset !== 'solid' || definition!.textures.color||definition!.textures.height||definition!.textures.normal||definition!.textures.ao)) for (const map of families) {
         await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         ed.setActiveMap(map);
         const previous = new Set(ed.getLayers().map(layer => layer.id));
         const organizedFrame=appearance?undefined:settings.material.organizedAtlas;
-        await ed.addMaterialLayer(definition!, appearance || settings.scope === 'vehicle' ? [] : settings.material.regions.map(region => region.key), appearance || settings.scope === 'vehicle' ? [] : settings.material.exclusions.map(region => region.key),organizedFrame?undefined:atlasSource,!atlasSource?organizedFrame:undefined);
+        const wholeSurface=!!appearance||settings.scope==='vehicle'&&!layerScoped;
+        await ed.addMaterialLayer(definition!, wholeSurface ? [] : settings.material.regions.map(region => region.key), wholeSurface ? [] : settings.material.exclusions.map(region => region.key),organizedFrame?undefined:atlasSource,!atlasSource?organizedFrame:undefined);
         const added = ed.getLayers().find(layer => !previous.has(layer.id)); if (added) appliedLayers[map] = added.id;
       }
       else if (definition && (definition.textures.roughmetal || definition.textures.roughness || definition.textures.metalness)) {
         for (const color of families) { const map = color.replace('_B','_R') as MapId; await ed.setBackgroundFromCanvas(map, maps.get(map)!, { flush: false, recordHistory: false }); }
       }
       if (definition?.preset === 'solid' && !definition.textures.color && definition.textures.coat) await ed.setBackgroundFromCanvas('Skin_CoatR', maps.get('Skin_CoatR')!, {flush:false,recordHistory:false});
-      for (const [map, id] of Object.entries(reliefSettings?.appliedLayers ?? {})) { ed.setActiveMap(map as MapId); ed.deleteLayer(id); }
+      if(!layerScoped)for (const [map, id] of Object.entries(reliefSettings?.appliedLayers ?? {})) { if(Object.values(appliedLayers).includes(id))continue;ed.setActiveMap(map as MapId); ed.deleteLayer(id); }
       ed.commitCheckpoint(checkpoint); ed.setActiveMap(activeMap); ed.flushTexture();
       const files = new Map([...(reliefSessionRef.current?.surfaceFiles ?? []), ...result.project.passthrough].map(file => [file.name.toLowerCase(), file]));
       if (result.options.mode === 'geometry') files.delete('skin_n.dds');
@@ -3341,7 +3359,7 @@ export default function App() {
             {mapDef.kind === 'illum' && inspectorTab !== 'layers' && renderLightPreview()}
             {inspectorTab === 'materials' ? <><div className="relief-prototype-entry"><button type="button" className="btn btn-full" disabled={!ready || !!busy || placingImage} onClick={() => void openReliefPrototype()}><Icon name="box" size={15} /> Textures et relief · v1.0</button>{reliefSettings && <p className="hint">Pour modifier la hauteur, rouvrez l’atelier. Les calques règlent l’apparence.</p>}</div><MaterialsPanel family={family} islands={guideIslands} selectedRegion={selectedElement ?? selectedIsland ?? null} selection={selectedMaterialLayer}
               disabled={!ready || !!busy || placingImage} onApply={(definition, regions, exclusions) => void onApplyMaterial(definition, regions, exclusions)}
-              onChange={onMaterialChange} onChangeMask={onMaterialMaskChange} onCommit={() => { editorRef.current?.commitMaterialLayers(); endHistoryGesture(); }} onError={notify} /></>
+              onChange={onMaterialChange} onChangeMask={onMaterialMaskChange} onCommit={() => { editorRef.current?.commitMaterialLayers(); endHistoryGesture(); }} onError={notify} onOpenRelief={(definition,regions,exclusions)=>void openReliefPrototype({definition,regions,exclusions})} /></>
             : inspectorTab === 'layers' ? renderLayers() : inspectorTab === 'texture' || tool === 'region' ? renderTextureProps() : tool !== 'select' ? (
               <Section title={`${currentTool?.label ?? 'Outil'} · prochain tracé`}>
                 <div className="tool-settings">{renderToolOptions()}</div>
@@ -3368,7 +3386,7 @@ export default function App() {
 
       {downloadsOpen && <DownloadDialog onClose={closeDownloads} onPrepareProject={downloadCurrentProject} onExport={onExport} horn={horn} onHornChange={setHorn} />}
 
-      {reliefSession && <Suspense fallback={<div className="modal-overlay" role="status">Chargement de l’atelier de relief…</div>}><ReliefPrototypeDialog name={reliefSession.name} maps={reliefSession.maps} material={reliefSession.material} projectionGeometry={reliefSession.projectionGeometry} surfaceFiles={reliefSession.surfaceFiles} settings={reliefSettings} onApply={applyRelief} onClose={closeReliefPrototype} onExport={downloadReliefPrototype} /></Suspense>}
+      {reliefSession && <Suspense fallback={<div className="modal-overlay" role="status">Chargement de l’atelier de relief…</div>}><ReliefPrototypeDialog name={reliefSession.name} maps={reliefSession.maps} material={reliefSession.material} projectionGeometry={reliefSession.projectionGeometry} surfaceFiles={reliefSession.surfaceFiles} settings={reliefSession.preferMaterial?reliefSession.settings??null:reliefSettings} preserveMaterialMask={reliefSession.preferMaterial} baseVolume={reliefSession.baseVolume} onApply={applyRelief} onClose={closeReliefPrototype} onExport={downloadReliefPrototype} /></Suspense>}
 
       {libraryOpen && <ProjectLibrary currentId={projectId} needsSave={projectModified && (dirtyCount > 0 || !!projectId || skinName !== 'MonSkin' || !!editorRef.current?.hasProjectContent() || !!skin3d || coatIntensity !== 1 || neonIntensity !== 1.4 || !dirtEnabled || textureResolution !== TEXTURE_RESOLUTION)}
         onClose={() => setLibraryOpen(false)} onSave={saveProject} onOpen={openSavedProject} onImport={importProjectFile} onDownloadCurrent={downloadCurrentProject}

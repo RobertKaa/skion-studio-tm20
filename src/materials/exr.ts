@@ -6,8 +6,8 @@ export const MATERIAL_EXR_LIMITS = { fileBytes: 64 * 1024 * 1024, dimension: 819
 export interface MaterialExrMetadata {
   width: number; height: number; pixels: number; mime: 'image/x-exr'; compression: number; channels: string[];
 }
-export interface MaterialExrPixels { width: number; height: number; data: Uint8ClampedArray; clamped: boolean }
-export type MaterialExrMode = 'color' | 'data';
+export interface MaterialExrPixels { width: number; height: number; data: Uint8ClampedArray; clamped: boolean; heightValues?:Float32Array; heightRange?:{min:number;max:number} }
+export type MaterialExrMode = 'color' | 'data' | 'height';
 interface Channel { name: string; pixelType: number; pLinear: number }
 interface Chunk { start: number; size: number; line: number; lines: number; rawBytes: number }
 interface Inspected { metadata: MaterialExrMetadata; channels: Channel[]; chunks: Chunk[]; channelBytes: Uint8Array }
@@ -229,7 +229,7 @@ function sanitizedExr(bytes: Uint8Array, inspected: Inspected): ArrayBuffer {
 
 /** Shared by the worker and Node tests; the parser receives only validated buffers. */
 export async function decodeMaterialExrWithParser(bytes: Uint8Array, mode: MaterialExrMode, parse: ExrParser): Promise<MaterialExrPixels> {
-  if (mode !== 'color' && mode !== 'data') fail('avec un mode de conversion invalide.');
+  if (mode !== 'color' && mode !== 'data'&&mode!=='height') fail('avec un mode de conversion invalide.');
   const inspected = inspect(bytes); await validateCompressedChunks(bytes, inspected);
   let parsed: ReturnType<ExrParser>;
   try { parsed = parse(sanitizedExr(bytes, inspected)); } catch { fail('illisible ou endommagé. Utilisez ses textures PNG/JPEG.'); }
@@ -247,6 +247,12 @@ export async function decodeMaterialExrWithParser(bytes: Uint8Array, mode: Mater
     const source = ((height - y - 1) * width + x) * 4, target = (y * width + x) * 4;
     data[target] = convert(parsed.data[source], mode === 'color'); data[target + 1] = convert(parsed.data[source + 1], mode === 'color');
     data[target + 2] = convert(parsed.data[source + 2], mode === 'color'); data[target + 3] = convert(parsed.data[source + 3], false);
+  }
+  if(mode==='height'){
+    const heightValues=new Float32Array(width*height);let min=Infinity,max=-Infinity;
+    for(let y=0;y<height;y++)for(let x=0;x<width;x++){const at=((height-y-1)*width+x)*4,value=.2126*parsed.data[at]+.7152*parsed.data[at+1]+.0722*parsed.data[at+2];if(!Number.isFinite(value))fail('avec une hauteur non finie.');heightValues[y*width+x]=value;min=Math.min(min,value);max=Math.max(max,value);}
+    if(min<0||max>1)for(let p=0;p<heightValues.length;p++)heightValues[p]=max>min?(heightValues[p]-min)/(max-min):.5;
+    return{width,height,data,clamped,heightValues,heightRange:{min,max}};
   }
   return { width, height, data, clamped };
 }

@@ -109,3 +109,20 @@
   .material-region-list > label { min-height: 34px; }
   .material-region-list { max-height: 200px; }
 }
+.materials-panel [hidden] { display:none !important; }
+.material-surface-only { display:flex; gap:8px; align-items:flex-start; padding:10px 0; font-size:11px; line-height:1.5; }
+.material-workspace-nav { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:3px; padding:3px; background:var(--bg-0); border:1px solid var(--line); border-radius:9px; }
+.material-workspace-nav button { min-width:0; min-height:34px; padding:5px 2px; border:0; border-radius:6px; color:var(--fg-3); font-size:11px; }
+.material-workspace-nav button.is-active { color:var(--accent); background:var(--bg-3); }
+.material-relief-section { margin:12px 0; border:1px solid var(--accent-line); border-radius:10px; background:var(--bg-0); overflow:hidden; }
+.material-relief-heading { display:flex; align-items:center; gap:7px; flex-wrap:wrap; padding:12px; color:var(--accent); }
+.material-relief-heading span { width:100%; color:var(--fg-3); font-size:11px; }
+.material-relief-route,.material-height-levels,.material-height-estimate,.material-volume-route { padding:12px; border-top:1px solid var(--line); display:flex; flex-direction:column; gap:10px; }
+.material-relief-section p { font-size:11px; line-height:1.6; margin:0; color:var(--fg-3); }
+.material-relief-section strong { font-size:12px; }
+.material-volume-route { background:color-mix(in srgb,var(--accent) 5%,var(--bg-0)); }
+.material-volume-route > div { display:flex; flex-direction:column; gap:5px; }
+.material-volume-route span,.material-channel-usage { font-size:10px; color:var(--accent); }
+.material-game-status { border-left:2px solid var(--accent-line); padding-left:8px; }
+.materials-panel .btn { white-space:normal; }
+@media(max-width:640px) { .material-workspace-nav button { min-height:40px; } }

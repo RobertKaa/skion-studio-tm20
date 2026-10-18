@@ -75,7 +75,20 @@ Puis ouvrir http://localhost:5173
   par le nouveau contrôle. Validation en jeu du découpage ciblé encore à effectuer.
 
 - **Matériaux dans le navigateur, sans Blender ni installation** : ouvrir **Matériaux**
-  à gauche ou **Matières** dans l’inspecteur. Six presets (peinture satinée, carbone,
+  à gauche ou **Matières** dans l’inspecteur.
+  Les espaces **Réglages**, **Textures** et **Bibliothèque** distinguent les images
+  sources de leur rendu. **Relief & hauteur** permet de choisir normales, hauteur,
+  combinaison ou désactivation, puis de régler le niveau neutre et le contraste.
+  **Préparer le volume 3D** transmet le matériau courant et ses zones à l’atelier,
+  même avant de créer un calque. Depuis un calque sélectionné, la portée est
+  verrouillée sur son masque et ses exclusions ; l’application met à jour ce
+  même calque, sans recopier sa peinture sur les roues ou Détails. Les volumes
+  déjà présents hors de ce masque sont conservés sur les cinq LOD.
+  Les packs ne contenant que normales/hauteur/AO
+  conservent la peinture et les finitions existantes. Une hauteur peut aussi être
+  estimée depuis les normales : approximation explicitement indiquée, sans échelle
+  physique absolue. Voir [l’investigation du rendu en course](docs/materials-relief-investigation.md).
+  Six presets (peinture satinée, carbone,
   métal brossé, caoutchouc, tissu et peinture usée) et des images PNG/JPG/WebP/EXR permettent
   de créer un matériau complet. Déposer plusieurs images couleur, rugosité, métal,
   vernis, lumière, saleté, normale ou AO ; leurs canaux sont détectés et restent
@@ -135,9 +148,10 @@ Puis ouvrir http://localhost:5173
   vérifie rendu, canaux, masques, historique, projets, DDS, bibliothèque et interface.
   Les ZIP de textures Blender sont aussi acceptés : les images d’un même matériau sont
   affectées par leur nom, même dans des sous-dossiers. Le `.blend`, les aperçus et les
-  cartes de hauteur/déplacement sont ignorés avec un compte rendu. Les nœuds Blender
-  ne sont pas exécutés. Les EXR compatibles sont décodés en arrière-plan puis convertis
-  en PNG 8 bits ; les cartes numériques gardent leurs valeurs, les couleurs linéaires
+  fichiers non reconnus sont ignorés avec un compte rendu. Les hauteurs/déplacements
+  sont conservés ; les nœuds Blender ne sont pas exécutés. Les EXR compatibles sont
+  décodés en arrière-plan : hauteur en PNG 16 bits, autres canaux en PNG 8 bits.
+  Les cartes numériques restent sans correction de couleur, les couleurs linéaires
   passent en sRGB. **Qualité ZIP / EXR** limite les copies importées à 1024, 2048 (défaut)
   ou 4096 px, sans modifier l’archive originale. Choisir un seul matériau, une seule
   résolution et un seul format par canal en cas de variantes. Limites : ZIP de 256 Mo,
@@ -405,8 +419,8 @@ aucune installation de Blender, Python ou autre outil n’est nécessaire.
 Le mode **Volume** utilise désormais une surface Body densifiée, préparée pour
 les cinq niveaux de détail natifs. Elle échantillonne la hauteur localement ;
 les PNG gris/RGB 8 ou 16 bits non entrelacés sont lus numériquement, sans gamma
-ni conversion préalable en atlas 8 bits. Les autres PNG et les hauteurs EXR
-converties utilisent le rendu 8 bits du matériau. La répétition, rotation,
+ni conversion préalable en atlas 8 bits. Les hauteurs EXR deviennent des sources PNG
+16 bits, y compris pour les déplacements signés remappés vers [0, 1]. La répétition, rotation,
 miroirs, décalages, masques et opacité suivent le placement du matériau.
 Les cartes d’un ZIP Blender restent disponibles jusqu’à 4K, indépendamment de
 la qualité d’export. La résolution de la surface reste fixe : de très petites

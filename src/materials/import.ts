@@ -3,6 +3,8 @@ import { getEnv } from 'fabric';
 import { createMaterialDefinition, isValidMaterialDefinition, MATERIAL_CHANNELS, type MaterialChannel, type MaterialDefinition, type MaterialTexture } from './types';
 import { loadMaterialSources, getMaterialSourceCanvas } from './render';
 import { decodeMaterialExr, inspectMaterialExr } from './exr';
+import { heightPng, resizeHeight } from './heightPng';
+import { decodeHeightPNG } from '../relief/heightSource';
 
 export const MATERIAL_IMPORT_LIMITS = { files: 10, fileBytes: 64 * 1024 * 1024, totalBytes: 128 * 1024 * 1024,
   pixels: 16 * 1024 * 1024, totalPixels: 64 * 1024 * 1024, dimension: 8192, manifestBytes: 256 * 1024 } as const;
@@ -21,6 +23,7 @@ export interface MaterialTextureRole { channel: MaterialChannel; component: Mate
 export function detectMaterialTextureRoles(name: string): MaterialTextureRole[] {
   const stem = name.replace(/\.[^.]+$/, '').replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase();
   const tokens = stem.split(/[^a-z0-9]+/).filter(Boolean);
+  for(let i=0;i<tokens.length;i++)tokens[i]=tokens[i].replace(/^(normal|normals|height|displacement|roughness|metallic|metalness|basecolor|albedo|ambientocclusion)map$/,'$1');
   const directXNormal = /(?:normal|normals|nrm|nor|n)(?:dx|directx)(?:\d+k|\d{3,4})?$/.test(stem.replace(/[^a-z0-9]/g, ''));
   for (let index = 0; index < tokens.length; index++) {
     if (tokens[index] === 'direct' && tokens[index + 1] === 'x') tokens.splice(index, 2, 'directx');
@@ -176,8 +179,10 @@ async function textureToPng(bytes: Uint8Array, name: string, roles: MaterialText
   if (outputPixels > remainingPixels) fail('trop d’images en haute résolution. Choisissez une qualité plus basse.');
   let src: string;
   if (exr) {
-    const mode = (targetChannel ? targetChannel === 'color' || targetChannel === 'emission' : roles.some(role => role.channel === 'color' || role.channel === 'emission')) ? 'color' : 'data';
+    const isHeight=targetChannel?targetChannel==='height':roles.length===1&&roles[0].channel==='height';
+    const mode = isHeight?'height':(targetChannel ? targetChannel === 'color' || targetChannel === 'emission' : roles.some(role => role.channel === 'color' || role.channel === 'emission')) ? 'color' : 'data';
     const decoded = await decodeMaterialExr(bytes, mode);
+    if(decoded.heightValues){const width=Math.max(1,Math.round(decoded.width*ratio)),height=Math.max(1,Math.round(decoded.height*ratio));src=await heightPng(resizeHeight(decoded.heightValues,decoded.width,decoded.height,width,height),width,height);notices.push(`« ${name} » : hauteur EXR conservée en PNG 16 bits, sans correction de couleur.`);if(decoded.heightRange&&(decoded.heightRange.min<0||decoded.heightRange.max>1))notices.push(`Hauteur EXR ramenée de [${decoded.heightRange.min.toPrecision(4)} ; ${decoded.heightRange.max.toPrecision(4)}] vers [0 ; 1]. L’amplitude du volume reste réglable en millimètres.`);return{src,pixels:outputPixels};}
     const full = document.createElement('canvas'); full.width = decoded.width; full.height = decoded.height;
     const result = document.createElement('canvas'); result.width = Math.max(1, Math.round(decoded.width * ratio)); result.height = Math.max(1, Math.round(decoded.height * ratio));
     try {
@@ -189,7 +194,9 @@ async function textureToPng(bytes: Uint8Array, name: string, roles: MaterialText
       notices.push(`« ${name} » : EXR converti en PNG 8 bits${mode === 'data' ? ', valeurs de la carte conservées sans correction de couleur' : ', couleur linéaire convertie en sRGB'}.`);
       if (decoded.clamped) notices.push(`« ${name} » : les valeurs hors de 0 à 1 ont été limitées au domaine du skin.`);
     } finally { full.width = full.height = result.width = result.height = 0; }
-  } else src = await imageToPng(bytes, metadata, maxSize);
+  } else if(metadata.mime==='image/png'&&bytes[24]===16&&ratio<1&&(targetChannel==='height'||!targetChannel&&roles.length===1&&roles[0].channel==='height')){
+    const field=await decodeHeightPNG(bytes,roles[0].component);if(field){const width=Math.max(1,Math.round(metadata.width*ratio)),height=Math.max(1,Math.round(metadata.height*ratio));src=await heightPng(resizeHeight(field.values,field.width,field.height,width,height),width,height);}else src=await imageToPng(bytes,metadata,maxSize);
+  }else src = await imageToPng(bytes, metadata, maxSize);
   if (ratio < 1) notices.push(`« ${name} » : ${metadata.width} × ${metadata.height} → ${Math.round(metadata.width * ratio)} × ${Math.round(metadata.height * ratio)} px pour la qualité choisie.`);
   return { src, pixels: outputPixels };
 }
@@ -326,7 +333,7 @@ function archiveTextureName(name: string) {
   const base = name.split('/').at(-1)!;
   const stem = base.replace(/\.[^.]+$/, '').replace(/([a-z])([A-Z])/g, '$1_$2').replace(/[\s.-]+/g, '_')
     .replace(/(^|_)(direct_x|open_gl|rough_metal|clear_coat|coat_r|dirt_mask)(?=_|$)/gi, (_match, prefix: string, words: string) => prefix + words.replace('_', ''))
-    .replace(/_(?:\d+k|\d{3,5}(?:x\d{3,5})?|map|texture)$/i, '').replace(/_(?:\d+k|\d{3,5}(?:x\d{3,5})?|map|texture)$/i, '');
+    .replace(/_(?:\d+k|\d{3,5}(?:x\d{3,5})?|map|texture)$/i, '').replace(/_(?:\d+k|\d{3,5}(?:x\d{3,5})?|map|texture)$/i, '').replace(/(normal|normals|height|displacement|roughness|metallic|metalness|basecolor|albedo|ambientocclusion)map$/i,'$1');
   const unsupported = UNSUPPORTED_SUFFIX.exec(stem);
   const known = PBR_SUFFIX.test(stem) || /^(?:skin|details|wheels)_[bri]$/i.test(stem);
   const native = /^(skin|details|wheels)_[bri]$/i.exec(stem);
@@ -384,6 +391,7 @@ async function importTextureArchive(file: File, bytes: Uint8Array, entries: ZipE
 }
 
 function finishImportedDefinition(definition: MaterialDefinition): MaterialDefinition {
+  if(Object.keys(definition.textures).length&&Object.keys(definition.textures).every(key=>['normal','height','ao'].includes(key)))definition.surfaceOnly=true;
   // A texture set displays its original colors; tint remains an explicit user choice.
   if (definition.textures.color) definition.color = '#ffffff';
   if (definition.textures.roughness || definition.textures.roughmetal) definition.roughness = 255;
@@ -442,9 +450,10 @@ export async function portableMaterialDefinition(definition: MaterialDefinition,
   const temporary = new Set(Object.values(snapshot.textures).filter((texture) => texture!.src.startsWith('blob:')).map((texture) => texture!.src));
   if (!temporary.size) return snapshot;
   const reader = sourceReader ?? { loadMaterialSources, getMaterialSourceCanvas };
-  await reader.loadMaterialSources(snapshot);
+  if(sourceReader)await reader.loadMaterialSources(snapshot);
   const sources = new Map<string, string>();
   for (const source of temporary) {
+    if(!sourceReader){const response=await fetch(source,{signal:AbortSignal.timeout(15000)});if(!response.ok)throw new Error('La texture originale est indisponible.');const bytes=new Uint8Array(await response.arrayBuffer());inspectMaterialImage(bytes);sources.set(source,bytesToDataPng(bytes));continue;}
     const image = reader.getMaterialSourceCanvas(source);
     if (!image) throw new Error('La texture locale est indisponible. Rechargez le projet puis réessayez.');
     validatePixels(image.width, image.height);

@@ -2008,6 +2008,12 @@ export class EditorCore {
     return layer ? structuredClone(atlas?{...layer,regions:mappedMaterialRegions(layer.regions,layer.family,atlas,!!layer.organizedAtlas),exclusions:mappedMaterialRegions(layer.exclusions,layer.family,atlas,!!layer.organizedAtlas)}:layer) : null;
   }
 
+  materialForRelief(definition:MaterialDefinition,regions:string[],exclusions:string[]):MaterialLayer {
+    const selected=this.getSelectionMaterialLayer(!!this.uvAtlas);
+    if(selected?.family==='skin')return {...selected,definition:structuredClone(definition)};
+    return {definition:structuredClone(definition),family:'skin',regions:this.materialRegions(regions,'skin'),exclusions:this.materialRegions(exclusions,'skin'),...(this.uvAtlas?{organizedAtlas:this.detailsLayout??'stock'}:{})};
+  }
+
   /** Promote an existing flat tyre image to one editable, geometry-aware
    * material. Keep its identity/order/opacity and its image, with Undo intact. */
   async adaptSelectionToWheel(mode:'wheel'|'wheel-face',key=mode==='wheel'?'tyres:tread':'tyres:outer'):Promise<boolean> {
@@ -2119,6 +2125,15 @@ export class EditorCore {
     this.emit('selection'); this.emit('layers'); this.flushTexture();
     clearTimeout(this.materialSettleTimer);
     this.materialSettleTimer = setTimeout(() => this.commitMaterialLayers(), 250);
+  }
+
+  /** Apply workshop changes to the captured owner, keeping its mask and stack position. */
+  async updateMaterialLayerDefinition(id:string,definition:MaterialDefinition){
+    const image=this.findById(id) as (FabricImage&EditorObject)|undefined;
+    if(!image?.materialLayer||image.linkedImageId||!image.selectable)throw new Error('Le calque de matériau ciblé est indisponible ou verrouillé.');
+    this.selectLayer(id);
+    await this.setSelectionMaterialDefinition(definition);
+    if(this.getSelection()!==image)throw new Error('Le calque ciblé a changé pendant l’application du relief.');
   }
 
   setSelectionMaterialMask(regions: string[], exclusions: string[]) {

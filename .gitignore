@@ -126,3 +126,6 @@ __pycache__/
 
 !/scripts/test-real-uv-fragments.ts
 !/scripts/test-real-uv-return.ts
+!/scripts/test-material-relief.ts
+!/scripts/test-vertex-normal-diagnostic.ts
+!/scripts/test-relief-layer-volume.ts

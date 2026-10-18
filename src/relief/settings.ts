@@ -2,6 +2,7 @@ import { isValidMaterialLayer, type MaterialLayer } from '../materials/types';
 import type { ReliefMode, ReliefScope, ReliefTextureResolution, ReliefPrototypeResult } from './types';
 
 export interface ReliefSettings {
+  appearanceScope?:'skin';
   version: 1;
   source: 'material' | 'demo' | 'diagnostic';
   material: MaterialLayer | null;
@@ -18,7 +19,8 @@ export interface ReliefSettings {
 export function validReliefSettings(value: unknown, sourceValidator?: (src: string) => boolean): value is ReliefSettings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const v = value as ReliefSettings;
-  if (Object.keys(v).some(key => !['version','source','material','sourceName','mode','scope','textureResolution','strengthMm','diagnostic','appliedLayers','stats','heightSourceBits'].includes(key))) return false;
+  if (Object.keys(v).some(key => !['version','source','material','sourceName','mode','scope','textureResolution','strengthMm','diagnostic','appliedLayers','stats','heightSourceBits','appearanceScope'].includes(key))) return false;
+  if(v.appearanceScope!==undefined&&v.appearanceScope!=='skin')return false;
   if (v.heightSourceBits !== undefined && ![8,16].includes(v.heightSourceBits)) return false;
   if (v.stats !== undefined && (!v.stats || typeof v.stats !== 'object' || Array.isArray(v.stats)
     || Object.keys(v.stats).some(key=>!['affectedVertices','hoodVertices','eligibleVertices','triangleCount','maxDisplacementMm','templateVariant'].includes(key))

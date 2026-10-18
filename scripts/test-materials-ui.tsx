@@ -67,6 +67,7 @@ const changes: MaterialDefinition[] = [];
 const masks: { regions: string[]; exclusions: string[] }[] = [];
 const errors: string[] = [];
 let commits = 0;
+const volumeRequests:{definition:MaterialDefinition;regions:string[];exclusions:string[]}[]=[];
 function draw() {
   root.render(<MaterialsPanel key={instanceKey} family={family} islands={islands} selectedRegion={selectedRegion} selection={selection} disabled={disabled}
     onApply={(definition, regions, exclusions) => applications.push({ definition, regions, exclusions })}
@@ -75,7 +76,7 @@ function draw() {
       masks.push({ regions: [...regions], exclusions: [...exclusions] });
       if (selection) { selection = { ...selection, regions: regions.map(resolveRegion), exclusions: exclusions.map(resolveRegion) }; draw(); }
     }}
-    onCommit={() => commits++} onError={(message) => errors.push(message)} />);
+    onCommit={() => commits++} onError={(message) => errors.push(message)} onOpenRelief={(definition,regions,exclusions)=>volumeRequests.push({definition,regions,exclusions})} />);
 }
 const buttons = () => [...host.querySelectorAll<HTMLButtonElement>('button')];
 function button(text: string) {
@@ -149,7 +150,7 @@ try {
   assert.equal(editLibrary.open, false, 'Selecting an existing material prioritizes its controls over the preset library');
   assert.equal(editLibrary.querySelector('summary')!.textContent, 'Changer ou importer un matériau');
   assert(host.querySelector('.material-current')!.compareDocumentPosition(editLibrary) & desktop.Node.DOCUMENT_POSITION_FOLLOWING, 'The selected material appears before the optional replacement library');
-  assert(labelled<HTMLInputElement>('Rugosité · image').compareDocumentPosition(editLibrary) & desktop.Node.DOCUMENT_POSITION_FOLLOWING, 'The existing material’s finish sliders appear before the optional library');
+  assert(editLibrary.closest('[hidden]'),'The optional library stays behind its own workspace tab while the selected material controls are shown');
   assert(host.textContent!.includes('Sa couleur et ses finitions se règlent ensemble.'));
   const legacySources=structuredClone(selection!.definition.textures);
   await click('Suivre la surface 3D');
@@ -265,16 +266,16 @@ try {
   const normalDefinition = createMaterialDefinition('rubber'); normalDefinition.textures.normal = { src: source, name: 'normal.png', component: 'luminance', invert: false };
   selection = { definition: normalDefinition, family: 'skin', regions: [], exclusions: [] }; await act(async () => draw());
   assert(host.textContent!.includes('export standard sans normales personnalisées'), 'A body normal source clearly distinguishes the prototype from standard game export');
-  assert.equal(labelled<HTMLInputElement>('Relief').disabled, false, 'Body normals have an editable strength for the prototype');
+  assert.equal(labelled<HTMLInputElement>('Intensité des détails').disabled, false, 'Body normals have an editable strength for the workshop');
   assert.equal(labelled<HTMLSelectElement>('Affectation de normal.png').disabled, false, 'A body normal channel remains editable instead of trapping the imported source');
   assert.equal([...labelled<HTMLSelectElement>('Ajouter une image à un canal').options].find(option => option.value === 'height')!.disabled, false, 'Height can be imported without Blender or another installation');
   assert.equal(button('Créer un calque séparé').disabled, false, 'A normal map never blocks applying the rest of a material to the body');
   family = 'details'; selection = { ...selection!, family }; selectedRegion = islands[3]; await act(async () => draw());
-  assert.equal(labelled<HTMLInputElement>('Relief').disabled, false, 'A supported surface with a normal image exposes an active strength control');
+  assert.equal(labelled<HTMLInputElement>('Intensité des détails').disabled, false, 'A supported surface with a normal image exposes an active strength control');
   const withNormal = selection;
   selection = { ...selection!, definition: createMaterialDefinition('fabric') }; await act(async () => draw());
-  assert.equal(labelled<HTMLInputElement>('Relief').disabled, true, 'A preset without a normal image cannot expose an ineffective active slider');
-  assert(host.textContent!.includes('Ajoutez une image au canal Relief'), 'Missing normal images have an actionable explanation');
+  assert.equal(labelled<HTMLInputElement>('Intensité des détails').disabled, true, 'A preset without a normal image cannot expose an ineffective active slider');
+  assert(host.textContent!.includes('Ajoutez une image de normales ou de hauteur'), 'Missing normal images have an actionable explanation');
   selection = withNormal; await act(async () => draw());
   disabled = true; await act(async () => draw());
   assert(button('Créer un calque séparé').disabled, 'Busy/editor-disabled state blocks accidental layer creation');
@@ -329,7 +330,7 @@ try {
   const normalConvention = labelled<HTMLInputElement>('Normal DirectX (Y inversé)');
   assert.equal(normalConvention.checked, false, 'Normal maps use OpenGL by default');
   assert(host.textContent!.includes('OpenGL par défaut'));
-  assert.equal(host.querySelector('[aria-label="Composante de Relief"]'), null, 'Normal maps expose a convention switch without scalar component interpretation');
+  assert.equal(host.querySelector('[aria-label="Composante de Normales"]'), null, 'Normal maps expose a convention switch without scalar component interpretation');
   await act(async () => normalConvention.click());
   assert.equal(selection!.definition.textures.normal!.invert, true, 'DirectX convention is stored as the normal green-channel inversion');
   await act(async () => normalConvention.click());
@@ -366,7 +367,7 @@ try {
   assert(/hauteur conservée.*Textures et relief/i.test(report.textContent!), 'The ZIP report explains height retention for the relief workshop');
   assert.equal(selection!.definition.textures.height!.name, 'sample_displacement.png', 'A Blender height map remains available after importing the whole pack');
   assert(host.textContent!.includes('Clair : bosses ; sombre : creux.'), 'The height channel explains its numeric meaning');
-  await changeSelect('Composante de Hauteur (prototype)', 'r');
+  await changeSelect('Composante de Hauteur / déplacement', 'r');
   assert.equal(selection!.definition.textures.height!.component, 'r');
   await changeSelect('Qualité ZIP / EXR', '4096');
   await click('Importer des images ou un pack');
@@ -413,6 +414,14 @@ try {
   await changeSelect('Alignement de la matière','wheel');assert(host.textContent!.includes('raccorder le motif après un tour'));
   selectedRegion=WHEEL_PART_GUIDES[0];instanceKey='wheel-tread';await act(async()=>draw());
   assert.equal(labelled<HTMLSelectElement>('Alignement de la matière').value,'wheel','The tread starts with physical 360 degree wrapping');
+  family='skin';selectedRegion=islands[0];instanceKey='height-workflow';const heightDefinition=createMaterialDefinition();heightDefinition.surfaceOnly=true;heightDefinition.textures.height={src:source,name:'height.png',component:'r',invert:false};selection={definition:heightDefinition,family,regions:[islands[0]],exclusions:[islands[2]]};await act(async()=>draw());
+  assert.equal(labelled<HTMLInputElement>('Niveau neutre').value,'0.5');await changeInput('Niveau neutre','0.3');assert.equal(selection!.definition.surfaceRelief!.midpoint,.3);
+  await click('Préparer le volume 3D');assert.equal(volumeRequests.length,1);assert.equal(volumeRequests[0].definition.surfaceRelief!.midpoint,.3);assert.deepEqual(volumeRequests[0].regions,['top']);assert.deepEqual(volumeRequests[0].exclusions,['right']);
+  const normalImage=document.createElement('canvas');normalImage.width=normalImage.height=64;const normalContext=normalImage.getContext('2d')!,normalPixels=normalContext.createImageData(64,64);for(let y=0;y<64;y++)for(let x=0;x<64;x++){const nx=.5*Math.sin(x/64*2*Math.PI);normalPixels.data.set([128+nx*127,128,128+Math.sqrt(1-nx*nx)*127,255],(y*64+x)*4);}normalContext.putImageData(normalPixels,0,0);
+  const normalPng=normalImage.toDataURL();selection={...selection!,definition:{...createMaterialDefinition(),surfaceOnly:true,textures:{normal:{src:normalPng,name:'normalmap.png',component:'r',invert:false}}}};await act(async()=>draw());
+  assert(button('Préparer le volume 3D').disabled,'Normal-only sources need a height before preparing geometry');await click('Estimer une hauteur depuis les normales');
+  for(let attempt=0;host.querySelector('[aria-busy="true"]')&&attempt<200;attempt++)await act(async()=>{await new Promise(resolve=>setTimeout(resolve,5));});
+  assert(selection!.definition.textures.height,'The explicit normal integration creates a usable height source');assert.equal(selection!.definition.surfaceRelief!.heightOrigin,'normal-estimate');assert.equal(selection!.definition.textures.normal!.src,normalPng);assert(!button('Préparer le volume 3D').disabled);
 } finally { await act(async () => root.unmount()); host.remove(); }
 
 // Exercise the durable library rules through its storage boundary: no browser installation needed.

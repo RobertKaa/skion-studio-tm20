@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { deflateSync } from 'node:zlib';
 import { decodeMaterialExr, decodeMaterialExrWithParser, inspectMaterialExr, MATERIAL_EXR_LIMITS } from '../src/materials/exr';
+import { heightPng } from '../src/materials/heightPng';
+import { decodeHeightPNG } from '../src/relief/heightSource';
 
 const encoder = new TextEncoder();
 function join(parts: Uint8Array[]) { const bytes = new Uint8Array(parts.reduce((size, part) => size + part.length, 0)); let offset = 0; for (const part of parts) { bytes.set(part, offset); offset += part.length; } return bytes; }
@@ -40,6 +42,11 @@ function fixture(options: { width?: number; height?: number; channels?: string[]
 }
 
 const simple = fixture();
+const fineHeight=await decodeMaterialExr(fixture({channels:['Y'],pixels:[[32768/65535],[32769/65535],[.8],[.2]]}).bytes,'height');
+assert(fineHeight.heightValues&&fineHeight.heightValues[1]>fineHeight.heightValues[0]&&fineHeight.heightValues[1]-fineHeight.heightValues[0]<1/255,'EXR height decoding retains sub-8-bit differences');
+const numericPng=await heightPng(fineHeight.heightValues!,2,2),retained=await decodeHeightPNG(Uint8Array.from(atob(numericPng.split(',')[1]),c=>c.charCodeAt(0)));
+assert.equal(retained!.bits,16);assert(retained!.values[1]>retained!.values[0]);
+const signedHeight=await decodeMaterialExr(fixture({channels:['Y'],pixels:[[-2],[2],[0],[1]]}).bytes,'height');assert.deepEqual(signedHeight.heightRange,{min:-2,max:2});assert.deepEqual([...signedHeight.heightValues!],[0,1,.5,.75],'Signed displacement is rescaled instead of clipping away negative heights');
 assert.deepEqual(inspectMaterialExr(simple.bytes), { width: 2, height: 2, pixels: 4, mime: 'image/x-exr', compression: 0, channels: ['A', 'B', 'G', 'R'] });
 const numeric = await decodeMaterialExr(simple.bytes, 'data');
 assert.deepEqual([...numeric.data], [64, 128, 191, 255, 32, 64, 128, 128, 0, 255, 128, 64, 255, 0, 64, 255], 'Numeric maps preserve channel values, alpha and top-to-bottom image orientation');

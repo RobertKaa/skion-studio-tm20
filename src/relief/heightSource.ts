@@ -5,6 +5,7 @@ import { canonicalDetailsMaterial, detailsSideOffset } from '../detailsSides';
 import { panelFrame, panelReferenceMaterial, insidePanel } from '../underbodyPanel';
 import type { ProjectionTriangle } from '../three/decalProjection';
 import { atlasCoordinateMap, organizedAtlasGeometry } from '../realUvAtlas';
+import { calibratedHeight } from '../materials/relief';
 
 export interface HeightSource { width: number; height: number; bits: 8 | 16; values: Float32Array }
 const fail = () => { throw new Error('La carte de hauteur PNG est invalide ou dépasse les limites (4K, 64 Mo).'); };
@@ -129,7 +130,7 @@ export function createProjectedHeightSampler(source: HeightSource, layer: Materi
   const projector=createMaterialProjector(layer,geometry,2048,{width:1,height:aspect});
   if(!projector) return createHeightSampler(source,layer,mask,aspect);
   const sample=projector.scalarSampler(source),alpha=heightMaskAlpha(mask),invert=layer.definition.textures.height!.invert;
-  return (u,v)=>{const value=sample(u,v);return (2*(invert?1-value:value)-1)*alpha(u,v);};
+  return (u,v)=>{const value=sample(u,v);return (2*calibratedHeight(invert?1-value:value,layer.definition)-1)*alpha(u,v);};
 }
 
 export function createHeightSampler(source: HeightSource, layer: MaterialLayer, mask: RGBAImage, aspect = source.height / source.width): (u: number, v: number) => number {
@@ -156,6 +157,6 @@ export function createHeightSampler(source: HeightSource, layer: MaterialLayer, 
     const value = (px: number, py: number) => source.values[wrap(py,source.height)*source.width+wrap(px,source.width)];
     let h = value(a,b)*(1-tx)*(1-ty)+value(a+1,b)*tx*(1-ty)+value(a,b+1)*(1-tx)*ty+value(a+1,b+1)*tx*ty;
     if (texture.invert) h = 1-h;
-    return (2*h-1)*coverage;
+    return (2*calibratedHeight(h,layer.definition)-1)*coverage;
   };
 }

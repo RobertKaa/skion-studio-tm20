@@ -11,6 +11,8 @@ import {
 import type { ReliefMode, ReliefScope } from '../relief/types';
 import { RELIEF_GAME_ZIP_LIMIT_BYTES, reliefPrototypeName } from '../relief/export';
 import { createHeightSampler, createProjectedHeightSampler, loadHeightSource, localPNGAspect, type HeightSource } from '../relief/heightSource';
+import { detailSources } from '../materials/relief';
+import { retainOtherLayerVolumes } from '../relief/layerVolume';
 import type { ReliefSettings } from '../relief/settings';
 import type { Skin3DFile } from '../skin3d';
 import type { ProjectionTriangle } from '../three/decalProjection';
@@ -37,6 +39,8 @@ const DEFAULT_RUNTIME: ReliefPrototypeRuntime = {
   createPreview: (host) => new CarPreview(host), loadTemplate: () => loadPreparedReliefTemplate(true), build: buildReliefPrototype,
 };
 export interface ReliefPrototypeDialogProps {
+  preserveMaterialMask?:boolean;
+  baseVolume?:{mesh:Uint8Array;variant:'standard'|'normal'};
   name: string;
   maps: ReadonlyMap<MapId, HTMLCanvasElement>;
   material: MaterialLayer | null;
@@ -52,10 +56,10 @@ export interface ReliefPrototypeDialogProps {
 type TextureQuality = 1024 | 2048 | 4096;
 interface Source { kind: 'selected' | 'carbon' | 'demo' | 'imported' | 'diagnostic'; layer: MaterialLayer | null; name: string; serial: number }
 const materialHasHeight = (definition: MaterialDefinition) => !!definition.textures.height || hasProceduralMaterialRelief(definition);
-const materialHasNormal = (definition: MaterialDefinition) => !!definition.textures.normal || hasProceduralMaterialRelief(definition);
+const materialHasNormal = (definition: MaterialDefinition) => !!definition.textures.normal || detailSources(definition).height || hasProceduralMaterialRelief(definition);
 const usable = (layer: MaterialLayer | null) => layer?.family === 'skin' && (materialHasNormal(layer.definition) || materialHasHeight(layer.definition));
 function repeatingLayer(layer: MaterialLayer): MaterialLayer {
-  const copy = structuredClone(layer); copy.definition.transform.mode = 'repeat'; return copy;
+  return structuredClone(layer);
 }
 const image = (canvas: HTMLCanvasElement): RGBAImage => ({ width: canvas.width, height: canvas.height, data: canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data });
 function canvasFrom(image: RGBAImage): HTMLCanvasElement {
@@ -121,20 +125,21 @@ function hoodAppearance(definition: MaterialDefinition, channels: Map<MaterialRe
 const nextPaint = () => new Promise<void>(resolve => window.setTimeout(resolve, 0));
 
 /** The workshop owns a separate preview and canvas copies; the editor is never modified. */
-export function ReliefPrototypeDialog({ name, maps, material, projectionGeometry, surfaceFiles, onClose, onExport, settings, onApply, runtime = DEFAULT_RUNTIME }: ReliefPrototypeDialogProps) {
+export function ReliefPrototypeDialog({ name, maps, material, projectionGeometry, surfaceFiles, onClose, onExport, settings, onApply,preserveMaterialMask=false,baseVolume, runtime = DEFAULT_RUNTIME }: ReliefPrototypeDialogProps) {
   const id = useId(), panel = useRef<HTMLDivElement>(null), previewHost = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null), preview = useRef<PrototypePreview | null>(null);
   const diagnostic = useRef<{ resolution: TextureQuality; kind: Source['kind']; atlas: RGBAImage } | null>(null);
   const materialSession = useRef<PrototypeMaterialSession | null>(null);
   const numericHeight = useRef<{ src: string; component: string; field: HeightSource | null; aspect: number } | null>(null);
   const selected = useRef(usable(material) ? repeatingLayer(material!) : null);
+  const layerScoped=preserveMaterialMask&&!!selected.current;
   const [source, setSource] = useState<Source>(() => settings
     ? { kind: settings.source === 'material' ? 'imported' : settings.source, layer: settings.material ? structuredClone(settings.material) : null, name: settings.sourceName, serial: 0 }
     : selected.current
     ? { kind: 'selected', layer: structuredClone(selected.current), name: selected.current.definition.name, serial: 0 }
     : { kind: 'carbon', layer: { definition: createMaterialDefinition('carbon'), family: 'skin', regions: [], exclusions: [] }, name: 'Carbone tissé', serial: 0 });
   const [template, setTemplate] = useState<PreparedReliefTemplate | null>(null);
-  const [scope, setScope] = useState<ReliefScope>(settings?.scope ?? 'vehicle');
+  const [scope, setScope] = useState<ReliefScope>(layerScoped?'vehicle':settings?.scope ?? 'vehicle');
   const [textureResolution, setTextureResolution] = useState<TextureQuality>(settings?.textureResolution ?? 2048);
   const [mode, setMode] = useState<ReliefMode>(() => settings?.mode ?? (selected.current && !materialHasHeight(selected.current.definition) ? 'normal' : 'geometry'));
   const [strengthMm, setStrengthMm] = useState(settings?.strengthMm ?? (!selected.current || selected.current.definition.preset === 'carbon' ? .5 : 10)), [compare, setCompare] = useState(false);
@@ -216,7 +221,7 @@ export function ReliefPrototypeDialog({ name, maps, material, projectionGeometry
           if (mode === 'geometry' || compare) delete definition.textures.normal;
           await session.load(definition);
           if (!alive.current || generation.current !== ticket) return;
-          const layer = { ...source.layer, definition, regions: scope === 'vehicle' ? [] : source.layer.regions, exclusions: scope === 'vehicle' ? [] : source.layer.exclusions };
+            const layer = { ...source.layer, definition, regions: scope === 'vehicle'&&!preserveMaterialMask ? [] : source.layer.regions, exclusions: scope === 'vehicle'&&!preserveMaterialMask ? [] : source.layer.exclusions };
           rendered = session.render(layer, textureResolution, projectionGeometry);
           if (rendered.has('height')) heightAtlas = image(rendered.get('height')!);
           const height = definition.textures.height;
@@ -235,12 +240,12 @@ export function ReliefPrototypeDialog({ name, maps, material, projectionGeometry
             }
           }
           if (mode !== 'geometry' && !compare && rendered.has('normal')) normalAtlas = image(rendered.get('normal')!);
-          const targets = scope === 'vehicle'
+          const targets = scope === 'vehicle'&&!preserveMaterialMask
             ? [['color', 'Skin_B'], ['color', 'Details_B'], ['color', 'Wheels_B'], ['roughmetal', 'Skin_R'], ['roughmetal', 'Details_R'], ['roughmetal', 'Wheels_R'], ['coat', 'Skin_CoatR']] as const
             : [['color', 'Skin_B'], ['roughmetal', 'Skin_R'], ['coat', 'Skin_CoatR']] as const;
           const familyRenders = new Map<string, Map<MaterialRenderChannel, HTMLCanvasElement>>([['skin', rendered]]);
           try {
-            if (scope === 'vehicle' || source.kind === 'imported' || source.kind === 'carbon') for (const [channel, map] of targets) {
+            if (!layerScoped&&(scope === 'vehicle' || source.kind === 'imported' || source.kind === 'carbon')) for (const [channel, map] of targets) {
               const textures = source.layer.definition.textures;
               if (source.kind === 'imported' && !(channel === 'color' ? textures.color
                 : channel === 'roughmetal' ? textures.roughmetal || textures.roughness || textures.metalness
@@ -270,9 +275,11 @@ export function ReliefPrototypeDialog({ name, maps, material, projectionGeometry
         }
         setStatus('Calcul du volume et des normales…'); await nextPaint();
         if (!alive.current || generation.current !== ticket) return;
-        const result = await runtime.build({ template, mode: compare ? 'geometry' : mode, strengthMm: compare ? 0 : strengthMm,
+        let result = await runtime.build({ template, mode: compare ? 'geometry' : mode, strengthMm: compare ? 0 : strengthMm,
           heightAtlas: compare ? undefined : heightAtlas, normalAtlas: compare || mode === 'geometry' ? undefined : normalAtlas,
           scope, textureResolution, diagnostic: exaggerated, heightSample, heightSourceBits });
+        if(layerScoped&&baseVolume)result=retainOtherLayerVolumes(template,result,baseVolume,heightAtlas??{width:1,height:1,data:new Uint8ClampedArray(4)});
+        if(layerScoped)result.project.passthrough=result.project.passthrough.filter(file=>! /^(Details|Wheels)_N\.dds$/i.test(file.name));
         if (!alive.current || generation.current !== ticket) return;
         const displayed = result;
         if (!displayed.project.preview) throw new Error('L’aperçu du prototype est manquant.');
@@ -286,7 +293,7 @@ export function ReliefPrototypeDialog({ name, maps, material, projectionGeometry
         instance.setWheelSurface({ mode: 'relief', strength: 1 });
         if (source.kind === 'diagnostic' && !current.current?.sourceName.startsWith('Test géométrique')) instance.restoreViewState(HOOD_VIEW);
         else if (camera) instance.restoreViewState(camera);
-        const appearance = scope === 'hood' && source.layer && rendered && (source.kind !== 'imported' || source.layer.definition.textures.color)
+        const appearance = !layerScoped&&scope === 'hood' && source.layer && rendered && (source.kind !== 'imported' || source.layer.definition.textures.color)
           ? hoodAppearance(source.layer.definition, rendered, template) : undefined;
         current.current = { result, maps: owned, sourceName: source.name, key: buildKey, appearance };
         setStats(result.stats); setBuiltKey(buildKey); setBuilding(false);
@@ -296,7 +303,7 @@ export function ReliefPrototypeDialog({ name, maps, material, projectionGeometry
       } finally { if (rendered) release(rendered.values()); }
     })(); }, 120);
     return () => { window.clearTimeout(timer); invalidate(); if (owned) release(owned.values()); };
-  }, [template, source, mode, strengthMm, compare, maps, surfaceFiles, buildKey, runtime, scope, textureResolution, exaggerated, projectionGeometry]);
+  }, [template, source, mode, strengthMm, compare, maps, surfaceFiles, buildKey, runtime, scope, textureResolution, exaggerated, projectionGeometry,preserveMaterialMask,layerScoped,baseVolume]);
 
   async function importFiles(files: File[]) {
     const ticket = ++importGeneration.current;
@@ -334,7 +341,7 @@ export function ReliefPrototypeDialog({ name, maps, material, projectionGeometry
     try {
       await nextPaint(); if (!alive.current) return;
       await onApply(prepared.result, { version: 1, source: source.layer ? 'material' : 'demo',
-        material: source.layer ? structuredClone(source.layer) : null, sourceName: source.name, mode, scope, textureResolution, strengthMm, diagnostic: exaggerated }, prepared.maps, prepared.appearance);
+        material: source.layer ? structuredClone(source.layer) : null, sourceName: source.name, mode, scope, textureResolution, strengthMm, diagnostic: exaggerated,...(preserveMaterialMask?{appearanceScope:'skin' as const}:{}) }, prepared.maps, prepared.appearance);
       if (alive.current) onClose();
     } catch (reason) { if (alive.current) setError(reason instanceof Error ? reason.message : 'L’application du relief a échoué.'); }
     finally { if (alive.current) setExporting(false); }
@@ -342,7 +349,7 @@ export function ReliefPrototypeDialog({ name, maps, material, projectionGeometry
   const controlsBusy = importing || exporting, exportDisabled = controlsBusy || building || !!error || !current.current || builtKey !== buildKey;
   return <div className="modal-overlay relief-overlay" onClick={() => close.current()}>
     <div ref={panel} className="modal relief-dialog" role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} aria-describedby={`${id}-description`} tabIndex={-1} onClick={event => event.stopPropagation()}>
-      <header className="modal-head"><div><h2 id={`${id}-title`}>Textures et relief <span className="relief-version">v1.0</span></h2><p id={`${id}-description`}>Car Stadium · ajustez le volume, puis appliquez-le à « {name} » ou exportez-le.</p></div><button type="button" className="modal-close" aria-label="Fermer l’atelier de relief" onClick={() => close.current()}><Icon name="x" size={18} /></button></header>
+      <header className="modal-head"><div><h2 id={`${id}-title`}>Textures et relief <span className="relief-version">v1.0</span></h2><p id={`${id}-description`}>{layerScoped?`Volume du calque « ${selected.current!.definition.name} » · ses zones et exclusions sont conservées.`:<>Car Stadium · ajustez le volume, puis appliquez-le à « {name} » ou exportez-le.</>}</p></div><button type="button" className="modal-close" aria-label="Fermer l’atelier de relief" onClick={() => close.current()}><Icon name="x" size={18} /></button></header>
       <div className="relief-workshop">
         <div className="relief-stage"><div ref={previewHost} className="relief-preview" aria-label="Aperçu 3D du relief" />
           <div className="relief-view-tools"><button type="button" className="btn btn-sm" disabled={building} onClick={() => preview.current?.restoreViewState(HOOD_VIEW)}><Icon name="target" size={14} />Voir le capot</button><button type="button" className="btn btn-sm" disabled={building} onClick={() => preview.current?.resetCamera()}>Voiture entière</button></div>
@@ -351,7 +358,7 @@ export function ReliefPrototypeDialog({ name, maps, material, projectionGeometry
         </div>
         <div className="relief-controls">
           <fieldset disabled={controlsBusy}><legend>Zone et qualité</legend>
-            <div className="relief-scope" role="group" aria-label="Zone du relief"><button type="button" aria-pressed={scope === 'hood'} onClick={() => { setScope('hood'); setCompare(false); }}>Capot</button><button type="button" aria-pressed={scope === 'vehicle'} onClick={() => { setScope('vehicle'); setCompare(false); }}>Toute la voiture</button></div>
+            {layerScoped?<div className="relief-layer-target" role="group" aria-label="Calque ciblé"><strong>{selected.current!.definition.name}</strong><p className="hint">{selected.current!.regions.length?selected.current!.regions.map(region=>region.label).join(', '):'Ce calque couvre toute la carrosserie.'}{selected.current!.exclusions.length?` · ${selected.current!.exclusions.length} exclusion(s) conservée(s)`:''}</p><p className="hint">La portée se règle dans Matières → Zones d’application. Les détails, roues et autres calques gardent leurs textures.</p></div>:<div className="relief-scope" role="group" aria-label="Zone du relief"><button type="button" aria-pressed={scope === 'hood'} onClick={() => { setScope('hood'); setCompare(false); }}>Capot</button><button type="button" aria-pressed={scope === 'vehicle'} onClick={() => { setScope('vehicle'); setCompare(false); }}>Toute la voiture</button></div>}
             <label className="relief-quality">Résolution des textures<select aria-label="Résolution des textures du relief" value={textureResolution} onChange={event => setTextureResolution(Number(event.target.value) as TextureQuality)}><option value={1024}>1K · légère</option><option value={2048}>2K · équilibrée</option><option value={4096}>4K · détaillée</option></select></label>
             <p className="hint">Les images originales jusqu’à 4K sont conservées. Changer de qualité recalcule les textures depuis ces sources.</p>
             {textureResolution === 4096 && <p className="hint">Export : couleur carrosserie en 4K, autres couleurs et normales jusqu’à 2K. Les finitions et normales secondaires peuvent passer en 1K pour tenir le budget.</p>}
@@ -359,7 +366,7 @@ export function ReliefPrototypeDialog({ name, maps, material, projectionGeometry
           </fieldset>
           <fieldset disabled={controlsBusy}><legend>Source du relief</legend>
             <div className="relief-source-name"><Icon name={source.kind === 'demo' || source.kind === 'carbon' ? 'sparkles' : 'image'} size={16} /><div><strong>{source.name}</strong><span>{source.kind === 'selected' ? 'Matériau sélectionné · copie temporaire' : source.kind === 'carbon' ? 'Tissage intégré · hauteur et normales' : source.kind === 'imported' ? `Pack importé · ${scope === 'hood' ? 'capot uniquement' : 'carrosserie, détails et roues'}` : 'Motif de test · bosses et creux'}</span></div></div>
-            <div className="relief-source-buttons"><button type="button" className="btn btn-sm" disabled={!selected.current} aria-pressed={source.kind === 'selected'} onClick={() => {
+            {!layerScoped&&<><div className="relief-source-buttons"><button type="button" className="btn btn-sm" disabled={!selected.current} aria-pressed={source.kind === 'selected'} onClick={() => {
               if (!selected.current) return; setSource(value => ({ kind: 'selected', layer: structuredClone(selected.current), name: selected.current!.definition.name, serial: value.serial + 1 }));
               setMode(materialHasHeight(selected.current.definition) ? 'geometry' : 'normal'); setCompare(false); setNotices([]);
             }}>Matériau sélectionné</button><button type="button" className="btn btn-sm" aria-pressed={source.kind === 'demo'} onClick={() => { setSource(value => ({ kind: 'demo', layer: null, name: 'Motif de démonstration', serial: value.serial + 1 })); setMode('geometry'); setCompare(false); setNotices([]); }}>Motif démo</button></div>
@@ -371,12 +378,12 @@ export function ReliefPrototypeDialog({ name, maps, material, projectionGeometry
             <details className="relief-import-notices"><summary>Diagnostic géométrique</summary><button type="button" className="btn btn-full" aria-pressed={source.kind === 'diagnostic'} onClick={() => {
               setSource(value => ({ kind: 'diagnostic', layer: null, name: 'Test géométrique gris', serial: value.serial + 1 }));
               setScope('hood'); setTextureResolution(1024); setMode('geometry'); setStrengthMm(80); setExaggerated(true); setCompare(false); setNotices([]);
-            }}><Icon name="box" size={14} />Test géométrique gris</button></details>
+            }}><Icon name="box" size={14} />Test géométrique gris</button></details></>}
             <input ref={fileInput} type="file" hidden multiple accept="image/png,image/jpeg,image/webp,.exr,.zip" aria-label="Importer des textures pour le relief" onChange={event => { const files = Array.from(event.target.files ?? []); event.target.value = ''; if (files.length) void importFiles(files); }} />
-            <p className="hint">ZIP Blender, PNG, JPG, WebP ou EXR · aucun logiciel à installer. Le motif se répète sur la zone choisie.</p>
+              <p className="hint">{layerScoped?'Hauteur et placement du calque sélectionné. Ses images se modifient dans Matières → Textures.':'ZIP Blender, PNG, JPG, WebP ou EXR · aucun logiciel à installer. Le placement du matériau est conservé.'}</p>
             {source.kind === 'diagnostic' && <p className="relief-note">Carrosserie grise, sans image ni normales Skin. Les grosses bosses permettent de vérifier le modèle en jeu. Exportez aussi la comparaison sans relief.</p>}
             {proceduralRelief && <p className="hint">Le volume est discret à 0,5 mm. Les fibres fines peuvent rester plus petites que la surface densifiée ; augmentez la taille du motif pour mieux voir le tissage.</p>}
-            {source.layer && <SliderField label="Taille du motif" value={source.layer.definition.transform.size} min={64} max={2048} step={32} format={value => `${value} px`} onChange={size => setSource(value => ({ ...value, serial: value.serial + 1, layer: { ...value.layer!, definition: { ...value.layer!.definition, transform: { ...value.layer!.definition.transform, size } } } }))} />}
+            {source.layer && !layerScoped&&<SliderField label="Taille du motif" value={source.layer.definition.transform.size} min={64} max={2048} step={32} format={value => `${value} px`} onChange={size => setSource(value => ({ ...value, serial: value.serial + 1, layer: { ...value.layer!, definition: { ...value.layer!.definition, transform: { ...value.layer!.definition.transform, size } } } }))} />}
           </fieldset>
           <fieldset disabled={controlsBusy}><legend>Type de relief</legend>
             <div className="relief-mode" role="group" aria-label="Type de relief">
@@ -384,7 +391,7 @@ export function ReliefPrototypeDialog({ name, maps, material, projectionGeometry
             </div>
             <p className="hint">{mode === 'normal' ? 'La lumière révèle les détails ; la silhouette reste identique.' : mode === 'geometry' ? `La carte de hauteur déforme réellement ${scope === 'hood' ? 'les sommets du capot' : 'la carrosserie fixe'}.` : 'La hauteur crée le volume, les normales ajoutent les détails fins.'}</p>
             {mode !== 'geometry' && <p className="relief-note">Les normales de carrosserie restent expérimentales. Le carbone testé révèle son relief dans le garage, mais peu en course, même avec le ZIP local. Le volume géométrique a été confirmé en course.</p>}
-            {scope === 'vehicle' && <p className="hint">Le motif et la finition couvrent toute la voiture. Le volume déforme les panneaux fixes de carrosserie. Les roues, pièces de détail et éléments articulés gardent leur forme ; le relief s’atténue près des raccords.</p>}
+              {scope === 'vehicle' && <p className="hint">{preserveMaterialMask?'Le volume est limité au masque du calque, avec ses exclusions et son opacité.':'Le motif et la finition couvrent toute la voiture.'} Le volume déforme les panneaux fixes de carrosserie. Les roues, pièces de détail et éléments articulés gardent leur forme ; le relief s’atténue près des raccords.</p>}
             {source.layer && hasHeight && <button type="button" className="btn btn-full" onClick={() => {
               setMode('geometry'); setStrengthMm(20); setExaggerated(false); setCompare(false);
             }}>Relief marqué · 20 mm</button>}

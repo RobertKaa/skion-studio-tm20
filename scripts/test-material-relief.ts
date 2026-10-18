@@ -1,0 +1,35 @@
+import assert from 'node:assert/strict';
+import { getEnv } from 'fabric/node';
+import { setEnv } from 'fabric';
+import { heightNormals, combineDetailNormals, calibratedHeight } from '../src/materials/relief';
+import { estimateNormalHeight } from '../src/materials/normalHeight';
+import { heightPng } from '../src/materials/heightPng';
+import { decodeHeightPNG, createHeightSampler } from '../src/relief/heightSource';
+import { createMaterialDefinition, isValidMaterialDefinition, type MaterialLayer } from '../src/materials/types';
+import { detectMaterialTextureRoles, importMaterialFilesDetailed, materialPngBytes, portableMaterialDefinition } from '../src/materials/import';
+import { loadMaterialSources, renderMaterialLayer } from '../src/materials/render';
+setEnv(getEnv());const env=getEnv();Object.assign(globalThis,{document:env.document,window:env.window,HTMLCanvasElement:env.window.HTMLCanvasElement,HTMLImageElement:env.window.HTMLImageElement});
+const size=64,data=new Uint8ClampedArray(size*size*4),original=new Float32Array(size*size);
+for(let y=0;y<size;y++)for(let x=0;x<size;x++){const v=.5+.22*Math.sin(2*Math.PI*x/size)+.15*Math.cos(4*Math.PI*y/size);original[y*size+x]=v;data.set([v*255,v*255,v*255,255],(y*size+x)*4);}
+const normals=heightNormals({width:size,height:size,data},1,true);
+for(let p=0;p<data.length;p+=4){const length=Math.hypot(...[0,1,2].map(c=>normals.data[p+c]/127.5-1));assert(Math.abs(length-1)<.015);}
+assert(normals.data[0]<128,'Increasing height along image X tilts OpenGL normals to -X');
+const estimated=estimateNormalHeight(normals),mean=(a:ArrayLike<number>)=>Array.from(a).reduce((s,v)=>s+v,0)/a.length;
+const ma=mean(original),mb=mean(estimated.values);let cov=0,va=0,vb=0;for(let i=0;i<original.length;i++){const a=original[i]-ma,b=estimated.values[i]-mb;cov+=a*b;va+=a*a;vb+=b*b;}assert(cov/Math.sqrt(va*vb)>.995,'Integrated normals reconstruct the source heights, not their brightness');
+const inverted={...normals,data:normals.data.slice()};for(let p=1;p<data.length;p+=4)inverted.data[p]=255-inverted.data[p];const dx=estimateNormalHeight(inverted,true);assert(dx.values.every((v,i)=>Math.abs(v-estimated.values[i])<.035),'DirectX inversion reconstructs the same slopes');
+assert.throws(()=>estimateNormalHeight({width:64,height:64,data:new Uint8ClampedArray(64*64*4).fill(128)}),/normales|plates/);
+const neutral={width:size,height:size,data:new Uint8ClampedArray(data.length)};for(let p=0;p<data.length;p+=4)neutral.data.set([128,128,255,255],p);const combined=combineDetailNormals(neutral,normals);assert(combined.data.every((v,i)=>Math.abs(v-normals.data[i])<2));
+const png=await heightPng(new Float32Array([32768/65535,32769/65535,.7,.1]),2,2),decoded=await decodeHeightPNG(materialPngBytes(png));assert.equal(decoded!.bits,16);assert(decoded!.values[1]>decoded!.values[0],'One 16-bit height step survives PNG encoding');
+const blobUrl='blob:http://localhost:5174/12345678-1234-1234-1234-123456789abc',nativeFetch=globalThis.fetch;
+globalThis.fetch=async(input,init)=>String(input)===blobUrl?new Response(materialPngBytes(png).slice().buffer):nativeFetch(input,init);
+const definition=createMaterialDefinition();definition.textures.height={src:blobUrl,name:'height.png',component:'r',invert:false};
+const portable=await portableMaterialDefinition(definition);assert.deepEqual(materialPngBytes(portable.textures.height!.src),materialPngBytes(png),'Saving a temporary source preserves numeric PNG16 bytes');globalThis.fetch=nativeFetch;
+definition.textures.height!.src=png;definition.surfaceRelief={source:'height',heightStrength:2,midpoint:.3,contrast:2};assert.equal(calibratedHeight(.3,definition),.5);assert.equal(calibratedHeight(.55,definition),1);
+assert(isValidMaterialDefinition(definition));assert(!isValidMaterialDefinition({...definition,surfaceRelief:{...definition.surfaceRelief,contrast:NaN}}));
+await loadMaterialSources(definition);const layer:MaterialLayer={definition,family:'details',regions:[],exclusions:[]},maps=renderMaterialLayer(layer,64);assert(maps.has('normal')&&maps.has('height'),'A height-only texture generates exportable normal details');for(const c of maps.values())c.width=c.height=1;
+definition.surfaceRelief.source='none';const disabled=renderMaterialLayer(layer,64);assert(!disabled.has('normal')&&disabled.has('height'),'Disabling surface details preserves the independent geometry source');for(const c of disabled.values())c.width=c.height=1;
+const sampler=createHeightSampler(decoded!,layer,{width:1,height:1,data:new Uint8ClampedArray([0,0,0,255])});assert(Number.isFinite(sampler(.5,.5)));
+assert.equal(detectMaterialTextureRoles('Stylized_Fur_001_normalmap.jpg')[0].channel,'normal');assert.equal(detectMaterialTextureRoles('material_heightmap.png')[0].channel,'height');
+const imported=await importMaterialFilesDetailed([new File([materialPngBytes(png).slice().buffer],'stones_heightmap.png',{type:'image/png'})]);assert(imported.definition.textures.height);assert.equal(imported.definition.surfaceOnly,true);
+await loadMaterialSources(imported.definition);const isolated=renderMaterialLayer({definition:imported.definition,family:'details',regions:[],exclusions:[]},64);assert(!isolated.has('roughmetal')&&!isolated.has('coat'),'A height-only pack does not replace paint finishes');assert(isolated.get('color')!.getContext('2d')!.getImageData(0,0,64,64).data.every((v,i)=>i%4!==3||v===0),'A surface-only material preserves the existing color');assert(isolated.has('normal')&&isolated.has('height'));for(const c of isolated.values())c.width=c.height=1;
+console.log('✓ Material relief: height gradients, OpenGL/DirectX, Poisson integration correlation >99.5%, normal blending, independent detail/volume sources, calibrated numeric PNG16, original-byte preservation and strict validation');

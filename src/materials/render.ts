@@ -1,6 +1,7 @@
 import { getEnv } from 'fabric';
 import type { ProjectionTriangle } from '../three/decalProjection';
 import { createMaterialProjector } from './projection';
+import { calibratedHeight, combineDetailNormals, detailSources, heightNormals, surfaceRelief } from './relief';
 import { drawRealAtlas, drawSourceAtlas, realAtlasLayout, sourceAtlasGeometry, organizedAtlasGeometry } from '../realUvAtlas';
 import { canonicalDetailsMaterial, detailsSideOffset } from '../detailsSides';
 import { panelFrame, panelReferenceMaterial, panelCanvasRegion, panelGuide } from '../underbodyPanel';
@@ -268,6 +269,22 @@ function normalImage(texture: MaterialTexture, definition: MaterialDefinition, m
     (data, i) => orientNormal(data, i, definition, texture.invert), maxSize);
 }
 
+function materialHeight(definition:MaterialDefinition,size:number):HTMLCanvasElement {
+  const texture=definition.textures.height!,settings=surfaceRelief(definition),gray=scalar(texture,'gray',1,size,'multiply');
+  return converted(gray,`height:${settings.midpoint}:${settings.contrast}`,(data,i)=>{const value=calibratedHeight(data[i]/255,definition)*255;data[i]=data[i+1]=data[i+2]=value;},size);
+}
+function materialNormals(definition:MaterialDefinition,size:number):HTMLCanvasElement|null {
+  const sources=detailSources(definition);if(!sources.normal&&!sources.height)return null;
+  const cap=Math.min(2048,size),height=sources.height?materialHeight(definition,cap):null;
+  const normal=sources.normal?normalImage(definition.textures.normal!,definition,sources.height?cap:size):null;
+  if(!height)return normal;
+  const pixels=context(height).getImageData(0,0,height.width,height.height),derived=heightNormals({width:height.width,height:height.height,data:pixels.data},surfaceRelief(definition).heightStrength,definition.transform.mode==='repeat');
+  const result=canvas(height.width,height.height);let data=derived;
+  for(let i=0;i<data.data.length;i+=4)orientNormal(data.data,i,definition);
+  if(normal){const resized=canvas(height.width,height.height);context(resized).drawImage(normal,0,0,height.width,height.height);data=combineDetailNormals({width:height.width,height:height.height,data:context(resized).getImageData(0,0,height.width,height.height).data},derived);release(resized);}
+  const image=context(result).createImageData(data.width,data.height);image.data.set(data.data);context(result).putImageData(image,0,0);return result;
+}
+
 function hash(x: number, y: number): number {
   let value = Math.imul(x + 71, 374761393) ^ Math.imul(y + 31, 668265263);
   value = Math.imul(value ^ value >>> 13, 1274126177);
@@ -478,9 +495,12 @@ export function renderMaterialLayer(layer: MaterialLayer, size: number, geometry
   maskCtx.globalCompositeOperation = 'destination-in'; maskCtx.drawImage(coverage, 0, 0); release(coverage);
   if (!original) release(coverageSource);
   const generated = procedural(definition), output = new Map<MaterialRenderChannel, HTMLCanvasElement>();
+  const normals=materialNormals(definition,size),ownsNormals=!!detailSources(definition).height;
   for (const channel of ['color', 'roughmetal', 'coat', 'dirt', 'emission', 'normal', 'ao', 'height'] as const) {
+    if(definition.surfaceOnly){if(channel==='color'){output.set('color',canvas(size));continue;}if(!['normal','ao','height'].includes(channel))continue;}
     if (channel === 'emission' && !textures.emission && definition.emissionStrength === 0) continue;
-    if ((channel === 'normal' || channel === 'ao' || channel === 'height') && !textures[channel] && !generated.has(channel)) continue;
+    if(channel==='normal'&&surfaceRelief(definition).source==='none')continue;
+    if ((channel === 'normal' || channel === 'ao' || channel === 'height') && !textures[channel] && !generated.has(channel)&&!(channel==='normal'&&normals)) continue;
     const target = canvas(size), ctx = context(target);
     if (channel === 'color') place(target, textures.color ? colorImage(textures.color, definition.color, 1, size) : generated.get(channel)!);
     else if (channel === 'roughmetal') {
@@ -503,9 +523,9 @@ export function renderMaterialLayer(layer: MaterialLayer, size: number, geometry
         }
         ctx.globalCompositeOperation = 'source-over';
       }
-    } else if (channel === 'normal') place(target, textures.normal ? normalImage(textures.normal, definition, size) : generated.get(channel)!, true);
+    } else if (channel === 'normal') {const image=normals??generated.get(channel);if(!image){release(target);continue;}place(target,image,true);}
     else if (channel === 'ao') place(target, scalar(textures.ao!, 'gray', definition.aoStrength, size));
-    else if (channel === 'height') place(target, textures.height ? scalar(textures.height, 'gray', 1, size, 'multiply') : generated.get(channel)!);
+    else if (channel === 'height') place(target, textures.height ? materialHeight(definition,size) : generated.get(channel)!);
     else if (channel === 'emission') {
       const image = textures.emission ? colorImage(textures.emission, definition.emissionColor, definition.emissionStrength, size)
         : solid(1, 1, `rgb(${rgb(definition.emissionColor).map(value => clamp(value * definition.emissionStrength)).join(',')})`);
@@ -516,6 +536,7 @@ export function renderMaterialLayer(layer: MaterialLayer, size: number, geometry
     ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; output.set(channel, target);
   }
   for (const image of generated.values()) release(image);
+  if(normals&&ownsNormals)release(normals);
   release(mask);
   return output;
 }

@@ -5,7 +5,11 @@ import { detailsRegionOnSide, detailsSideLabel, detailsWholeSide } from '../deta
 import { panelCanvasRegion, panelGuide } from '../underbodyPanel';
 import { createMaterialDefinition, type MaterialChannel, type MaterialDefinition, type MaterialLayer, type MaterialTexture, type MaterialProjection } from '../materials/types';
 import { MATERIAL_PRESETS } from '../materials/presets';
-import { hasProceduralMaterialRelief, loadMaterialSources, renderMaterialLayer } from '../materials/render';
+import { hasProceduralMaterialRelief, loadMaterialSources, renderMaterialLayer, getMaterialSourceCanvas } from '../materials/render';
+import { MaterialReliefControls } from './MaterialReliefControls';
+import { estimateNormalHeight } from '../materials/normalHeight';
+import { heightPng } from '../materials/heightPng';
+import { surfaceRelief } from '../materials/relief';
 import { listMaterials, removeMaterial, saveMaterial, setMaterialFavorite, type StoredMaterial } from '../materials/library';
 import { exportMaterialPack, importMaterialFilesDetailed } from '../materials/import';
 import { SliderField, Swatch } from './controls';
@@ -15,7 +19,7 @@ import './materialsPanel.css';
 type Scope = 'selected' | 'parts' | 'all';
 const CHANNEL_LABELS: Record<MaterialChannel, string> = {
   color: 'Couleur', roughness: 'Rugosité', metalness: 'Métal', roughmetal: 'Rugosité + métal',
-  coat: 'Vernis', emission: 'Lumière', dirt: 'Salissure', normal: 'Relief', ao: 'Ombres (AO)', height: 'Hauteur (prototype)',
+  coat: 'Vernis', emission: 'Lumière', dirt: 'Salissure', normal: 'Normales', ao: 'Ombres (AO)', height: 'Hauteur / déplacement',
 };
 const CHANNELS = Object.keys(CHANNEL_LABELS) as MaterialChannel[];
 const percent = (value: number) => `${Math.round(value * 100)} %`;
@@ -61,9 +65,11 @@ export interface MaterialsPanelProps {
   onChangeMask(regions: string[], exclusions: string[]): void;
   onCommit(): void;
   onError(message: string): void;
+  onOpenRelief?(definition:MaterialDefinition,regions:string[],exclusions:string[]):void;
 }
 
-export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, selection, disabled, onApply, onChange, onChangeMask, onCommit, onError }: MaterialsPanelProps) {
+export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, selection, disabled, onApply, onChange, onChangeMask, onCommit, onError,onOpenRelief }: MaterialsPanelProps) {
+  const [section,setSection]=useState<'surface'|'textures'|'library'>(selection?'surface':'library');
   const placement=selection?.atlasFrame?.placement;
   const selectedRegion = selection?.atlasSide && !chosenRegion?.key.includes(`:side:${selection.atlasSide}`)
     ||placement==='right'&&chosenRegion?.key!=='d_floor:panel:right'||placement==='base'&&chosenRegion?.key==='d_floor:panel:right'? null : chosenRegion;
@@ -97,6 +103,7 @@ export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, 
   onErrorRef.current = onError;
   const selectedDefinition = selection?.definition;
   const selectionPresent = !!selection;
+  useEffect(()=>{if(selectionPresent)setSection('surface');},[selectionPresent,family]);
   useEffect(() => {
     if (!selectionPresent && family === 'wheels') setDraft(previous => ['surface','wheel','wheel-face'].includes(previous.transform.projection ?? '')
       ? { ...previous, transform: { ...previous.transform, projection: autoAlignment } } : previous);
@@ -175,10 +182,12 @@ export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, 
     const textures = { ...draft.textures };
     if (next) textures[channel] = next;
     else delete textures[channel];
-    change({ ...draft, textures, ...(next && !draft.textures[channel] ? initialTextureSettings(channel) : {}) }, true);
+    const {heightOrigin,...settings}=surfaceRelief(draft);void heightOrigin;
+    change({ ...draft, textures, ...(channel==='height'&&draft.surfaceRelief?{surfaceRelief:settings}:{}),...(next && !draft.textures[channel] ? initialTextureSettings(channel) : {}) }, true);
   }
   function initialTextureSettings(channel: MaterialChannel): Partial<MaterialDefinition> {
     return {
+      ...(!['normal','height','ao'].includes(channel)?{surfaceOnly:false}:{}),
       ...(channel === 'color' ? { color: '#ffffff' } : {}),
       ...(channel === 'emission' ? { emissionStrength: 1 } : {}),
       ...(channel === 'roughness' || channel === 'roughmetal' ? { roughness: 255 } : {}),
@@ -229,7 +238,7 @@ export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, 
       </div>
       <div className="materials-grid" role="tabpanel" aria-label={tab === 'presets' ? 'Matériaux prêts à utiliser' : tab === 'favorites' ? 'Matériaux favoris' : 'Mes matériaux'}>
         {tab === 'presets' ? MATERIAL_PRESETS.map((preset) => <button key={preset.id} type="button" className={`material-card${draft.preset === preset.id && draft.name === preset.definition.name ? ' is-active' : ''}`} disabled={unavailable} title={preset.hint}
-          onClick={() => change(alignedPreset(structuredClone(preset.definition), autoAlignment), true)}>
+          onClick={() => {change(alignedPreset(structuredClone(preset.definition), autoAlignment), true);setSection('surface');}}>
           <MaterialSwatch definition={preset.definition} family={family} />
           <span>{preset.label}</span>
         </button>) : saved.map((item) => <div className="material-saved" key={item.id}>
@@ -258,6 +267,7 @@ export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, 
             const compatible=!['wheel','wheel-face'].includes(imported.definition.transform.projection??'')||wheelPlacement;
             const next = imported.preservedPlacement&&compatible ? imported.definition : alignedPreset(imported.definition, autoAlignment);
             change(next, true);
+            setSection('textures');
             setImportNotices(imported.notices);
             setStatus('Images importées. Vérifiez leur affectation dans « Images et canaux ».');
           });
@@ -288,8 +298,11 @@ export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, 
       <div className="materials-intro-title"><Icon name="layers" size={16} /><strong>Matériaux</strong><span className="materials-local-badge">Sans installation</span></div>
       <p className="hint">Le motif épouse les courbes de la surface choisie : carrosserie, détails ou roues. Sa couleur et ses finitions se règlent ensemble.</p>
     </div>
-    {selection ? currentMaterial : libraryPanel}
-    {!selection && currentMaterial}
+    <div className="material-workspace-nav" role="group" aria-label="Organisation du matériau">{([['surface','Réglages'],['textures',`Textures${textureEntries.length?` · ${textureEntries.length}`:''}`],['library','Bibliothèque']] as const).map(([id,label])=><button type="button" key={id} aria-pressed={section===id} className={section===id?'is-active':''} onClick={()=>setSection(id)}>{label}</button>)}</div>
+    {currentMaterial}
+    <button type="button" className="btn btn-sm btn-full" disabled={unavailable} onClick={()=>{pendingImportTarget.current={selection,family};importInput.current?.click();}}><Icon name="upload" size={14}/>Importer des textures</button>
+    <div hidden={section!=='library'}>{libraryPanel}</div>
+    <div hidden={section!=='surface'}>
     <div className={`material-surface-follow${following ? ' is-active' : ''}`} role="group" aria-label="Application sur la surface 3D">
       <div className="material-surface-follow-title"><Icon name={family === 'wheels' ? 'circle' : 'box'} size={15} /><strong>{family === 'wheels' && following ? projection === 'wheel-face' ? 'Flanc vu de face' : 'Enroulement autour du pneu' : following ? 'Suivi de la surface 3D' : 'Placement depuis une vue ou la feuille UV'}</strong></div>
       <p>{family === 'wheels' ? 'La bande de roulement se déroule sur un tour complet. Les flancs disposent d’un placement circulaire pour préserver les proportions des images.' : following ? 'Le motif suit le volume des pièces, avec des proportions et une échelle cohérentes. Les zones choisies délimitent son application.' : 'Pour que ce matériau accompagne les courbes, activez le suivi de surface. Vos images et les pièces sélectionnées sont conservées.'}</p>
@@ -297,7 +310,18 @@ export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, 
     </div>
     {importNotices.length > 0 && <details className="materials-import-report" role="status" aria-live="polite" aria-label="Informations d’import"><summary><span>Import terminé · voir le détail</span><span className="materials-import-count" title="Images du matériau">{materialImageCount} image{materialImageCount > 1 ? 's' : ''}</span></summary><ul>{importNotices.map((notice, index) => <li key={`${index}:${notice}`}>{notice}</li>)}</ul></details>}
 
-    <fieldset className="materials-fields" disabled={unavailable}>
+    <MaterialReliefControls definition={draft} family={family} disabled={unavailable} onChange={change} onCommit={onCommit}
+      onVolume={onOpenRelief?()=>onOpenRelief(structuredClone(draft),targetRegions,exclusions):undefined}
+      onEstimate={()=>{const snapshot=structuredClone(draft),target={selection,family};void perform(async()=>{
+        await loadMaterialSources(snapshot);if(!targetUnchanged(target))return;const original=getMaterialSourceCanvas(snapshot.textures.normal!.src);if(!original)throw new Error('Image de normales indisponible.');
+        const canvas=document.createElement('canvas'),ratio=Math.min(1,512/Math.max(original.width,original.height)),power=(v:number)=>Math.max(2,2**Math.floor(Math.log2(v)));canvas.width=power(original.width*ratio);canvas.height=power(original.height*ratio);
+        const context=canvas.getContext('2d')!;context.drawImage(original,0,0,canvas.width,canvas.height);const image=context.getImageData(0,0,canvas.width,canvas.height),field=estimateNormalHeight({width:canvas.width,height:canvas.height,data:image.data},snapshot.textures.normal!.invert);canvas.width=canvas.height=1;
+        const src=await heightPng(field.values,field.width,field.height);if(!targetUnchanged(target))return;
+        change({...snapshot,textures:{...snapshot.textures,height:{src,name:'Hauteur estimée depuis les normales.png',component:'r',invert:false}},surfaceRelief:{...surfaceRelief(snapshot),heightOrigin:'normal-estimate'}},true);setStatus('Hauteur estimée en 16 bits. Ajustez son amplitude dans Volume 3D avant l’export.');
+      });}}/>
+    <label className="material-surface-only"><input type="checkbox" checked={!!draft.surfaceOnly} disabled={unavailable} onChange={event=>change({...draft,surfaceOnly:event.target.checked},true)}/>Conserver la peinture et les finitions existantes</label>
+    {draft.surfaceOnly&&<p className="hint">Ce calque ajoute uniquement des détails de surface, de la hauteur et des ombres AO. La peinture en dessous reste intacte.</p>}
+    <fieldset className="materials-fields" disabled={unavailable||draft.surfaceOnly}>
       <legend>Apparence</legend>
       <div className="material-color-row"><span>{draft.textures.color ? 'Teinte de l’image' : 'Couleur'}</span><Swatch value={draft.color} title="Couleur du matériau" showHex onChange={(color) => change({ ...draft, color })} /></div>
       <SliderField label={draft.textures.roughness || draft.textures.roughmetal ? 'Rugosité · image' : 'Rugosité'} value={draft.roughness} min={0} max={255} format={bytePercent}
@@ -354,16 +378,14 @@ export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, 
         <div className="material-color-row"><span>Lumière</span><Swatch value={draft.emissionColor} title="Couleur de la lumière" showHex onChange={(emissionColor) => change({ ...draft, emissionColor })} /></div>
         <SliderField label="Intensité" value={draft.emissionStrength} min={0} max={1} step={.01} format={percent} onChange={(emissionStrength) => change({ ...draft, emissionStrength })} onCommit={onCommit} />
         <label className="material-select-row">Activation<select aria-label="Activation de la lumière" value={draft.emissionRole} onChange={(event) => change({ ...draft, emissionRole: event.target.value as MaterialDefinition['emissionRole'] }, true)}><option value="always">Toujours</option><option value="head">Phares</option><option value="brake">Freinage</option></select></label>
-        {(family !== 'skin' || draft.textures.normal || hasProceduralMaterialRelief(draft)) && <SliderField label="Relief" value={draft.normalStrength} min={0} max={2} step={.05} disabled={!draft.textures.normal && !hasProceduralMaterialRelief(draft)} title={family === 'skin' ? 'Intensité des normales dans le prototype. La carrosserie standard exportée conserve sa forme.' : 'Intensité du relief fourni par les normales.'} format={(value) => `${value.toFixed(2)}×`} onChange={(normalStrength) => change({ ...draft, normalStrength })} onCommit={onCommit} />}
-        <p className="hint">{family === 'skin' ? 'Carrosserie : normales et hauteur utilisées dans le prototype. Le skin standard exporté conserve sa forme, sans normales personnalisées sur la carrosserie.' : hasProceduralMaterialRelief(draft) ? 'Le carbone génère les normales du tissage pour simuler le relief dans la lumière, sans modifier la forme de la voiture.' : draft.textures.normal ? 'L’image de normales simule le relief dans la lumière, sans modifier la forme de la voiture.' : 'Les presets ajoutent un motif et une finition. Ajoutez une image au canal Relief dans « Images et canaux » pour simuler un relief.'}</p>
-        {draft.textures.ao && <SliderField label="Ombres AO" value={draft.aoStrength} min={0} max={1} step={.01} format={percent} onChange={(aoStrength) => change({ ...draft, aoStrength })} onCommit={onCommit} />}
       </fieldset>
     </details>
-
-    <details className="material-details">
+    </div>
+    <div hidden={section!=='textures'}>
+    <details className="material-details" open>
       <summary>Images et canaux {textureEntries.length > 0 && <span className="material-count">{textureEntries.length}</span>}</summary>
       <fieldset className="materials-fields" disabled={unavailable}>
-        <p className="hint">L’affectation est détectée à l’import. Vous pouvez la corriger ici.</p>
+        <p className="hint">Vérifiez le rôle de chaque image. Une normale décrit des directions ; une hauteur décrit des niveaux. Les deux ne sont pas interchangeables.</p>
         {textureEntries.map((channel) => {
           const source = draft.textures[channel]!;
           return <div className="material-source" key={channel}>
@@ -374,15 +396,16 @@ export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, 
             {channel !== 'color' && channel !== 'normal' && channel !== 'emission' && channel !== 'roughmetal' && <div className="material-source-options"><label>Lecture<select aria-label={`Composante de ${CHANNEL_LABELS[channel]}`} value={source.component} onChange={(event) => updateTexture(channel, { ...source, component: event.target.value as MaterialTexture['component'] })}><option value="luminance">Gris</option><option value="r">Rouge (R)</option><option value="g">Vert (G)</option><option value="b">Bleu (B)</option></select></label><label><input type="checkbox" checked={source.invert} onChange={(event) => updateTexture(channel, { ...source, invert: event.target.checked })} />Inverser</label></div>}
             {channel === 'roughmetal' && <p className="hint">Image combinée : rugosité en rouge, métal en vert.</p>}
             {channel === 'normal' && <><label className="material-normal-convention"><input type="checkbox" aria-label="Normal DirectX (Y inversé)" checked={source.invert} onChange={(event) => updateTexture(channel, { ...source, invert: event.target.checked })} />Normal DirectX (Y inversé)</label><p className="hint">OpenGL par défaut. Activez cette option pour une image de normales DirectX.</p></>}
-            {channel === 'normal' && family === 'skin' && <p className="hint">Carrosserie : utilisée dans le prototype ; export standard sans normales personnalisées. Les normales du skin standard sont prises en charge sur Détails et Roues.</p>}
-            {channel === 'height' && <p className="hint">Clair : bosses ; sombre : creux. Cette carte sert au prototype de relief et reste dans votre projet. Le skin standard exporté conserve sa forme.</p>}
+            <span className="material-channel-usage">{channel==='color'||channel==='emission'?'Couleur · sRGB':channel==='normal'?'Directions XYZ · OpenGL / DirectX':'Données numériques · sans correction de couleur'}</span>
+            {channel === 'normal' && family === 'skin' && <p className="hint">Carrosserie : export standard sans normales personnalisées. Pour un relief en course, utilisez une hauteur et préparez le volume 3D dans Réglages.</p>}
+            {channel === 'height' && <p className="hint">Clair : bosses ; sombre : creux. Réglages permet de choisir le niveau neutre, le contraste et de préparer le volume du modèle exporté.</p>}
             <div className="material-source-actions"><button type="button" className="btn btn-sm" onClick={() => requestImage(channel)}>Remplacer</button><button type="button" className="btn btn-sm" onClick={() => updateTexture(channel, null)}>Retirer</button></div>
           </div>;
         })}
         <label className="material-select-row">Ajouter une image<select aria-label="Ajouter une image à un canal" value="" onChange={(event) => { if (event.target.value) requestImage(event.target.value as MaterialChannel); }}>
           <option value="">Choisir un canal…</option>{CHANNELS.filter((channel) => !draft.textures[channel]).map((channel) => <option key={channel} value={channel}>{CHANNEL_LABELS[channel]}</option>)}
         </select></label>
-        <p className="hint">Les normales du skin standard sont prises en charge sur Détails et Roues. La hauteur sert au prototype. Les images restent dans votre projet.</p>
+        <p className="hint">Les sources restent dans le projet. Une hauteur seule ne modifie pas le ZIP de la voiture : préparez puis appliquez le volume 3D dans Réglages.</p>
       </fieldset>
     </details>
     <input ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp,.exr" hidden aria-label="Image pour le canal de matériau" disabled={unavailable} onChange={(event) => {
@@ -400,7 +423,8 @@ export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, 
         setStatus('Image importée dans le canal sélectionné.');
       });
     }} />
-
+    </div>
+    <div hidden={section!=='surface'}>
     <details className="material-details" open>
       <summary>Zones d’application</summary>
       <fieldset className="materials-fields" disabled={unavailable}>
@@ -421,8 +445,7 @@ export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, 
         </div></details>}
       </fieldset>
     </details>
-
-    {selection && libraryPanel}
+    </div>
     <div className="material-bottom-actions">
       <button type="button" className="btn btn-primary btn-full" disabled={unavailable || !targetValid || !draft.name.trim()} onClick={() => { onApply(structuredClone(draft), targetRegions, exclusions); setStatus('Calque de matériau créé.'); }}><Icon name="plus" size={14} />{selection ? 'Créer un calque séparé' : 'Ajouter le matériau'}</button>
       {selection && <p className="hint">Les réglages modifient le calque sélectionné. Son masque est conservé quand vous changez de matériau.</p>}

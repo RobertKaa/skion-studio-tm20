@@ -14,6 +14,8 @@ export interface MaterialTexture {
 /** Texture bytes. Placement uses 2048 reference pixels in the UV sheet, or along
  * the longest vehicle dimension for projections and surface coordinates. */
 export interface MaterialDefinition {
+  surfaceOnly?:boolean;
+  surfaceRelief?: import('./relief').SurfaceReliefSettings;
   version: 1;
   name: string;
   preset: MaterialPreset;
@@ -129,7 +131,10 @@ function validateSource(source: string): boolean {
 }
 
 export function isValidMaterialDefinition(value: unknown, sourceValidator: (src: string) => boolean = isLocalMaterialSource): value is MaterialDefinition {
-  if (!record(value) || !exactKeys(value, ['version', 'name', 'preset', 'color', 'roughness', 'metalness', 'coat', 'dirt', 'emissionColor', 'emissionStrength', 'emissionRole', 'normalStrength', 'aoStrength', 'opacity', 'transform', 'textures'])) return false;
+  if (!record(value) || !exactKeys(value, ['version', 'name', 'preset', 'color', 'roughness', 'metalness', 'coat', 'dirt', 'emissionColor', 'emissionStrength', 'emissionRole', 'normalStrength', 'aoStrength', 'opacity', 'transform', 'textures','surfaceRelief','surfaceOnly'])) return false;
+  if(value.surfaceOnly!==undefined&&typeof value.surfaceOnly!=='boolean')return false;
+  const relief=value.surfaceRelief;
+  if(relief!==undefined&&(!record(relief)||!exactKeys(relief,['source','heightStrength','midpoint','contrast','heightOrigin'])||!['auto','normal','height','combined','none'].includes(String(relief.source))||!bounded(relief.heightStrength,0,4)||!bounded(relief.midpoint,0,1)||!bounded(relief.contrast,.1,4)||(relief.heightOrigin!==undefined&&relief.heightOrigin!=='normal-estimate')))return false;
   if (value.version !== 1 || !text(value.name) || !MATERIAL_PRESET_IDS.includes(value.preset as MaterialPreset) || !color(value.color) || !color(value.emissionColor)) return false;
   if (!['roughness', 'metalness', 'coat', 'dirt'].every(key => bounded(value[key], 0, 255))
     || !bounded(value.emissionStrength, 0, 1) || !bounded(value.opacity, 0, 1) || !bounded(value.normalStrength, 0, 2) || !bounded(value.aoStrength, 0, 1)

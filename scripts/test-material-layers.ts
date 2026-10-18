@@ -326,6 +326,16 @@ try {
   assert(Math.abs(moved.offsetX-102.4)<1e-6 && moved.offsetY===0,'Crossing a UV seam moves the pattern by physical distance');
   core.endImageDrag();core.commitMaterialLayers();
   console.log('ok pending model restoration, projected export/rebuild, editable project roundtrip and physical 3D dragging across UV seams');
+  core.activeMap='Skin_B';const keptColor=exportPixel('Skin_B',.2,.2),keptFinish=exportPixel('Skin_R',.2,.2);
+  const reliefOnly=createMaterialDefinition();reliefOnly.surfaceOnly=true;reliefOnly.textures.height={src:original,name:'height.png',component:'r',invert:false};
+  await core.addMaterialLayer(reliefOnly);assert.deepEqual(exportPixel('Skin_B',.2,.2),keptColor,'A height-only owner does not repaint the body');assert.deepEqual(exportPixel('Skin_R',.2,.2),keptFinish,'A height-only owner does not replace roughness/metalness');assert(core.getSelectionMaterialLayer()!.definition.surfaceOnly);
+  const isolatedProject=await core.captureProject();assert((isolatedProject.maps.Skin_B.objects as {materialLayer?:MaterialLayer}[]).some(o=>o.materialLayer?.definition.surfaceOnly),'Editable height-only owners survive project serialization');
+  const targeted=core.getSelection() as LayerImage,initialMask=structuredClone(targeted.materialLayer),initialOrder=targeted.imageOrder,ownerCount=images('Skin_B').filter(image=>image.materialLayer).length;
+  await core.updateMaterialLayerDefinition(targeted.id,{...reliefOnly,normalStrength:1.25});
+  assert.equal((core.getSelection() as LayerImage).id,targeted.id,'The volume workshop updates the existing owner instead of adding a global layer');
+  assert.equal(images('Skin_B').filter(image=>image.materialLayer).length,ownerCount);assert.deepEqual(targeted.materialLayer!.regions,initialMask!.regions);assert.deepEqual(targeted.materialLayer!.exclusions,initialMask!.exclusions);
+  assert.equal(targeted.imageOrder,initialOrder,'The owner keeps its position in the paint stack');
+  await assert.rejects(()=>core.updateMaterialLayerDefinition('missing-owner',reliefOnly),/indisponible/);
 } finally {
   core.commitMaterialLayers();
   for (const state of states.values()) { await state.canvas.dispose(); state.textureEl.width = state.textureEl.height = 0; }

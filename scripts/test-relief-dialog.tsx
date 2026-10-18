@@ -338,3 +338,26 @@ try {
   assert.equal(document.activeElement, opener, 'Closing restores focus to the control that opened the workshop'); opener.remove();
 }
 console.log('✓ Prototype relief desktop : carbone procédural hauteur/normales et comparaison intacte, voiture entière répétée, capot, qualité 1K/2K/4K, ZIP original conservé, source isolée, export prêt/stale, import hauteur, cache recréé après refresh, raccourcis protégés, focus et nettoyage');
+
+// Production entry from a material owner: its mask is a hard boundary.
+const scopedHost=document.createElement('div');document.body.append(scopedHost);const scopedRoot=createRoot(scopedHost);
+const scopedMaterial=structuredClone(originalMaterial);scopedMaterial.definition.textures.height={src:normalCanvas.toDataURL(),name:'height.png',component:'r',invert:false};
+scopedMaterial.exclusions=[{key:'hole',label:'Trou',polygons:[[{x:.14,y:.14},{x:.16,y:.14},{x:.16,y:.16},{x:.14,y:.16}]]}];
+const scopedOriginal=structuredClone(scopedMaterial);
+const scopedButton=(name:string)=>{const value=[...scopedHost.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent?.trim()===name);assert(value,name);return value;};
+async function settleScoped(){for(let i=0;i<200;i++){await act(async()=>{await new Promise(resolve=>setTimeout(resolve,10));});if(!scopedHost.querySelector('.relief-building')&&!scopedButton('Exporter le skin').disabled)return;}assert.fail('Scoped relief settles');}
+try{
+  await act(async()=>scopedRoot.render(<ReliefPrototypeDialog name="Projet" maps={maps} material={scopedMaterial} surfaceFiles={[]} runtime={runtime} preserveMaterialMask onClose={()=>{}} onExport={exportFixture} onApply={async(result,settings,_maps,appearance)=>{applications.push({result,settings,appearance});}}/>));
+  await settleScoped();assert(scopedHost.textContent!.includes('Volume du calque « Pierre conservée »'));
+  assert(scopedHost.querySelector('[aria-label="Calque ciblé"]'));assert(!scopedHost.querySelector('[aria-label="Zone du relief"]'),'No vehicle-wide scope override is offered for a selected layer');
+  assert(![...scopedHost.querySelectorAll('button')].some(b=>b.textContent?.trim()==='Carbone tissé'),'Changing to a demonstration cannot discard the selected layer mask');
+  const scopedBuild=builds.at(-1)!;assert.equal(scopedBuild.mode,'geometry');assert.equal(scopedBuild.scope,'vehicle');assert(scopedBuild.heightAtlas);
+  const mask=scopedBuild.heightAtlas!;const alphaAt=(x:number,y:number)=>mask.data[(Math.floor(y*mask.height)*mask.width+Math.floor(x*mask.width))*4+3];
+  assert(alphaAt(.12,.12)>0);assert.equal(alphaAt(.15,.15),0,'Excluded pieces receive no displacement');assert.equal(alphaAt(.8,.8),0,'Outside the selected layer no height is passed to the engine');
+  await act(async()=>scopedButton('Exporter le skin').click());await settleScoped();
+  for(const id of ['Skin_B','Skin_R','Details_B','Details_R','Wheels_B','Wheels_R'] as const)assert.deepEqual(exports.at(-1)!.colors.get(id),[124,143,154,255],`${id}: workshop changes volume without repainting the stack or other families`);
+  await act(async()=>scopedButton('Appliquer au projet').click());await settleScoped();
+  const scoped=applications.at(-1)!;assert.equal(scoped.settings.appearanceScope,'skin');assert.deepEqual(scoped.settings.material!.regions,scopedMaterial.regions);assert.deepEqual(scoped.settings.material!.exclusions,scopedMaterial.exclusions);assert.equal(scoped.appearance,undefined);
+  assert.deepEqual(scopedMaterial,scopedOriginal,'Opening and exporting preserves the source owner');
+}finally{await act(async()=>scopedRoot.unmount());scopedHost.remove();}
+console.log('✓ Volume du calque : masque et exclusions exacts, portée verrouillée, pile couleur intacte, roues/détails préservés, application limitée à Skin');
