@@ -1,8 +1,11 @@
 import { isValidMaterialLayer, type MaterialLayer } from '../materials/types';
-import type { ReliefMode, ReliefScope, ReliefTextureResolution, ReliefPrototypeResult } from './types';
+import type { ReliefFamily, ReliefMode, ReliefScope, ReliefTextureResolution, ReliefPrototypeResult } from './types';
 
 export interface ReliefSettings {
-  appearanceScope?:'skin';
+  appearanceScope?:ReliefFamily;
+  family?:ReliefFamily;
+  strengthByFamily?:Partial<Record<ReliefFamily,number>>;
+  modeByFamily?:Partial<Record<ReliefFamily,ReliefMode>>;
   version: 1;
   source: 'material' | 'demo' | 'diagnostic';
   material: MaterialLayer | null;
@@ -19,8 +22,11 @@ export interface ReliefSettings {
 export function validReliefSettings(value: unknown, sourceValidator?: (src: string) => boolean): value is ReliefSettings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const v = value as ReliefSettings;
-  if (Object.keys(v).some(key => !['version','source','material','sourceName','mode','scope','textureResolution','strengthMm','diagnostic','appliedLayers','stats','heightSourceBits','appearanceScope'].includes(key))) return false;
-  if(v.appearanceScope!==undefined&&v.appearanceScope!=='skin')return false;
+  if (Object.keys(v).some(key => !['version','source','material','sourceName','mode','scope','textureResolution','strengthMm','diagnostic','appliedLayers','stats','heightSourceBits','appearanceScope','family','strengthByFamily','modeByFamily'].includes(key))) return false;
+  for(const key of ['strengthByFamily','modeByFamily'] as const){const values=v[key];if(values!==undefined&&(!values||typeof values!=='object'||Array.isArray(values)||Object.entries(values).some(([family,value])=>!['skin','details','wheels'].includes(family)||(key==='strengthByFamily'?!Number.isFinite(value)||Number(value)<0||Number(value)>80:!['normal','geometry','combined'].includes(String(value))))))return false;}
+  if(v.appearanceScope!==undefined&&!['skin','details','wheels'].includes(v.appearanceScope))return false;
+  if(v.appearanceScope!==undefined&&v.appearanceScope!==(v.family??v.material?.family??'skin'))return false;
+  if(v.family!==undefined&&(!['skin','details','wheels'].includes(v.family)||v.material&&v.material.family!==v.family||v.family!=='skin'&&v.scope==='hood'))return false;
   if (v.heightSourceBits !== undefined && ![8,16].includes(v.heightSourceBits)) return false;
   if (v.stats !== undefined && (!v.stats || typeof v.stats !== 'object' || Array.isArray(v.stats)
     || Object.keys(v.stats).some(key=>!['affectedVertices','hoodVertices','eligibleVertices','triangleCount','maxDisplacementMm','templateVariant'].includes(key))

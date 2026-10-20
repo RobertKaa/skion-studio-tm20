@@ -24,3 +24,6 @@
 .texture-background-file button { flex-shrink: 0; }
 .texture-background-fit { display: flex; gap: 5px; }
 .texture-background-fit button { flex: 1; min-width: 0; padding-inline: 6px; }
+.texture-background-placement { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.texture-background-copy { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.texture-background-copy > strong { font-size: 12px; }

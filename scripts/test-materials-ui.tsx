@@ -265,13 +265,17 @@ try {
 
   const normalDefinition = createMaterialDefinition('rubber'); normalDefinition.textures.normal = { src: source, name: 'normal.png', component: 'luminance', invert: false };
   selection = { definition: normalDefinition, family: 'skin', regions: [], exclusions: [] }; await act(async () => draw());
-  assert(host.textContent!.includes('export standard sans normales personnalisées'), 'A body normal source clearly distinguishes the prototype from standard game export');
-  assert.equal(labelled<HTMLInputElement>('Intensité des détails').disabled, false, 'Body normals have an editable strength for the workshop');
+  assert(host.textContent!.includes('seul le volume géométrique'), 'Body texture normals are not advertised as supported in race');
+  assert(!host.querySelector('[aria-label="Intensité des détails"]'), 'Body does not offer unsupported texture relief controls');
   assert.equal(labelled<HTMLSelectElement>('Affectation de normal.png').disabled, false, 'A body normal channel remains editable instead of trapping the imported source');
-  assert.equal([...labelled<HTMLSelectElement>('Ajouter une image à un canal').options].find(option => option.value === 'height')!.disabled, false, 'Height can be imported without Blender or another installation');
+  assert.equal([...labelled<HTMLSelectElement>('Ajouter une image à un canal').options].find(option => option.value === 'height')!.disabled, false, 'Height can be imported for conversion to normals or geometry');
+  assert.equal(button('Préparer le volume 3D').disabled, true, 'A normal image needs an estimated height for geometry');
+  assert(host.textContent!.includes('Estimer une hauteur depuis les normales'));
   assert.equal(button('Créer un calque séparé').disabled, false, 'A normal map never blocks applying the rest of a material to the body');
   family = 'details'; selection = { ...selection!, family }; selectedRegion = islands[3]; await act(async () => draw());
   assert.equal(labelled<HTMLInputElement>('Intensité des détails').disabled, false, 'A supported surface with a normal image exposes an active strength control');
+  assert(button('Préparer le volume 3D').disabled, 'Details can optionally prepare geometry once height exists');
+  assert(button('Estimer une hauteur depuis les normales'));
   const withNormal = selection;
   selection = { ...selection!, definition: createMaterialDefinition('fabric') }; await act(async () => draw());
   assert.equal(labelled<HTMLInputElement>('Intensité des détails').disabled, true, 'A preset without a normal image cannot expose an ineffective active slider');
@@ -419,9 +423,11 @@ try {
   await click('Préparer le volume 3D');assert.equal(volumeRequests.length,1);assert.equal(volumeRequests[0].definition.surfaceRelief!.midpoint,.3);assert.deepEqual(volumeRequests[0].regions,['top']);assert.deepEqual(volumeRequests[0].exclusions,['right']);
   const normalImage=document.createElement('canvas');normalImage.width=normalImage.height=64;const normalContext=normalImage.getContext('2d')!,normalPixels=normalContext.createImageData(64,64);for(let y=0;y<64;y++)for(let x=0;x<64;x++){const nx=.5*Math.sin(x/64*2*Math.PI);normalPixels.data.set([128+nx*127,128,128+Math.sqrt(1-nx*nx)*127,255],(y*64+x)*4);}normalContext.putImageData(normalPixels,0,0);
   const normalPng=normalImage.toDataURL();selection={...selection!,definition:{...createMaterialDefinition(),surfaceOnly:true,textures:{normal:{src:normalPng,name:'normalmap.png',component:'r',invert:false}}}};await act(async()=>draw());
-  assert(button('Préparer le volume 3D').disabled,'Normal-only sources need a height before preparing geometry');await click('Estimer une hauteur depuis les normales');
+  assert(button('Préparer le volume 3D').disabled,'Body normals alone cannot export geometric volume');
+  assert.equal(volumeRequests.length,1,'No invalid normal-only volume is submitted');
+  await click('Estimer une hauteur depuis les normales');
   for(let attempt=0;host.querySelector('[aria-busy="true"]')&&attempt<200;attempt++)await act(async()=>{await new Promise(resolve=>setTimeout(resolve,5));});
-  assert(selection!.definition.textures.height,'The explicit normal integration creates a usable height source');assert.equal(selection!.definition.surfaceRelief!.heightOrigin,'normal-estimate');assert.equal(selection!.definition.textures.normal!.src,normalPng);assert(!button('Préparer le volume 3D').disabled);
+  assert(selection!.definition.textures.height,'The optional normal integration creates a usable height source');assert.equal(selection!.definition.surfaceRelief!.heightOrigin,'normal-estimate');assert.equal(selection!.definition.textures.normal!.src,normalPng);assert(!button('Préparer le volume 3D').disabled);
 } finally { await act(async () => root.unmount()); host.remove(); }
 
 // Exercise the durable library rules through its storage boundary: no browser installation needed.

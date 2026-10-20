@@ -39,15 +39,15 @@ def normalize(vector):
     return [x/length for x in vector]
 
 
-def split_visual(visual, helpers, Container):
+def split_visual(visual, helpers, Container, provenance=None):
     stream, attrs = helpers.visual_stream(visual)
     if set(attrs) - {'Position', 'Normal', 'BlendIndices', 'TexCoord0', 'TexCoord1', 'TangentU'}:
         raise ValueError('Unexpected native attribute')
-    original = copy.deepcopy(stream.Data)
+    original = [list(rows) for rows in stream.Data]
     positions = original[attrs['Position']]
     bones = original[attrs['BlendIndices']]
     indices = helpers.triangle_indices(visual)
-    result = copy.deepcopy(original)
+    result = [list(rows) for rows in original]
     assignments = {}
     allocated = {}
     intersections = {}
@@ -63,8 +63,10 @@ def split_visual(visual, helpers, Container):
             allocated[index] = side
         else:
             target = len(result[attrs['Position']])
+            if provenance is not None:provenance.append((index,index,0.))
             for a in range(len(result)):
-                result[a].append(copy.deepcopy(original[a][index]))
+                row=original[a][index]
+                result[a].append(Container((k,row[k])for k in 'xyzw'if k in row)if isinstance(row,dict)else list(row))
         uv = original[attrs['TexCoord0']][index]
         result[attrs['TexCoord0']][target] = Container(x=uv.x*.5+(.5 if side else 0), y=uv.y)
         assignments[key] = target
@@ -86,6 +88,7 @@ def split_visual(visual, helpers, Container):
             raise ValueError('Clipping cannot change an animated binding')
         t = -positions[a].x/(positions[b].x-positions[a].x)
         target = len(result[attrs['Position']])
+        if provenance is not None:provenance.append((a,b,t))
         for name, attribute in attrs.items():
             if name == 'BlendIndices':
                 value = copy.deepcopy(bones[a])

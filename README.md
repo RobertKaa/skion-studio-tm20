@@ -16,6 +16,16 @@ Puis ouvrir http://localhost:5173
 
 ## Fonctionnalités
 
+- **Image de fond de carrosserie** : dans **Texture → Image de fond**, l’image
+  suit la surface 3D et les raccords entre panneaux. Régler le cadrage, le zoom,
+  la rotation et les positions horizontale/verticale ; **Réinitialiser le placement**
+  restaure le centrage initial. **Adapter à la carrosserie** convertit les anciens
+  fonds. **Copier le fond vers → Matière / Néon / feux** reprend l’original, la
+  couleur, l’opacité et le placement dans le canal choisi, en conservant ses
+  calques. Chaque copie reste indépendante et annulable. Les sources et réglages
+  sont conservés dans le projet ; le ZIP contient les textures reprojetées.
+  `npm run test:background` vérifie le placement, les copies et les archives.
+
 - **Réorganisation réelle des UV** : en vue 2D ou côte à côte, **Réorganiser les UV**
   crée une copie du projet avec les éléments réellement déplacés et regroupés dans
   le **Calque UV**. Images, textes, peinture, fonds recadrables et matières sont
@@ -80,7 +90,10 @@ Puis ouvrir http://localhost:5173
   sources de leur rendu. **Relief & hauteur** permet de choisir normales, hauteur,
   combinaison ou désactivation, puis de régler le niveau neutre et le contraste.
   **Préparer le volume 3D** transmet le matériau courant et ses zones à l’atelier,
-  même avant de créer un calque. Depuis un calque sélectionné, la portée est
+  même avant de créer un calque. Seul le volume géométrique est confirmé en course
+  sur la carrosserie ; ses normales de texture ne sont plus proposées comme effet
+  en jeu. Détails/Roues exportent leurs normales directement, y compris depuis une hauteur.
+  Depuis un calque sélectionné, la portée est
   verrouillée sur son masque et ses exclusions ; l’application met à jour ce
   même calque, sans recopier sa peinture sur les roues ou Détails. Les volumes
   déjà présents hors de ce masque sont conservés sur les cinq LOD.
@@ -136,7 +149,8 @@ Puis ouvrir http://localhost:5173
   ouvre directement **Matières** au clic ; le bouton de réglages fait de même. La couleur,
   la rugosité/métal et les autres sorties se modifient ensemble depuis ce panneau ;
   les finitions générées suivent le placement et l’ordre du matériau.
-  Le relief personnalisé fonctionne sur Détails/Roues ;
+  Le relief par normales s’exporte directement sur Détails/Roues ; la carrosserie
+  utilise le volume géométrique de **Textures et relief**.
   les presets génèrent des motifs couleur et des variations de brillance. Le carbone
   fournit aussi une hauteur et des normales du même tissage, sans images à importer.
   Les autres presets ne génèrent pas de normales. Augmenter la taille du motif
@@ -416,7 +430,13 @@ Dans **Matières → Textures et relief · v1.0**, choisissez le carbone intégr
 un matériau sélectionné ou un pack ZIP/images. Le fichier `.blend` est ignoré :
 aucune installation de Blender, Python ou autre outil n’est nécessaire.
 
-Le mode **Volume** utilise désormais une surface Body densifiée, préparée pour
+Le test isolé de l’utilisateur du 19 octobre 2026 corrige l’interprétation du skin
+**COT-TOBER - Occulte.zip** : seul le **Volume** fonctionne en course sur la carrosserie.
+Elle ne propose donc plus Normales/Les deux. Détails et Roues conservent ces modes,
+avec des normales BC5 importées ou calculées depuis une hauteur. Une normale seule
+peut aussi fournir une estimation de hauteur, à amplitude réglable.
+
+Le mode **Volume** utilise une surface densifiée par famille, préparée pour
 les cinq niveaux de détail natifs. Elle échantillonne la hauteur localement ;
 les PNG gris/RGB 8 ou 16 bits non entrelacés sont lus numériquement, sans gamma
 ni conversion préalable en atlas 8 bits. Les hauteurs EXR deviennent des sources PNG
@@ -452,22 +472,27 @@ choisie après un rejet 4K, et ne constitue pas une limite officielle du jeu.
 
 Le volume des galets densifiés a été confirmé par l’utilisateur **en course
 sur PC le 14 octobre 2026**, avec des captures grises et texturées.
-Le volume concerne les panneaux fixes Skin. Les roues, pièces Details, verre
-et articulations gardent leur géométrie ; les raccords sont atténués sur 3 cm.
-La couleur et la finition peuvent couvrir Skin, Details et Wheels, avec les
-variations d’échelle et d’orientation liées à leurs UV.
-
-**Normales** et **Les deux** restent expérimentaux sur la carrosserie : le
-carbone testé avec le même ZIP local montre son relief au garage, mais peu en
-course. Le shader DetailsDmgNormal associé peut aussi changer le vernis.
+L’atelier cible uniquement la famille active : Carrosserie, Détails ou Roues.
+Le volume inclut désormais les attaches FAirBrake, LWing et RWing repérées par
+l’utilisateur, ainsi que les autres pièces mobiles de cette famille. Les indices
+d’attache et le rig sont conservés ; les sommets coïncidents ne sont soudés qu’au
+sein de la même famille et de la même attache. Les contacts physiques sont
+atténués sur 3 cm. Les volumes des autres familles et les zones hors masque restent
+intacts lors d’applications successives. Le verre garde son matériau natif.
+L’amplitude et le mode sont mémorisés séparément pour chaque famille dans le projet.
+Cette extension est contrôlée dans les fichiers et l’aperçu ; sa validation en
+course avec les animations reste à effectuer dans Trackmania.
 Ce point est distinct des anciens accessoires Blender rétablis par réimport
 local mais absents via un Club. La cause et le ZIP distribué par les Clubs
 n’ont pas été comparés ; la distribution Club et la console restent à vérifier.
 
 Les modèles neutres vérifiés par SHA-256 sont chargés à l’ouverture depuis
-`public/models/relief/dense/`. Le navigateur ne parse ni n’exécute de GBX ou de
-`.blend` arbitraire. `scripts/prepare-dense-relief.py` et
-`scripts/dense_heightfield_core.py` sont les outils de préparation développeur.
+`public/models/relief/full/`. Les anciens templates restent disponibles pour
+reprendre les volumes enregistrés. Le navigateur ne parse ni n’exécute de GBX ou de
+`.blend` arbitraire. `scripts/prepare-surface-relief.py`,
+`scripts/prepare-surface-layouts.py` et `scripts/dense_heightfield_core.py`
+préparent les modèles et recettes UV authentifiées. Les familles et les attaches
+sont conservées à travers la séparation du dessous et la réorganisation UV.
 Les sources natives et le rig local servent uniquement à régénérer ces assets.
 `npm run test:relief` vérifie PNG16, inflation bornée, sauvegarde, cinq LOD,
 interfaces articulées, archives, comparaison et atelier desktop.
@@ -538,7 +563,12 @@ npx tsx scripts/prepare-uv-atlas-plans.ts guides
 python scripts/prepare-uv-atlas.py scan
 npx tsx scripts/prepare-uv-atlas-plans.ts plans
 python scripts/prepare-uv-atlas.py build
+python scripts/prepare-surface-relief.py
+python scripts/prepare-surface-layouts.py
+python scripts/prepare-uv-atlas.py scan full
+python scripts/prepare-uv-atlas.py build full
 npm run test:real-uv
+npm run test:relief
 ```
 
 Python et ces sources locales servent uniquement à préparer les ressources du

@@ -5,11 +5,35 @@ const MAX_ASSET_BYTES = 64 * 1024 * 1024;
 function asset(value: ReliefTemplateAsset): boolean {
   return !!value && Number.isSafeInteger(value.byteLength) && value.byteLength > 0 && value.byteLength <= MAX_ASSET_BYTES
     && typeof value.sha256 === 'string' && /^[0-9a-f]{64}$/.test(value.sha256)
-    && typeof value.url === 'string' && /^(?:\/models\/relief\/)?(?:dense\/)?[a-zA-Z0-9_.-]+$/.test(value.url)
+    && typeof value.url === 'string' && /^(?:\/models\/relief\/)?(?:(?:dense|full)\/)?[a-zA-Z0-9_.-]+$/.test(value.url)
     && !value.url.includes('..');
 }
 function numbers(values: number[], length: number, min: number, max: number): boolean {
   return Array.isArray(values) && values.length === length && values.every(value => Number.isFinite(value) && value >= min && value <= max);
+}
+
+/** Bounded numeric arrays keep the full rig manifest smaller than decimal JSON. */
+export function decodeReliefManifest(input: unknown): ReliefTemplateManifest {
+  if (!input || typeof input !== 'object') throw new Error('Description du relief invalide.');
+  const value = input as ReliefTemplateManifest;
+  if (value.encoding === undefined) return value;
+  if (value.encoding !== 'numeric-base64-v1' || !Array.isArray(value.geometries) || value.geometries.length > 32) throw new Error('Encodage du relief invalide.');
+  let total = 0;
+  function decode(source: unknown, kind: 'float' | 'uint' | 'bool'): number[] | boolean[] {
+    if (typeof source !== 'string' || source.length % 4 || source.length > 20_000_000 || !/^[A-Za-z0-9+/]*={0,2}$/.test(source) || (total += source.length) > 40 * 1024 * 1024) throw new Error('Tableau du relief trop volumineux ou invalide.');
+    const raw = atob(source), stride = kind === 'bool' ? 1 : 4;
+    if (raw.length % stride) throw new Error('Dimensions du relief invalides.');
+    const bytes = Uint8Array.from(raw, c => c.charCodeAt(0)), view = new DataView(bytes.buffer);
+    if (kind === 'bool') { if (bytes.some(v => v > 1)) throw new Error('Masque du relief invalide.'); return Array.from(bytes, v => v === 1); }
+    return Array.from({ length: bytes.length / 4 }, (_, i) => kind === 'float' ? view.getFloat32(i * 4, true) : view.getUint32(i * 4, true));
+  }
+  return { ...value, geometries: value.geometries.map(entry => {
+    const copy = { ...entry } as unknown as Record<string, unknown>;
+    for (const key of ['positions','normals','uv','hoodWeights','tangents']) if (copy[key] !== undefined) copy[key] = decode(copy[key], 'float');
+    for (const key of ['indices','bindings','parents']) if (copy[key] !== undefined) copy[key] = decode(copy[key], 'uint');
+    copy.bodyVertices = decode(copy.bodyVertices, 'bool');
+    return copy as unknown as typeof entry;
+  }) };
 }
 
 export function validateReliefManifest(value: ReliefTemplateManifest): void {
@@ -23,15 +47,29 @@ export function validateReliefManifest(value: ReliefTemplateManifest): void {
   const accessors = new Set<number>();
   for (const geometry of value.geometries) {
     const count = geometry?.positions?.length / 3;
-    if (!Number.isSafeInteger(count) || count < 3 || (vertices += count) > 200_000
+    if (!Number.isSafeInteger(count) || count < 3 || (vertices += count) > 600_000
+      || (geometry.family !== undefined && !['skin','details','wheels'].includes(geometry.family))
+      || (geometry.bindings !== undefined && (!numbers(geometry.bindings, count, 0, 255) || geometry.bindings.some(v => !Number.isInteger(v))))
       || !numbers(geometry.positions, count * 3, -20, 20) || !numbers(geometry.normals, count * 3, -1.001, 1.001)
       || (geometry.tangents !== undefined && !numbers(geometry.tangents, count * 3, -1.001, 1.001))
       || !numbers(geometry.uv, count * 2, -2, 3) || !numbers(geometry.hoodWeights, count, 0, 1)
       || !Array.isArray(geometry.bodyVertices) || geometry.bodyVertices.length !== count || geometry.bodyVertices.some(value => typeof value !== 'boolean')
       || geometry.hoodWeights.some((weight, vertex) => weight > 0 && !geometry.bodyVertices[vertex])
-      || !Array.isArray(geometry.indices) || geometry.indices.length % 3 || (indices += geometry.indices.length) > 1_200_000
+      || !Array.isArray(geometry.indices) || geometry.indices.length % 3 || (indices += geometry.indices.length) > 3_600_000
       || geometry.indices.some(index => !Number.isInteger(index) || index < 0 || index >= count)
       || !['dec3n', 'float32'].includes(geometry.normalEncoding)) throw new Error('Géométrie du modèle de relief invalide.');
+    if (geometry.legacyVertexCount !== undefined) {
+      const old = geometry.legacyVertexCount;
+      if (!Number.isInteger(old) || old < 3 || old > count || !Array.isArray(geometry.parents) || geometry.parents.length !== (count - old) * 2
+        || geometry.parents.some((v, i) => !Number.isInteger(v) || v < 0 || v >= old + Math.floor(i / 2))) throw new Error('Migration du relief invalide.');
+      if(geometry.bindings)for(let i=old;i<count;i++)if(geometry.parents.slice((i-old)*2,(i-old)*2+2).some(parent=>geometry.bindings![parent]!==geometry.bindings![i]))throw new Error('Attaches de migration incohérentes.');
+      for (const variant of ['standard','normal'] as const) {
+        const offsets = geometry.legacyOffsets?.[variant], bytes = value.legacyVariantBytes?.[variant];
+        if (!bytes || bytes > MAX_ASSET_BYTES || !offsets || !Number.isSafeInteger(offsets.positionOffset) || offsets.positionOffset < 0 || offsets.positionOffset + old * 12 > bytes
+          || !Number.isSafeInteger(offsets.normalOffset) || offsets.normalOffset < 0 || offsets.normalOffset + old * 4 > bytes
+          || !Number.isSafeInteger(offsets.uvOffset) || offsets.uvOffset < 0 || offsets.uvOffset + old * 8 > bytes) throw new Error('Offsets de migration invalides.');
+      }
+    }
     if ((value.interfaceProtectionVersion === 1 && geometry.boundaryPoints === undefined)
       || (geometry.boundaryPoints !== undefined && (geometry.boundaryPoints.length > 60_000 || geometry.boundaryPoints.length % 3
         || !numbers(geometry.boundaryPoints, geometry.boundaryPoints.length, -20, 20)))) throw new Error('Interfaces fixes du modèle de relief invalides.');
@@ -97,10 +135,10 @@ export async function verifyPreparedReliefTemplate(template: PreparedReliefTempl
   }
 }
 
-const loading = new Map<boolean, Promise<PreparedReliefTemplate>>();
+const loading = new Map<boolean | 'full', Promise<PreparedReliefTemplate>>();
 
 /** No uploaded .blend or GBX is parsed or executed; this loads product assets. */
-export function loadPreparedReliefTemplate(dense = false): Promise<PreparedReliefTemplate> {
+export function loadPreparedReliefTemplate(dense: boolean | 'full' = false): Promise<PreparedReliefTemplate> {
   const cached = loading.get(dense); if (cached) return cached;
   const base = import.meta.env?.BASE_URL ?? '/';
   const withBase = (url: string) => `${base.replace(/\/$/, '')}${url.startsWith('/') ? url : `/models/relief/${url}`}`;
@@ -113,11 +151,11 @@ export function loadPreparedReliefTemplate(dense = false): Promise<PreparedRelie
     await checkAsset(data, entry); return data;
   };
   const pending = (async () => {
-    const response = await fetch(withBase(`/models/relief/${dense ? 'dense/' : ''}manifest.json`), { signal: AbortSignal.timeout(20_000) });
+    const response = await fetch(withBase(`/models/relief/${dense === 'full' ? 'full/' : dense ? 'dense/' : ''}manifest.json`), { signal: AbortSignal.timeout(20_000) });
     if (!response.ok) throw new Error('Le modèle du prototype est indisponible.');
     const text = await response.text();
     if (text.length > 40 * 1024 * 1024) throw new Error('Description du modèle de relief trop volumineuse.');
-    const manifest = JSON.parse(text) as ReliefTemplateManifest;
+    const manifest = decodeReliefManifest(JSON.parse(text));
     validateReliefManifest(manifest);
     const [preview, standard, normal, dependencies] = await Promise.all([
       fetchBytes(manifest.preview), fetchBytes(manifest.variants.standard), fetchBytes(manifest.variants.normal),

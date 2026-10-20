@@ -38,7 +38,7 @@ import { decodeSurfaceMaterial, type SurfaceMaterial } from '../material';
 import type { ProjectMaps } from '../projectFile';
 import { TEXTURE_RESOLUTION, MAX_TEXTURE_RESOLUTION, isTextureResolution, type TextureResolution, upgradeMapResolution, upgradeResolutionSnapshot } from './resolution';
 import { AdaptivePreview } from './adaptivePreview';
-import { createTextureBackground, readTextureBackground, syncTextureBackgroundCanvas, textureBackgroundName, updateTextureBackground, type BackgroundFit } from './textureBackground';
+import { createTextureBackground, readTextureBackground, syncTextureBackgroundCanvas, textureBackgroundName, updateTextureBackground, DEFAULT_BACKGROUND_PLACEMENT, type BackgroundFit, type BackgroundPlacement } from './textureBackground';
 import { createMaterialDefinition, isValidMaterialDefinition, isValidMaterialLayer, type MaterialDefinition, type MaterialLayer, type MaterialRegion, type MaterialRenderChannel } from '../materials/types';
 import { loadMaterialSources, renderMaterialLayer, getMaterialSourceCanvas, pinMaterialSources } from '../materials/render';
 import { materialDragFrame } from '../materials/projection';
@@ -46,7 +46,7 @@ import { DETAILS_SIDES, detailsRegionOnSide, detailsSideKey, detailsSideLabel, d
 import { UNDERBODY_PANEL_LAYOUT, PANEL_BOUNDS, panelFrame, panelGuide, panelCanvasRegion, materialOnPanelAtlas, type PanelPlacement } from '../underbodyPanel';
 import type { MaterialSurfaceOverlay } from '../materials/surfaceMaps';
 import { materialPngBytes } from '../materials/import';
-import { REAL_UV_ATLAS, realAtlasLayout, sourceAtlasGuides, organizedAtlasGuides, mappedMaterialRegions, placementMatrix, type UvAtlasVersion, type AtlasSourceLayout } from '../realUvAtlas';
+import { REAL_UV_ATLAS, realAtlasLayout, sourceAtlasGuides, organizedAtlasGuides, mappedMaterialRegions, placementMatrix, sourceAtlasGeometry, organizedAtlasGeometry, type UvAtlasVersion, type AtlasSourceLayout } from '../realUvAtlas';
 
 // Full-atlas groups/clips must retain detail even when rendered to a 4096² texture.
 // Fabric's default cache budget would silently downsample these layers.
@@ -424,7 +424,10 @@ export class EditorCore {
       }
       const settings=info?{name:info.name,fit:info.fit,colorOpacity:info.colorOpacity,...(info.layout?{layout:info.layout}:{})}:undefined;
       const undoBackground=info?.uvAtlas&&!!info.uvAtlas.reverse!==reverse;
-      const background=info?createTextureBackground(await FabricImage.fromURL(info.src),res,res,state.canvas.backgroundColor as string,{...settings!,...(undoBackground?{}:{uvAtlas:{family,source:sourceLayout,...(reverse?{reverse:true}:{})}})}):undefined;
+      const geometry=info?.projection?this.materialGeometry?.()??[]:[];
+      const background=info?createTextureBackground(await FabricImage.fromURL(info.src),res,res,state.canvas.backgroundColor as string,
+        info.projection?{...settings!,projection:info.projection,...(info.placement?{placement:info.placement}:{})}:{...settings!,...(undoBackground?{}:{uvAtlas:{family,source:sourceLayout,...(reverse?{reverse:true}:{})}})},
+        info.projection?(reverse?sourceAtlasGeometry(geometry):organizedAtlasGeometry(geometry,sourceLayout)):geometry):undefined;
       staged.set(id,{objects,background});
     }
     this.uvAtlas=reverse?undefined:REAL_UV_ATLAS;this.symmetry=false;this.clipIslandKey=null;
@@ -1833,10 +1836,12 @@ export class EditorCore {
     const c = this.maps.get(mapId)!.canvas;
     const previous = readTextureBackground(c);
     const name = textureBackgroundName(file.name);
+    const followsBody = MAP_BY_ID[mapId].group === 'skin' && !!this.materialGeometry;
     const background = createTextureBackground(image, c.width, c.height, c.backgroundColor as string, {
-      name, fit: previous?.fit ?? 'cover', colorOpacity: previous?.colorOpacity ?? 0,
+      name, fit: followsBody && previous?.fit === 'stretch' ? 'cover' : previous?.fit ?? 'cover', colorOpacity: previous?.colorOpacity ?? 0,
+      ...(followsBody ? { projection: 'surface' as const, ...(previous?.placement ? { placement: previous.placement } : {}) } : {}),
       ...(!this.uvAtlas&&this.detailsLayout&&MAP_BY_ID[mapId].group==='details'?{layout:this.detailsLayout}:{}),
-    });
+    }, followsBody ? this.materialGeometry!() : []);
     c.backgroundImage?.dispose();
     c.backgroundImage = background;
     syncTextureBackgroundCanvas(c);
@@ -1846,10 +1851,23 @@ export class EditorCore {
     this.flushTexture();
   }
 
+  async followBodyWithTextureBackground() {
+    const mapId = this.activeMap, c = this.canvas, previous = readTextureBackground(c);
+    if (!previous || previous.projection || MAP_BY_ID[mapId].group !== 'skin') return;
+    const current = c.backgroundImage, image = await FabricImage.fromURL(previous.src);
+    if (c.backgroundImage !== current) { image.dispose(); return; }
+    const background = createTextureBackground(image, c.width, c.height, c.backgroundColor as string, {
+      name: previous.name, fit: previous.fit === 'stretch' ? 'cover' : previous.fit,
+      colorOpacity: previous.colorOpacity, projection: 'surface',
+    }, this.materialGeometry?.() ?? []);
+    current?.dispose(); c.backgroundImage = background; syncTextureBackgroundCanvas(c); c.requestRenderAll();
+    this.pushHistory(mapId); this.emit('layers'); this.flushTexture();
+  }
+
   setTextureBackgroundFit(fit: BackgroundFit) {
     if (!this.getTextureBackground()) return;
     this.endHistoryCoalescing();
-    updateTextureBackground(this.canvas, { fit });
+    updateTextureBackground(this.canvas, { fit }, this.materialGeometry?.() ?? []);
     this.canvas.requestRenderAll();
     this.pushHistory(this.activeMap);
   }
@@ -1859,6 +1877,27 @@ export class EditorCore {
     updateTextureBackground(this.canvas, { colorOpacity: Math.max(0, Math.min(1, opacity)) });
     this.canvas.requestRenderAll();
     this.pushHistory(this.activeMap, 'background-opacity');
+  }
+
+  setTextureBackgroundPlacement(changes: Partial<BackgroundPlacement>) {
+    const background = this.getTextureBackground();
+    if (!background?.projection) return;
+    const placement = { ...(background.placement ?? DEFAULT_BACKGROUND_PLACEMENT), ...changes };
+    updateTextureBackground(this.canvas, { placement }, this.materialGeometry?.() ?? []);
+    this.canvas.requestRenderAll(); this.pushHistory(this.activeMap, 'background-placement');
+  }
+
+  /** Copy the editable background and its color without changing destination layers. */
+  async copyTextureBackgroundToMap(sourceId: MapId, targetId: MapId) {
+    if (!COPY_COMPATIBLE_TARGETS[sourceId]?.includes(targetId)) throw new Error('Choisissez un autre canal de la même surface.');
+    const source = this.maps.get(sourceId)!.canvas, target = this.maps.get(targetId)!.canvas;
+    if (!readTextureBackground(source)) throw new Error('Ajoutez une image de fond avant de la copier.');
+    this.endHistoryCoalescing();
+    const color = source.backgroundColor;
+    const background = await source.backgroundImage!.clone(CUSTOM_PROPS);
+    target.backgroundImage?.dispose(); target.backgroundImage = background; target.backgroundColor = color;
+    syncTextureBackgroundCanvas(target); target.requestRenderAll(); this.pushHistory(targetId); this.markTextureDirty(targetId);
+    this.emit('layers'); this.emit('selection'); this.flushTexture();
   }
 
   removeTextureBackground() {
@@ -2010,8 +2049,9 @@ export class EditorCore {
 
   materialForRelief(definition:MaterialDefinition,regions:string[],exclusions:string[]):MaterialLayer {
     const selected=this.getSelectionMaterialLayer(!!this.uvAtlas);
-    if(selected?.family==='skin')return {...selected,definition:structuredClone(definition)};
-    return {definition:structuredClone(definition),family:'skin',regions:this.materialRegions(regions,'skin'),exclusions:this.materialRegions(exclusions,'skin'),...(this.uvAtlas?{organizedAtlas:this.detailsLayout??'stock'}:{})};
+    const family=MAP_BY_ID[this.activeMap].group;
+    if(selected?.family===family)return {...selected,definition:structuredClone(definition)};
+    return {definition:structuredClone(definition),family,regions:this.materialRegions(regions,family),exclusions:this.materialRegions(exclusions,family),...(this.uvAtlas?{organizedAtlas:this.detailsLayout??'stock'}:{})};
   }
 
   /** Promote an existing flat tyre image to one editable, geometry-aware
@@ -2414,6 +2454,14 @@ export class EditorCore {
   }
 
   rebuildProjectionsForModel() {
+    const geometry = this.materialGeometry?.();
+    if (geometry?.length) for (const [id, { canvas }] of this.maps) {
+      const info = readTextureBackground(canvas);
+      if (!info?.projection) continue;
+      const previous = canvas.backgroundImage as Group;
+      canvas.backgroundImage = createTextureBackground(previous.item(1) as FabricImage, canvas.width, canvas.height, canvas.backgroundColor as string, info, geometry);
+      previous.removeAll(); previous.dispose(); syncTextureBackgroundCanvas(canvas); canvas.requestRenderAll(); this.markTextureDirty(id);
+    }
     this.projectionBakes.clear(); this.materialBakes.clear(); this.refreshLinkedImages(); this.flushTexture(); this.emit('layers'); this.emit('selection'); this.emit('dirty');
   }
 

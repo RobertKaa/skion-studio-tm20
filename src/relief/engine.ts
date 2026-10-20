@@ -12,23 +12,25 @@ export type { BuildReliefOptions, PreparedReliefTemplate, ReliefPrototypeResult,
 
 const wholeBodyWeights = new WeakMap<PreparedReliefTemplate, Float32Array[]>();
 const positionKey = (position: readonly number[]) => position.map(value => Math.round(value * 1_000_000)).join(',');
+export const reliefGeometryFamily = (geometry: ReliefGeometry) => geometry.family ?? 'skin';
+export const reliefVertexKey = (geometry: ReliefGeometry, vertex: number) => `${reliefGeometryFamily(geometry)}:${geometry.bindings?.[vertex] ?? 0}:${positionKey(geometry.positions.slice(vertex * 3, vertex * 3 + 3))}`;
 
 /** Keep connections to undeformed articulated parts closed and feather nearby volume. */
 function vehicleWeights(template: PreparedReliefTemplate): Float32Array[] {
   const cached = wholeBodyWeights.get(template); if (cached) return cached;
   const geometries = template.manifest.geometries, fixedPositions = new Set<string>(), anchors = new Map<string, number[]>();
   for (const geometry of geometries) for (let vertex = 0; vertex < geometry.bodyVertices.length; vertex++) {
-    if (!geometry.bodyVertices[vertex]) fixedPositions.add(positionKey(geometry.positions.slice(vertex * 3, vertex * 3 + 3)));
+    if (!geometry.bodyVertices[vertex]) fixedPositions.add(reliefVertexKey(geometry, vertex));
   }
   for (const geometry of geometries) for (let vertex = 0; vertex < geometry.bodyVertices.length; vertex++) {
     if (!geometry.bodyVertices[vertex]) continue;
-    const position = geometry.positions.slice(vertex * 3, vertex * 3 + 3), key = positionKey(position);
+    const position = geometry.positions.slice(vertex * 3, vertex * 3 + 3), key = reliefVertexKey(geometry, vertex);
     if (fixedPositions.has(key)) anchors.set(key, position);
   }
   for (const geometry of geometries) {
     const points = geometry.boundaryPoints ?? [];
     for (let point = 0; point < points.length; point += 3) {
-      const position = points.slice(point, point + 3); anchors.set(positionKey(position), position);
+      const position = points.slice(point, point + 3); anchors.set(`${reliefGeometryFamily(geometry)}:${positionKey(position)}`, position);
     }
   }
   const featherMeters = .03, buckets = new Map<string, number[][]>();
@@ -39,7 +41,7 @@ function vehicleWeights(template: PreparedReliefTemplate): Float32Array[] {
   const result = geometries.map(geometry => Float32Array.from(geometry.bodyVertices, (isBody, vertex) => {
     if (!isBody) return 0;
     const position = geometry.positions.slice(vertex * 3, vertex * 3 + 3);
-    if (anchors.has(positionKey(position))) return 0;
+    if (anchors.has(reliefVertexKey(geometry, vertex)) || anchors.has(`${reliefGeometryFamily(geometry)}:${positionKey(position)}`)) return 0;
     const cell = position.map(value => Math.floor(value / featherMeters));
     let nearestSquared = featherMeters ** 2;
     for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 1; z++) {
@@ -133,6 +135,7 @@ function prepareNormalAtlas(template: PreparedReliefTemplate, image: RGBAImage, 
 
 /** Build an isolated preview/game prototype; all source project arrays remain intact. */
 export async function buildReliefPrototype(options: BuildReliefOptions): Promise<ReliefPrototypeResult> {
+  const family = options.family ?? 'skin';
   const { strengthMm, heightAtlas, mode } = options, normalStrength = options.normalStrength ?? 1;
   const scope = options.scope ?? 'hood', textureResolution = options.textureResolution ?? 1024;
   const diagnostic = options.diagnostic ?? false;
@@ -141,35 +144,39 @@ export async function buildReliefPrototype(options: BuildReliefOptions): Promise
   const validAmplitude = dense && !diagnostic ? Number.isFinite(strengthMm) && strengthMm >= 0 && strengthMm <= 30 : validReliefAmplitude(strengthMm, diagnostic);
   if (!['normal', 'geometry', 'combined'].includes(mode) || !validAmplitude || typeof diagnostic !== 'boolean'
     || !Number.isFinite(normalStrength) || normalStrength < 0 || normalStrength > 2) throw new Error(`Réglages du relief invalides (0 à ${diagnostic === true ? 80 : 8} mm).`);
-  if (!['hood', 'vehicle'].includes(scope)) throw new Error('Zone de relief invalide.');
+  if (!['skin','details','wheels'].includes(family) || !['hood', 'vehicle'].includes(scope) || family !== 'skin' && scope === 'hood') throw new Error('Zone de relief invalide.');
   if (![1024, 2048, 4096].includes(textureResolution)) throw new Error('Résolution du relief invalide (1K, 2K ou 4K).');
   if (heightAtlas) validateReliefAtlas(heightAtlas);
   if (options.normalAtlas) validateReliefAtlas(options.normalAtlas);
   // Hash again for caller-supplied templates, so modifying a known buffer is rejected.
   if (options.template) await verifyPreparedReliefTemplate(template);
   if ((scope === 'vehicle' || diagnostic) && template.manifest.interfaceProtectionVersion !== 1) throw new Error('Le modèle du prototype doit être rechargé pour protéger les interfaces du relief étendu.');
-  const variant: ReliefVariant = mode === 'geometry' ? 'standard' : 'normal';
+  const variant: ReliefVariant = mode === 'geometry' || family !== 'skin' ? 'standard' : 'normal';
   checkNativeStreams(template, variant);
   const geometries = template.manifest.geometries;
+  if(options.vertexUv)for(const [visual,uv]of options.vertexUv){const g=geometries.find(g=>g.visualIndex===visual);if(!g||uv.length!==g.uv.length||uv.some(n=>!Number.isFinite(n)||n< -2||n>3))throw new Error('Coordonnées UV de relief invalides.');}
   const protectedWeights = scope === 'vehicle' || diagnostic || dense ? vehicleWeights(template) : undefined;
-  const scopeWeights = scope === 'vehicle' ? protectedWeights!
-    : geometries.map((geometry, i) => diagnostic || dense ? geometry.hoodWeights.map((value, vertex) => value * protectedWeights![i][vertex]) : geometry.hoodWeights);
+  const scopeWeights = geometries.map((geometry, i) => reliefGeometryFamily(geometry) !== family ? new Float32Array(geometry.bodyVertices.length)
+    : scope === 'vehicle' ? protectedWeights![i]
+    : diagnostic || dense ? geometry.hoodWeights.map((value, vertex) => value * protectedWeights![i][vertex]) : geometry.hoodWeights);
   const positions = geometries.map(geometry => Float32Array.from(geometry.positions));
   let affectedVertices = 0, maxDisplacementMm = 0;
   if (mode !== 'normal' && heightAtlas && strengthMm > 0) {
     // UV seam duplicates share one displacement to avoid opening the original mesh.
     const groups = new Map<string, { members: [number, number][]; amount: number; count: number; normal: number[] }>();
     geometries.forEach((geometry, groupIndex) => {
+      if (reliefGeometryFamily(geometry) !== family) return;
       for (let vertex = 0; vertex < geometry.hoodWeights.length; vertex++) {
         // A Body vertex may coincide with an articulated air-brake panel. It must
         // never transfer displacement across their different skeleton bindings.
         if (!geometry.bodyVertices[vertex]) continue;
-        const p = geometry.positions.slice(vertex * 3, vertex * 3 + 3), key = positionKey(p);
+        const key = reliefVertexKey(geometry, vertex);
         const group = groups.get(key) ?? { members: [], amount: 0, count: 0, normal: [0, 0, 0] };
         group.members.push([groupIndex, vertex]);
         const weight = scopeWeights[groupIndex][vertex];
         if (weight > 0) {
-          const sample = (options.heightSample ?? ((u: number, v: number) => sampleReliefHeight(heightAtlas, u, v)))(geometry.uv[vertex * 2], geometry.uv[vertex * 2 + 1]);
+          const uv=options.vertexUv?.get(geometry.visualIndex)??geometry.uv;
+          const sample = (options.heightSample ?? ((u: number, v: number) => sampleReliefHeight(heightAtlas, u, v)))(uv[vertex * 2], uv[vertex * 2 + 1]);
           if (!Number.isFinite(sample) || sample < -1.000001 || sample > 1.000001) throw new Error('Échantillon de hauteur invalide.');
           group.amount += sample * weight * strengthMm / 1000;
           group.count++;
@@ -224,14 +231,14 @@ export async function buildReliefPrototype(options: BuildReliefOptions): Promise
   const passthrough = template.dependencies.map(entry => ({ name: entry.name, data: entry.data.slice() }));
   if (normalAtlas) {
     const dds = new Uint8Array(encodeDDS(normalAtlas, 'BC5', { colorSpace: 'linear' }));
-    for (const name of scope === 'vehicle' ? ['Skin_N.dds', 'Details_N.dds', 'Wheels_N.dds'] : ['Skin_N.dds']) {
+    for (const name of [family === 'skin' ? 'Skin_N.dds' : family === 'details' ? 'Details_N.dds' : 'Wheels_N.dds']) {
       passthrough.push({ name, data: name === 'Skin_N.dds' ? dds : dds.slice() });
     }
   }
   return {
-    options: { mode, strengthMm, normalStrength, scope, textureResolution, diagnostic, ...(dense ? { surfaceMethod: 'dense-heightfield-v1' as const } : {}), ...(options.heightSourceBits ? { heightSourceBits: options.heightSourceBits } : {}) },
+    options: { ...(options.family ? { family } : {}), mode, strengthMm, normalStrength, scope, textureResolution, diagnostic, ...(dense ? { surfaceMethod: 'dense-heightfield-v1' as const } : {}), ...(options.heightSourceBits ? { heightSourceBits: options.heightSourceBits } : {}) },
     project: { name: scope === 'vehicle' ? 'Relief · voiture entière' : 'Relief · capot', mesh, preview: patchReliefPreview(template.preview, geometries, positions, normals, variant), passthrough },
     normalAtlas,
-    stats: { affectedVertices, maxDisplacementMm, hoodVertices: geometries.reduce((count, geometry) => count + geometry.hoodWeights.filter(value => value > 0).length, 0), eligibleVertices: scopeWeights.reduce((count, weights) => count + Array.from(weights).filter(value => value > 0).length, 0), triangleCount: geometries.reduce((count, geometry) => count + geometry.indices.length / 3, 0), templateVariant: variant },
+    stats: { affectedVertices, maxDisplacementMm, hoodVertices: geometries.filter(g => reliefGeometryFamily(g) === family).reduce((count, geometry) => count + geometry.hoodWeights.filter(value => value > 0).length, 0), eligibleVertices: scopeWeights.reduce((count, weights) => count + Array.from(weights).filter(value => value > 0).length, 0), triangleCount: geometries.filter(g => reliefGeometryFamily(g) === family).reduce((count, geometry) => count + geometry.indices.length / 3, 0), templateVariant: variant },
   };
 }

@@ -69,7 +69,7 @@ import { exportReliefPrototype, prototypeSurfaceFiles, reliefPrototypeName } fro
 import type { ReliefPrototypeResult } from './relief/types';
 import { captureReliefSettings, type ReliefSettings } from './relief/settings';
 import type { DetailsSide } from './detailsSides';
-import { splitDetailsSidesModel, splitDetailsSurfaceFiles } from './detailsSidesModel';
+import { restoreDetailsSidesModel, splitDetailsSidesModel, splitDetailsSurfaceFiles } from './detailsSidesModel';
 import { loadPreparedReliefTemplate } from './relief/template';
 import { DetailsSidesControl } from './ui/DetailsSidesControl';
 import { UNDERBODY_PANEL_LAYOUT } from './underbodyPanel';
@@ -86,6 +86,8 @@ const ReliefPrototypeDialog = lazy(() => import('./ui/ReliefPrototypeDialog').th
 const RandomModal = lazy(() => import('./RandomModal'));
 
 interface ReliefSession {
+  family: import('./relief/types').ReliefFamily;
+  detailsLayout?:import('./detailsSides').DetailsLayout;
   preferMaterial?:boolean;
   layerId?:string;
   baseVolume?:{mesh:Uint8Array;variant:'standard'|'normal'};
@@ -1435,6 +1437,18 @@ export default function App() {
     } finally { setBusy(null); }
   };
 
+  const onCopyTextureBackground = async (target: MapId) => {
+    const editor = editorRef.current;
+    if (!editor || busyRef.current) return;
+    setBusy('Copie de l’image de fond…');
+    try {
+      await editor.copyTextureBackgroundToMap(editor.activeMap, target);
+      notify(`Image de fond et réglages copiés vers ${CHANNEL_LABELS[target]}.`);
+    } catch (error) {
+      notify(`Copie du fond impossible : ${error instanceof Error ? error.message : 'image illisible'}`);
+    } finally { setBusy(null); }
+  };
+
   const onApplyMaterial = async (definition: MaterialDefinition, regions: string[], exclusions: string[]) => {
     const ed = editorRef.current;
     if (!ed || busyRef.current) return;
@@ -1463,8 +1477,9 @@ export default function App() {
     const editor = editorRef.current;
     if (!editor || !ready || busyRef.current) return;
     setBusy('Préparation de l’atelier de relief…');
+    const targetFamily=MAP_BY_ID[editor.activeMap].group;
+    const targetMap=targetFamily==='skin'?'Skin_B':targetFamily==='details'?'Details_B':'Wheels_B';
     try {
-      if(!requested&&reliefSettings?.appearanceScope==='skin'&&!editor.getSelectionMaterialLayer())throw new Error('Sélectionnez le calque de matériau dont vous souhaitez modifier le volume.');
       await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
       const copy = (source: HTMLCanvasElement, data = false) => {
         const canvas = document.createElement('canvas'); canvas.width = source.width; canvas.height = source.height;
@@ -1480,12 +1495,16 @@ export default function App() {
       let prepared = await prototypeSurfaceFiles(await exportMaterialSurfaces(withWheelNormalFile(files, wheelNormal, wheelSurface, wheelAO), editor.getMaterialSurfaceOverlays(), editor.getTextureResolution(), true, wheelSurface, files.some(file => /^Wheels_N\.dds$/i.test(file.name))));
       if(atlasSource){for(const collection of [maps,roles])for(const [id,canvas]of collection){collection.set(id,transferAtlasCanvas(canvas,MAP_BY_ID[id].group,atlasSource,true));canvas.width=canvas.height=1;}prepared=await reorganizeSurfaceFiles(prepared,atlasSource,false,true);}
       const material = requested?editor.materialForRelief(requested.definition,requested.regions,requested.exclusions):editor.getSelectionMaterialLayer(!!atlasSource),geometry=previewRef.current?.getProjectionTriangles()??[];
-      const layerScoped=!!requested||material?.family==='skin';
-      const layerId=material?.family==='skin'?(editor.getSelection() as (FabricObject&{id?:string})|null)?.id:undefined;
-      const priorVolume=layerScoped&&reliefSettings?.stats&&skin3dRef.current?await restoreNativeModel(skin3dRef.current):null;
+      const layerScoped=!!requested||material?.family===targetFamily;
+      const layerId=material?.family===targetFamily?(editor.getSelection() as (FabricObject&{id?:string})|null)?.id:undefined;
+      let priorVolume=reliefSettings?.stats&&skin3dRef.current?await restoreNativeModel(skin3dRef.current):null;
+      if(priorVolume?.detailsLayout)priorVolume=await restoreDetailsSidesModel(priorVolume,reliefSettings!.stats!.templateVariant);
       const baseVolume=priorVolume?{mesh:priorVolume.mesh,variant:reliefSettings!.stats!.templateVariant}:undefined;
-      const settings=layerScoped&&layerId&&reliefSettings?.appliedLayers?.Skin_B===layerId?{...reliefSettings,material,sourceName:material!.definition.name}:undefined;
-      setReliefSession({ name: skinName, maps, roles, atlasSource, preferMaterial:layerScoped,layerId,baseVolume,settings,material: material?.family === 'skin' ? material : null,
+      const savedFamily=reliefSettings?.family??reliefSettings?.material?.family??'skin';
+      const savedStrength=reliefSettings?.strengthByFamily?.[targetFamily]??(savedFamily===targetFamily?reliefSettings?.strengthMm:undefined);
+      const savedMode=reliefSettings?.modeByFamily?.[targetFamily]??(savedFamily===targetFamily?reliefSettings?.mode:undefined);
+      const settings:ReliefSettings|undefined=layerScoped&&layerId&&savedStrength!==undefined&&reliefSettings?.appliedLayers?.[targetMap]===layerId?{...reliefSettings,family:targetFamily,source:'material',appearanceScope:targetFamily,material,sourceName:material!.definition.name,strengthMm:savedStrength,mode:targetFamily==='skin'?'geometry':savedMode??'geometry',diagnostic:savedStrength>30,scope:'vehicle'}:undefined;
+      setReliefSession({ family:targetFamily, detailsLayout:skin3dRef.current?.detailsLayout, name: skinName, maps, roles, atlasSource, preferMaterial:layerScoped,layerId,baseVolume,settings,material: material?.family === targetFamily ? material : null,
         projectionGeometry: atlasSource?sourceAtlasGeometry(geometry):geometry,
         surfaceFiles: prepared, illumRole, speedColor, dirtEnabled, horn });
     } catch (error) { notify(`Atelier de relief indisponible : ${projectError(error)}`); }
@@ -1519,7 +1538,7 @@ export default function App() {
     const ed = editorRef.current, pv = previewRef.current;
     if (!ed || !pv || !result.project.preview) throw new Error('L’éditeur 3D est indisponible.');
     const checkpoint = ed.createCheckpoint(), previousModel = skin3dRef.current, previousView = pv.getViewState(), activeMap = ed.activeMap;
-    const appliedLayers: ReliefSettings['appliedLayers'] = {};
+    const appliedLayers: ReliefSettings['appliedLayers'] = {...reliefSettings?.appliedLayers};
     try {
       if (previousModel?.detailsLayout) result = { ...result, project: await splitDetailsSidesModel(result.project,previousModel.detailsLayout) };
       const atlasSource=reliefSessionRef.current?.atlasSource;
@@ -1532,13 +1551,15 @@ export default function App() {
       // Material owners keep all linked channels editable. Existing paint layers
       // stay in place; reapplying replaces only the owners created by this tool.
       const definition = appearance ?? settings.material?.definition;
-      const layerScoped=settings.appearanceScope==='skin';
+      const targetFamily=settings.family??settings.material?.family??'skin';
+      const targetMap=targetFamily==='skin'?'Skin_B':targetFamily==='details'?'Details_B':'Wheels_B';
+      const layerScoped=!!settings.appearanceScope;
       const targetId=layerScoped?reliefSessionRef.current?.layerId:undefined;
-      const families = settings.scope === 'vehicle'&&!layerScoped ? ['Skin_B','Details_B','Wheels_B'] as const : ['Skin_B'] as const;
+      const families = [targetMap] as const;
       if(targetId&&definition){
-        ed.setActiveMap('Skin_B');
+        ed.setActiveMap(targetMap);
         await ed.updateMaterialLayerDefinition(targetId,definition);
-        appliedLayers.Skin_B=targetId;
+        appliedLayers[targetMap]=targetId;
       }
       else if (settings.material && (definition!.preset !== 'solid' || definition!.textures.color||definition!.textures.height||definition!.textures.normal||definition!.textures.ao)) for (const map of families) {
         await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
@@ -1552,14 +1573,18 @@ export default function App() {
       else if (definition && (definition.textures.roughmetal || definition.textures.roughness || definition.textures.metalness)) {
         for (const color of families) { const map = color.replace('_B','_R') as MapId; await ed.setBackgroundFromCanvas(map, maps.get(map)!, { flush: false, recordHistory: false }); }
       }
-      if (definition?.preset === 'solid' && !definition.textures.color && definition.textures.coat) await ed.setBackgroundFromCanvas('Skin_CoatR', maps.get('Skin_CoatR')!, {flush:false,recordHistory:false});
-      if(!layerScoped)for (const [map, id] of Object.entries(reliefSettings?.appliedLayers ?? {})) { if(Object.values(appliedLayers).includes(id))continue;ed.setActiveMap(map as MapId); ed.deleteLayer(id); }
+      if (targetFamily==='skin' && definition?.preset === 'solid' && !definition.textures.color && definition.textures.coat) await ed.setBackgroundFromCanvas('Skin_CoatR', maps.get('Skin_CoatR')!, {flush:false,recordHistory:false});
+      if(!layerScoped){const previousOwner=reliefSettings?.appliedLayers?.[targetMap];if(previousOwner&&previousOwner!==appliedLayers[targetMap]){ed.setActiveMap(targetMap);ed.deleteLayer(previousOwner);}}
       ed.commitCheckpoint(checkpoint); ed.setActiveMap(activeMap); ed.flushTexture();
       const files = new Map([...(reliefSessionRef.current?.surfaceFiles ?? []), ...result.project.passthrough].map(file => [file.name.toLowerCase(), file]));
       if (result.options.mode === 'geometry') files.delete('skin_n.dds');
       const model = { ...result.project, parts, passthrough: atlasSource?await reorganizeSurfaceFiles([...files.values()],atlasSource):[...files.values()] };
       skin3dRef.current = model; setSkin3d(model); setSurfaceFiles([]);
-      setReliefSettings({ ...settings, appliedLayers, stats: result.stats, heightSourceBits:result.options.heightSourceBits }); setSavedMetadata(null);
+      const priorFamily=reliefSettings?.family??reliefSettings?.material?.family??'skin';
+      setReliefSettings({ ...settings, appliedLayers, stats: result.stats, heightSourceBits:result.options.heightSourceBits,
+        strengthByFamily:{...reliefSettings?.strengthByFamily,...(reliefSettings?{[priorFamily]:reliefSettings.strengthMm}:{}),[targetFamily]:settings.strengthMm},
+        modeByFamily:{...reliefSettings?.modeByFamily,...(reliefSettings?{[priorFamily]:reliefSettings.mode}:{}),[targetFamily]:settings.mode},
+      }); setSavedMetadata(null);
       pv.restoreViewState(previousView); setInspectorTab('materials'); setView('3d');
       notify('Relief appliqué. Enregistrez le projet pour conserver le modèle, les sources et les réglages.');
     } catch (error) {
@@ -2041,7 +2066,7 @@ export default function App() {
       };
       const blob = reliefSettings && skin3d?.preview && reliefSettings.stats
         ? await exportReliefPrototype(skinName, reliefSettings.sourceName, { options: {
-          mode: reliefSettings.mode, strengthMm: reliefSettings.strengthMm, normalStrength: 1, scope: reliefSettings.scope,
+          family:reliefSettings.family??reliefSettings.material?.family??'skin', mode: reliefSettings.mode, strengthMm: reliefSettings.strengthMm, normalStrength: 1, scope: reliefSettings.scope,
           textureResolution: ed.getTextureResolution(), diagnostic: reliefSettings.diagnostic, surfaceMethod: 'dense-heightfield-v1',
           heightSourceBits:reliefSettings.heightSourceBits,
         }, project: skin3d, normalAtlas: null, stats: reliefSettings.stats },
@@ -2847,6 +2872,12 @@ export default function App() {
           onChoose={(file, mapId) => void onTextureBackgroundChosen(file, mapId)}
           onRemove={() => editorRef.current?.removeTextureBackground()}
           onFit={(fit) => editorRef.current?.setTextureBackgroundFit(fit)}
+          onPlacement={(placement) => editorRef.current?.setTextureBackgroundPlacement(placement)}
+          onCopyBackground={(target) => void onCopyTextureBackground(target)}
+          onFollowBody={() => {
+            setBusy('Adaptation de l’image à la carrosserie…');
+            void editorRef.current?.followBodyWithTextureBackground().catch(error => notify(`Image de fond : ${error instanceof Error ? error.message : 'adaptation impossible'}`)).finally(() => setBusy(null));
+          }}
           onOpacity={(opacity) => editorRef.current?.setBackgroundColorOpacity(opacity)} onCommit={endHistoryGesture} />
         {mapDef.kind === 'illum' && (
           <>
@@ -3386,7 +3417,7 @@ export default function App() {
 
       {downloadsOpen && <DownloadDialog onClose={closeDownloads} onPrepareProject={downloadCurrentProject} onExport={onExport} horn={horn} onHornChange={setHorn} />}
 
-      {reliefSession && <Suspense fallback={<div className="modal-overlay" role="status">Chargement de l’atelier de relief…</div>}><ReliefPrototypeDialog name={reliefSession.name} maps={reliefSession.maps} material={reliefSession.material} projectionGeometry={reliefSession.projectionGeometry} surfaceFiles={reliefSession.surfaceFiles} settings={reliefSession.preferMaterial?reliefSession.settings??null:reliefSettings} preserveMaterialMask={reliefSession.preferMaterial} baseVolume={reliefSession.baseVolume} onApply={applyRelief} onClose={closeReliefPrototype} onExport={downloadReliefPrototype} /></Suspense>}
+      {reliefSession && <Suspense fallback={<div className="modal-overlay" role="status">Chargement de l’atelier de relief…</div>}><ReliefPrototypeDialog family={reliefSession.family} detailsLayout={reliefSession.detailsLayout} name={reliefSession.name} maps={reliefSession.maps} material={reliefSession.material} projectionGeometry={reliefSession.projectionGeometry} surfaceFiles={reliefSession.surfaceFiles} settings={reliefSession.settings??null} preserveMaterialMask={reliefSession.preferMaterial} baseVolume={reliefSession.baseVolume} onApply={applyRelief} onClose={closeReliefPrototype} onExport={downloadReliefPrototype} /></Suspense>}
 
       {libraryOpen && <ProjectLibrary currentId={projectId} needsSave={projectModified && (dirtyCount > 0 || !!projectId || skinName !== 'MonSkin' || !!editorRef.current?.hasProjectContent() || !!skin3d || coatIntensity !== 1 || neonIntensity !== 1.4 || !dirtEnabled || textureResolution !== TEXTURE_RESOLUTION)}
         onClose={() => setLibraryOpen(false)} onSave={saveProject} onOpen={openSavedProject} onImport={importProjectFile} onDownloadCurrent={downloadCurrentProject}

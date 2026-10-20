@@ -5,7 +5,7 @@
 - L’export standard de Skion omet volontairement les normales personnalisées de carrosserie (`exportMaterialSurfaces`). Ajouter une hauteur au matériau ne modifiait pas non plus le modèle : elle était réservée à l’atelier séparé. Ce sont deux chemins distincts, et non un réglage d’amplitude manquant.
 - Le test carbone antérieur concernait bien le même ZIP local, sans Club. Les audits locaux contiennent des normales BC5 non uniformes, des tangentes et un matériau de normales sur les cinq LOD. Une omission des normales sur les petits LOD n’explique donc pas à elle seule ce résultat.
 - Renommer le matériau Skin avec le nom de Détails avait déjà été essayé. Il ne faut pas présenter ce renommage comme une correction validée.
-- Les tests utilisateur ont confirmé le volume géométrique en course. Ils n’ont pas établi la fiabilité des normales personnalisées de carrosserie en course. Le dysfonctionnement des modèles distribués par Club est un problème séparé.
+- Les tests utilisateur ont confirmé le volume géométrique en course. Le test isolé du 19 octobre 2026 corrige l’interprétation initiale d’Occulte : seul le mode Volume fonctionne sur la carrosserie. Le dysfonctionnement des modèles distribués par Club reste un problème séparé.
 - Les hauteurs EXR étaient converties en PNG 8 bits et limitées à [0, 1]. Ce chemin pouvait perdre des différences fines et les valeurs de déplacement négatives.
 
 ## Sources et portée
@@ -15,6 +15,21 @@ La [documentation Trackmania sur les textures](https://doc.trackmania.com/create
 Le [message historique d’Ubi-Alinoa du 8 juin 2020, conservé par Devtrackers](https://devtrackers.gg/trackmania/p/3490d99c-stadium-car-ressources-all-you-need-to-create-skins-for-the-stadium-cars), indique OpenGL Y+, le couple rugosité/métal R/G et l’absence de normales Skin dans les possibilités de l’époque. Cette annonce n’établit pas à elle seule le comportement d’une version actuelle du jeu ; elle concorde toutefois avec la différence observée et justifie de vérifier le routage natif plutôt que d’augmenter arbitrairement la force.
 
 Les preuves locales antérieures sont `work/relief-check/carbon-game-visibility-diagnosis.json`, `carbon-details-material-comparison-audit.json` et les confirmations utilisateur du fil. Aucun accès au code du moteur de course n’est revendiqué.
+
+## Retour en course : Occulte, 19 octobre 2026
+
+Le ZIP exact est `C:/Users/sbran/Documents/Trackmania/Skins/Models/CarSport/COT-TOBER - Occulte.zip`, SHA-256 `368a34cefdef1bfea0c11070a06b0bb6fd12db3256d3aef31f725eafd029afd5`. L’utilisateur avait choisi **Les deux**. Son premier retour attribuait l’effet aux normales ; un essai ultérieur isolant les modes conclut que seul le Volume fonctionne sur la carrosserie. Le retour le plus récent fait foi ; l’export combiné n’isolait pas l’origine de l’effet.
+
+Une relecture du GBX final avec le parseur natif indépendant confirme `_DetailsDmgNormal_Skin`, normales et tangentes sur les cinq LOD. `Skin_N.dds` est présente en BC5, 2048 × 2048. La hauteur n’est pas une texture directement consommée par le jeu : les positions du maillage sont déjà déplacées, avec un maximum mesuré de 2,000109 mm. Ces mesures sont conservées dans `work/relief-investigation/audit-occulte-game-report.json`.
+
+La conclusion produit distingue donc les chemins :
+
+- **Carrosserie standard** : un calque seul n’exporte pas de normales personnalisées ; l’ajout d’une hauteur ne déforme pas automatiquement la voiture.
+- **Carrosserie dans l’atelier** : seul le volume géométrique est proposé. Le routage de normales par shader adapté n’est pas validé et n’est plus présenté comme une fonction de production.
+- **Volume géométrique** : la hauteur est intégrée au GBX avant l’export. Sa présence dans le fichier ne garantit pas un relief perceptible en course ; Occulte illustre cette limite à 2 mm. L’absence de volume visible sur ce skin ne prouve pas un rejet général des modèles déformés.
+- **Détails et Roues** : normales importées ou calculées depuis la hauteur, exportées directement en DDS BC5. Le volume géométrique de chaque famille dispose aussi de son propre atelier ciblé.
+
+La visibilité en course ci-dessus est un constat de l’utilisateur. L’audit du fichier ne remplace pas un test moteur et n’isole pas à lui seul la contribution des normales d’un export combinant plusieurs effets.
 
 ## Changements de l’application
 
@@ -68,4 +83,23 @@ Le test porte sur de grandes ondulations des reflets, pas sur une silhouette dé
 
 Une relecture indépendante des deux maillages finaux par le parseur GBX confirme les normales modifiées, sans se fier aux offsets du manifeste : environ 27,7° de changement médian au LOD principal, 29° sur le capot, jusqu’à 44,5°, avec des changements sur les cinq LOD. Positions, UV, indices, matériaux et rig restent identiques. `independent-gray-normal-audit.json` conserve les mesures. L’export contient donc bien une modification substantielle des normales ; leur utilisation effective par le jeu reste inexpliquée. Il serait injustifié d’annoncer un recalcul moteur comme cause établie ou de demander simplement une nouvelle hausse d’intensité. Le mode expérimental reste exclu des fonctionnalités de production ; le volume géométrique issu de la hauteur conserve la validation utilisateur antérieure.
 
-Les tests automatisés vérifient gradients, conventions, reconstruction numérique, masques, sources 16 bits, formats, sauvegarde et mutations exactes du maillage. Ils ne remplacent pas un test du moteur Trackmania. Aucune nouvelle validation en course n’est annoncée avant ce retour.
+Les tests automatisés vérifient gradients, conventions, reconstruction numérique, masques, sources 16 bits, formats, sauvegarde et mutations exactes du maillage. Ils ne remplacent pas un test du moteur Trackmania. L’interprétation initiale des normales d’Occulte est corrigée par le dernier essai isolé de l’utilisateur.
+
+## Volume par famille et pièces mobiles, 19 octobre 2026
+
+Les trois marqueurs correspondent aux attaches natives FAirBrake (18), RWing (26)
+et LWing (25), dans `_SkinDmg_Skin`. Leur absence de volume venait du filtre
+`Body`, sans constituer une impossibilité du format. Le template `full` densifie
+les trois familles opaques sur les cinq LOD, garde les attributs d’origine comme
+préfixes et conserve les attaches des sommets ajoutés. Le moteur soude les coutures
+par famille et attache ; il ne transfère plus le déplacement entre pièces mobiles.
+
+La hauteur est échantillonnée puis écrite dans les positions natives de
+`MainBody.Mesh.gbx`. Ce volume n’est pas un layer Height interprété par TM.
+L’ouverture transmet la famille active, les textures n’affectent qu’elle et les
+volumes précédents des autres familles restent intacts. Les recettes UV copient
+les attributs déformés pour conserver les séparations du dessous et l’atlas organisé.
+Les signatures, plages, valeurs finies, quotas et empreintes sont contrôlés ;
+les modèles non reconnus échouent explicitement. L’extension des pièces articulées
+est testée dans le GBX et l’aperçu, avec validation du comportement en course encore
+à effectuer par l’utilisateur.

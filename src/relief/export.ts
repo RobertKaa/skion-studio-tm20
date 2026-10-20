@@ -205,7 +205,7 @@ export async function prototypeSurfaceFiles(files: readonly Skin3DFile[]): Promi
 export function reliefPrototypeName(name: string, result: ReliefPrototypeResult): string {
   const base = [...name.replace(/[\\/:*?"<>|]/g, '')].filter(character => character.charCodeAt(0) >= 32).join('').trim().slice(0, 100) || 'Skin';
   const label = result.options.surfaceMethod ? `relief-v1.0${result.options.diagnostic ? '-diagnostic-volume' : ''}` : result.options.diagnostic ? 'prototype-diagnostic-volume' : 'prototype-relief';
-  return `${base}-${label}-${result.options.scope}-${result.options.mode}-${result.options.strengthMm}mm-${result.options.textureResolution}px`;
+  return `${base}-${label}${result.options.family?`-${result.options.family}`:''}-${result.options.scope}-${result.options.mode}-${result.options.strengthMm}mm-${result.options.textureResolution}px`;
 }
 
 /** A prototype archive stays separate from local projects, and can be reopened in the app. */
@@ -238,7 +238,7 @@ export async function exportReliefPrototype(
     result.options.surfaceMethod ? 'TEXTURES ET RELIEF v1.0 — SKION STUDIO' : 'PROTOTYPE DE RELIEF — SKION STUDIO',
     `Source : ${sourceName.slice(0, 160)}`,
     `Mode : ${result.options.mode} ; amplitude : ${result.options.strengthMm} mm.`,
-    `Zone : ${result.options.scope === 'vehicle' ? 'voiture entière' : 'capot'} ; textures : ${result.options.textureResolution} px.`,
+    `Zone : ${result.options.scope === 'vehicle' ? `surface entière ${result.options.family??'skin'}` : 'capot'} ; textures : ${result.options.textureResolution} px.`,
     `Export jeu : couleur Skin jusqu’à ${profile.colourResolution} px ; couleurs Details/Wheels jusqu’à ${profile.secondaryColourResolution} px ; normales Skin jusqu’à ${profile.bodyNormalResolution} px.`,
     `Finitions Skin jusqu’à ${profile.bodyFinishResolution} px ; finitions secondaires/vernis jusqu’à ${profile.finishResolution} px ; normales Details/Wheels jusqu’à ${profile.detailsWheelNormalResolution} px ; illumination jusqu’à ${profile.illuminationResolution} px.`,
     `Optimisation supplémentaire : ${profile.fallbackUsed.length ? profile.fallbackUsed.join(', ') : 'aucune'}.`,
@@ -248,14 +248,13 @@ export async function exportReliefPrototype(
     `Sommets déplacés : ${result.stats.affectedVertices} ; déplacement maximal : ${result.stats.maxDisplacementMm.toFixed(3)} mm.`,
     ...(result.options.diagnostic ? ['TEST DE DIAGNOSTIC : volume volontairement exagéré. Comparer le profil et les ombres avec le témoin sans relief. Utiliser le test géométrique gris pour isoler la géométrie.'] : []),
     '',
-    result.options.surfaceMethod ? 'Surface densifiée Body, cinq niveaux de détail, préparée sans Blender. Le volume de galets a été confirmé en course sur PC le 14 octobre 2026 avec un ZIP local.' : 'Ce ZIP contient une voiture 3D expérimentale. Il ne remplace aucun projet enregistré dans l’app.',
+    result.options.surfaceMethod ? 'Surface densifiée, cinq niveaux de détail. Le volume Body a déjà été confirmé en course avec un ZIP local ; l’extension aux pièces articulées et aux autres familles reste à vérifier en jeu.' : 'Ce ZIP contient une voiture 3D expérimentale. Il ne remplace aucun projet enregistré dans l’app.',
     'Le volume est écrit dans MainBody.Mesh.gbx ; preview.glb représente les mêmes positions.',
-    'Le volume concerne les surfaces fixes Skin ; les roues et les articulations gardent leur géométrie.',
-    'En mode voiture entière, les couleurs, finitions et normales sont répétées dans les atlas Skin, Details et Wheels.',
+    'Le volume et les nouvelles textures ciblent uniquement la famille sélectionnée. Les volumes précédents des autres familles sont conservés.',
+    'Les attaches des pièces mobiles sont conservées ; le volume ne remplace pas le squelette ni les animations.',
     'Les raccords du volume sont protégés. La taille et l’orientation du motif peuvent varier selon les UV des pièces.',
-    'Les modes normal/combined essaient le shader DetailsDmgNormal avec les textures Skin.',
-    'Le rendu du vernis change avec ce shader. Son interprétation par Trackmania reste à vérifier.',
-    'Le carbone par normales a été testé uniquement depuis un ZIP local : son relief est visible dans le garage, mais peu perceptible en course. Le passage par un Club n’explique pas ce résultat.',
+    'Carrosserie : seul le volume géométrique a été confirmé en course ; les normales de texture ne sont pas proposées dans l’atelier. Détails/Roues conservent leurs normales BC5.',
+    'Le volume est intégré au maillage avant l’export ; sa présence dans le fichier ne garantit pas un relief perceptible en course.',
     'Chaque export utilise vos propres réglages : contrôlez le résultat dans le garage puis en course.',
     'Privilégier l’import direct du ZIP local pour les essais 3D. Des objets de deux anciens skins ont réapparu après réimport local, mais sont restés absents via un Club ; la cause et le fichier effectivement distribué restent à vérifier.',
     'Ce retour sur les anciens skins ne valide pas le partage de ce prototype via les Clubs. La compatibilité console reste à vérifier.',

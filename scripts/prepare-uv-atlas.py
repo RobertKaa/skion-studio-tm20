@@ -15,8 +15,13 @@ _,parse,Gbx,_,Dec3N,helpers=p.setup_parser(p.PARSER)
 from construct import Container
 guides=json.loads((WORK/'guides.json').read_text(encoding='utf8'))
 LAYOUTS=['stock','underbody-panel-v1','independent-v1']
+FULL=len(sys.argv)>2 and sys.argv[2]=='full'
+SERIES=('full',)if FULL else(False,True)
 def sha(raw):return hashlib.sha256(raw).hexdigest()
 def source(layout,dense,variant):
+ if dense=='full':
+  path=ROOT/'public/models/relief/full'/(variant+'.Mesh.gbx')if layout=='stock'else ROOT/'work/full-surface-volume'/(layout+'-'+variant+'.Mesh.gbx')
+  return path.read_bytes()
  raw=(ROOT/'public/models/relief'/('dense' if dense else '')/(variant+'.Mesh.gbx')).read_bytes()
  if layout!='stock':
   base=ROOT/'public/models'/('underbody-panel' if layout=='underbody-panel-v1' else 'details-sides')
@@ -71,7 +76,7 @@ def attrs_bytes(stream):
 if sys.argv[1]=='scan':
  bounds={layout:{f:{part['id']:dict(part['bounds']) for part in families[f]} for f in families} for layout,families in guides.items()}
  for layout in LAYOUTS:
-  for dense in (False,True):
+  for dense in SERIES:
    data=parse(source(layout,dense,'standard'));assert not data._errors
    solid=data.body[0x090bb000];assignments={}
    for vi,f in visuals(solid).items():
@@ -83,22 +88,25 @@ if sys.argv[1]=='scan':
     assignments[str(vi)]={'family':f,'owners':owners}
    (WORK/f'{layout}-{dense}.json').write_text(json.dumps(assignments,separators=(',',':')))
    print('scanned',layout,dense,flush=True)
- (ROOT/'src/assets/uvAtlasBounds.json').write_text(json.dumps(bounds,separators=(',',':')),encoding='utf8')
+ if not FULL:(ROOT/'src/assets/uvAtlasBounds.json').write_text(json.dumps(bounds,separators=(',',':')),encoding='utf8')
 else:
  plans=json.loads((WORK/'plans.json').read_text());OUT.mkdir(parents=True,exist_ok=True)
  blob=bytearray();dedup={};manifest={'version':1,'sources':[]}
+ if FULL:
+  manifest=json.loads((OUT/'manifest.json').read_text());assert not any('-full-'in s['id']for s in manifest['sources']),'Full recipes already generated'
+  blob=bytearray((OUT/'recipes.bin').read_bytes())
  def store(raw):
   key=sha(raw)
   if key not in dedup:dedup[key]={'offset':len(blob),'length':len(raw),'sha256':key};blob.extend(raw)
   return dedup[key]
  for layout in LAYOUTS:
-  for dense in (False,True):
+  for dense in SERIES:
    assignments=json.loads((WORK/f'{layout}-{dense}.json').read_text())
    for variant in ('standard','normal'):
     raw=source(layout,dense,variant);original=parse(raw);assert not original._errors
     changed=copy.deepcopy(original);solid=changed.body[0x090bb000];records=[]
     for vi,f in visuals(solid).items():
-     visual=solid.visuals[vi];st,attrs=helpers.visual_stream(visual);old=copy.deepcopy(st.Data);count=st.numVertices;indices=helpers.triangle_indices(visual);assigned={};used={};out=[];mapping=list(range(count));uv=old[attrs['TexCoord0']]
+     visual=solid.visuals[vi];st,attrs=helpers.visual_stream(visual);old=[list(rows)for rows in st.Data];count=st.numVertices;indices=helpers.triangle_indices(visual);assigned={};used={};out=[];mapping=list(range(count));uv=old[attrs['TexCoord0']]
      placement=plans[layout][f];owners=assignments[str(vi)]['owners'];choose=classifier(guides[layout][f])
      for at in range(0,len(indices),3):
       k=owners[at//3];matrix=placement[guides[layout][f][k]['id']]['matrix']
@@ -108,7 +116,8 @@ else:
         target=index if index not in used else len(mapping)
         if target==len(mapping):
          mapping.append(index)
-         for a in range(len(st.Data)):st.Data[a].append(copy.deepcopy(old[a][index]))
+         for a in range(len(st.Data)):
+          row=old[a][index];st.Data[a].append(Container((k,row[k])for k in 'xyzw'if k in row)if isinstance(row,dict)else list(row))
         used[index]=True;assigned[key]=target
         a,b,c,d,e,ff=matrix;u,v=uv[index].x,1-uv[index].y;st.Data[attrs['TexCoord0']][target]=Container(x=a*u+c*v+e,y=1-(b*u+d*v+ff))
        out.append(assigned[key])

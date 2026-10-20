@@ -188,10 +188,7 @@ assert(distantVertices > 4000, 'Side/rear fixed-body surfaces receive real geome
 assert(pinnedVertices > 100, 'Whole Body scope preserves many real animated interfaces');
 for (let byte = 0; byte < wholeVehicle.project.mesh.length; byte++) if (!allowedWholeBytes[byte]) assert.equal(wholeVehicle.project.mesh[byte], template.variants.normal[byte], 'Whole vehicle keeps all UVs, blend weights, joints and undeformed model parts');
 const wholeNormalFiles = wholeVehicle.project.passthrough.filter(entry => /^(?:Skin|Details|Wheels)_N\.dds$/i.test(entry.name));
-assert.equal(wholeNormalFiles.length, 3, 'Full vehicle binds the normal texture to body, details and wheels');
-assert.deepEqual(wholeNormalFiles[0].data, wholeNormalFiles[1].data);
-assert.deepEqual(wholeNormalFiles[0].data, wholeNormalFiles[2].data);
-assert.notEqual(wholeNormalFiles[0].data, wholeNormalFiles[1].data, 'Normal file arrays are independent and editable');
+assert.deepEqual(wholeNormalFiles.map(f=>f.name), ['Skin_N.dds'], 'A selected family never replaces another family’s normal texture');
 const fullNormalOnly = await buildReliefPrototype({ template, mode: 'normal', scope: 'vehicle', textureResolution: 4096, strengthMm: 8, normalAtlas: slopeNormal });
 assert.deepEqual(fullNormalOnly.project.mesh, template.variants.normal, 'Whole-vehicle normals leave all mesh positions intact');
 assert(fullNormalOnly.normalAtlas!.data.some((value, index) => index % 4 === 0 && createHoodMask(template, 8).data[index + 3] === 0 && value < 128), 'Whole vehicle normals remain visible outside former capot mask');

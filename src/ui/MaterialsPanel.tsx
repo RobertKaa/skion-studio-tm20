@@ -397,15 +397,15 @@ export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, 
             {channel === 'roughmetal' && <p className="hint">Image combinée : rugosité en rouge, métal en vert.</p>}
             {channel === 'normal' && <><label className="material-normal-convention"><input type="checkbox" aria-label="Normal DirectX (Y inversé)" checked={source.invert} onChange={(event) => updateTexture(channel, { ...source, invert: event.target.checked })} />Normal DirectX (Y inversé)</label><p className="hint">OpenGL par défaut. Activez cette option pour une image de normales DirectX.</p></>}
             <span className="material-channel-usage">{channel==='color'||channel==='emission'?'Couleur · sRGB':channel==='normal'?'Directions XYZ · OpenGL / DirectX':'Données numériques · sans correction de couleur'}</span>
-            {channel === 'normal' && family === 'skin' && <p className="hint">Carrosserie : export standard sans normales personnalisées. Pour un relief en course, utilisez une hauteur et préparez le volume 3D dans Réglages.</p>}
-            {channel === 'height' && <p className="hint">Clair : bosses ; sombre : creux. Réglages permet de choisir le niveau neutre, le contraste et de préparer le volume du modèle exporté.</p>}
+            {channel === 'normal' && family === 'skin' && <p className="hint">Carrosserie : seul le volume géométrique a été confirmé en course. Estimez une hauteur depuis ces normales dans Réglages, puis préparez le volume 3D.</p>}
+            {channel === 'height' && <p className="hint">Clair : bosses ; sombre : creux. {family==='skin'?'Cette hauteur peut déformer la carrosserie dans l’atelier Volume 3D.':'Cette hauteur est convertie en normales pour le jeu. Le volume 3D permet aussi de déformer les pièces de cette famille.'}</p>}
             <div className="material-source-actions"><button type="button" className="btn btn-sm" onClick={() => requestImage(channel)}>Remplacer</button><button type="button" className="btn btn-sm" onClick={() => updateTexture(channel, null)}>Retirer</button></div>
           </div>;
         })}
         <label className="material-select-row">Ajouter une image<select aria-label="Ajouter une image à un canal" value="" onChange={(event) => { if (event.target.value) requestImage(event.target.value as MaterialChannel); }}>
           <option value="">Choisir un canal…</option>{CHANNELS.filter((channel) => !draft.textures[channel]).map((channel) => <option key={channel} value={channel}>{CHANNEL_LABELS[channel]}</option>)}
         </select></label>
-        <p className="hint">Les sources restent dans le projet. Une hauteur seule ne modifie pas le ZIP de la voiture : préparez puis appliquez le volume 3D dans Réglages.</p>
+        <p className="hint">{family==='skin'?'Les sources restent dans le projet. Préparez et appliquez le volume 3D dans Réglages pour obtenir une déformation visible en jeu.':'Les normales, importées ou calculées depuis la hauteur, sont exportées directement pour les Détails et les Roues.'}</p>
       </fieldset>
     </details>
     <input ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp,.exr" hidden aria-label="Image pour le canal de matériau" disabled={unavailable} onChange={(event) => {

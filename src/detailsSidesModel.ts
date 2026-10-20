@@ -119,6 +119,26 @@ export async function splitDetailsSidesModel(project:Skin3DProject,layout:Detail
   if(project.detailsLayout===layout)return project;
   if(project.detailsLayout)return fail();
   if(!project.preview)return fail();
+  // Full-family relief needs UV duplication that copies its current deformation.
+  if(project.mesh.length>11*1024*1024){const {splitSurfaceLayout}=await import('./surfaceLayouts');return splitSurfaceLayout(project,layout);}
   const assets=await loadPrepared(layout),mesh=await patchDetailsSidesMesh(project.mesh,assets),preview=patchDetailsSidesPreview(project.preview,assets.preview);
   return {...project,mesh,preview,detailsLayout:layout};
+}
+
+/** Restore source UVs before a new relief operation, without losing Body volume. */
+export async function restoreDetailsSidesModel(project:Skin3DProject,variant:'standard'|'normal'):Promise<Skin3DProject>{
+  if(!project.detailsLayout)return project;
+  if(project.mesh.length>11*1024*1024){const {restoreSurfaceLayout}=await import('./surfaceLayouts');return restoreSurfaceLayout(project,variant);}
+  const assets=await loadPrepared(project.detailsLayout),source=assets.manifest.sources.find(s=>s.resultByteLength===project.mesh.length&&s.id.endsWith(variant));
+  if(!source)return fail();
+  const {loadPreparedReliefTemplate}=await import('./relief/template'),template=await loadPreparedReliefTemplate(source.id.startsWith('dense-'));
+  const original=template.variants[variant],mesh=new Uint8Array(source.byteLength);let from=0,to=0;
+  for(const p of source.patches){
+    const size=p.offset-to;mesh.set(project.mesh.subarray(from,from+size),to);from+=size;to+=size;
+    await verify(project.mesh.subarray(from,from+p.dataLength),p.dataSha256);
+    mesh.set(original.subarray(p.offset,p.offset+p.length),to);to+=p.length;from+=p.dataLength;
+  }
+  mesh.set(project.mesh.subarray(from),to);
+  const replay=await patchDetailsSidesMesh(mesh,assets);if(replay.length!==project.mesh.length||replay.some((v,i)=>v!==project.mesh[i]))return fail();
+  const {detailsLayout,...rest}=project;void detailsLayout;return{...rest,mesh};
 }

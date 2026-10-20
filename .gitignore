@@ -39,6 +39,8 @@ __pycache__/
 !/scripts/test-material-render.ts
 !/scripts/test-material-projection.ts
 !/scripts/test-material-proportions.ts
+!/scripts/test-texture-background.ts
+!/scripts/test-texture-background-surface.tsx
 !/scripts/test-material-import.ts
 !/scripts/test-material-exr.ts
 !/scripts/test-material-library.ts
@@ -129,3 +131,7 @@ __pycache__/
 !/scripts/test-material-relief.ts
 !/scripts/test-vertex-normal-diagnostic.ts
 !/scripts/test-relief-layer-volume.ts
+!/scripts/test-surface-volume.ts
+!/scripts/prepare-surface-relief.py
+!/scripts/prepare-surface-layouts.py
+!/scripts/dense_heightfield_core.py

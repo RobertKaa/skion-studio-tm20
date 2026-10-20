@@ -7,7 +7,8 @@ interface AssetRange { offset:number; length:number; sha256:string }
 interface CopyRange { source:number; target:number; stride:number; name:string }
 interface VisualRecipe { visualIndex:number; family:'skin'|'details'|'wheels'; oldCount:number; newCount:number;
   offset:number; length:number; resultLength:number; structureSha256:string; mapping:AssetRange; indices:AssetRange; uv:AssetRange;
-  copies:CopyRange[]; fragments:{offset:number;asset:AssetRange}[] }
+  copies:CopyRange[]; fragments:{offset:number;asset:AssetRange}[];
+  staticPreview?:Record<string,{asset:AssetRange;componentType:5126;type:'VEC2'|'VEC3'}> }
 interface SourceRecipe { id:string; layout:AtlasSourceLayout; byteLength:number; resultByteLength:number; visuals:VisualRecipe[] }
 export interface UvModelRecipes { version:1; sources:SourceRecipe[]; asset:{file:string;byteLength:number;sha256:string} }
 export interface PreparedUvRecipes { manifest:UvModelRecipes; bytes:Uint8Array }
@@ -15,7 +16,7 @@ const MAX=64*1024*1024,integer=(v:number,max=MAX)=>Number.isSafeInteger(v)&&v>=0
 const fail=():never=>{throw new Error('Ce modèle ne correspond pas aux maillages Stadium compatibles avec la réorganisation UV. Le projet initial est conservé.');};
 async function verify(bytes:Uint8Array,sha:string){const hash=await crypto.subtle.digest('SHA-256',bytes.slice().buffer);if([...new Uint8Array(hash)].map(b=>b.toString(16).padStart(2,'0')).join('')!==sha)fail();}
 export function validateUvModelRecipes(m:UvModelRecipes){
-  if(!m||m.version!==1||!m.asset||m.asset.file!=='recipes.bin'||!integer(m.asset.byteLength)||!m.asset.byteLength||!/^[a-f0-9]{64}$/.test(m.asset.sha256)||!Array.isArray(m.sources)||m.sources.length!==12)fail();
+  if(!m||m.version!==1||!m.asset||m.asset.file!=='recipes.bin'||!integer(m.asset.byteLength)||!m.asset.byteLength||!/^[a-f0-9]{64}$/.test(m.asset.sha256)||!Array.isArray(m.sources)||![4,12,18].includes(m.sources.length))fail();
   const asset=(a:AssetRange)=>!!a&&integer(a.offset)&&integer(a.length)&&a.length>0&&a.offset+a.length<=m.asset.byteLength&&/^[a-f0-9]{64}$/.test(a.sha256);
   for(const s of m.sources){
     if(!validAtlasSource(s.layout)||!integer(s.byteLength)||!s.byteLength||!integer(s.resultByteLength)||!Array.isArray(s.visuals)||!s.visuals.length||s.visuals.length>64)fail();
@@ -23,6 +24,10 @@ export function validateUvModelRecipes(m:UvModelRecipes){
     for(const v of s.visuals){
       if(!integer(v.visualIndex,1000)||ids.has(v.visualIndex)||!['skin','details','wheels'].includes(v.family)||!integer(v.oldCount,65535)||!v.oldCount||!integer(v.newCount,65535)||v.newCount<v.oldCount||!integer(v.offset)||v.offset<end||!integer(v.length)||!v.length||v.offset+v.length>s.byteLength||!integer(v.resultLength)||!v.resultLength||!/^[a-f0-9]{64}$/.test(v.structureSha256)||!asset(v.mapping)||v.mapping.length!==v.newCount*2||!asset(v.uv)||v.uv.length!==v.newCount*8||!asset(v.indices)||v.indices.length%12||!Array.isArray(v.copies)||v.copies.length>12||!Array.isArray(v.fragments)||v.fragments.length>16)fail();
       ids.add(v.visualIndex);end=v.offset+v.length;expected+=v.resultLength-v.length;
+      if(v.staticPreview){
+        if(!v.staticPreview.POSITION||!v.staticPreview.NORMAL||!v.staticPreview.TEXCOORD_0||Object.keys(v.staticPreview).length>4)fail();
+        for(const [name,a]of Object.entries(v.staticPreview))if(!['POSITION','NORMAL','TEXCOORD_0','TEXCOORD_1'].includes(name)||a.componentType!==5126||a.type!==(name.startsWith('TEXCOORD')?'VEC2':'VEC3')||!asset(a.asset)||a.asset.length!==v.newCount*(a.type==='VEC2'?8:12))fail();
+      }
       const targetRanges:[number,number][]=[];
       for(const c of v.copies){if(!['Position','Normal','BlendIndices','TexCoord1','TangentU'].includes(c.name)||!integer(c.source)||!integer(c.target)||![4,8,12,16].includes(c.stride)||c.source+c.stride*v.oldCount>v.length||c.target+c.stride*v.newCount>v.resultLength)fail();targetRanges.push([c.target,c.target+c.stride*v.newCount]);}
       for(const f of v.fragments){if(!integer(f.offset)||!asset(f.asset)||f.offset+f.asset.length>v.resultLength)fail();targetRanges.push([f.offset,f.offset+f.asset.length]);}
@@ -55,7 +60,8 @@ export async function patchNativeUvMesh(mesh:Uint8Array,layout:AtlasSourceLayout
     from=v.offset+v.length;to+=v.resultLength;
   }output.set(mesh.subarray(from),to);return{mesh:output,recipe};
 }
-export function patchNativeUvPreview(source:ArrayBuffer,recipe:SourceRecipe,prepared:PreparedUvRecipes):ArrayBuffer {
+export function patchNativeUvPreview(source:ArrayBuffer,recipe:SourceRecipe,prepared:PreparedUvRecipes,rememberSourceUv=true):ArrayBuffer {
+  validateUvModelRecipes(prepared.manifest);
   const {gltf,binStart,binSize}=embeddedGlbData(source),json=structuredClone(gltf),chunks:Uint8Array[]=[new Uint8Array(source,binStart,binSize)];let length=binSize,replaced=0;
   const append=(bytes:Uint8Array,accessor:Record<string,unknown>)=>{
     const pad=(4-length%4)%4;if(pad){chunks.push(new Uint8Array(pad));length+=pad;}
@@ -66,6 +72,11 @@ export function patchNativeUvPreview(source:ArrayBuffer,recipe:SourceRecipe,prep
   const used=new Set<number>();
   for(const node of json.nodes??[]){const v=recipe.visuals.find(r=>r.visualIndex===node.extras?.nativeVisualIndex);if(!v||node.mesh===undefined||used.has(node.mesh))continue;used.add(node.mesh);
     const mesh=json.meshes[node.mesh];if(mesh?.primitives?.length!==1)fail();
+    if(v.staticPreview){
+      const primitive=mesh.primitives[0];
+      primitive.attributes=Object.fromEntries(Object.entries(v.staticPreview).map(([name,a])=>[name,append(data(a.asset,prepared),{componentType:a.componentType,type:a.type,count:v.newCount})]));
+      primitive.indices=append(data(v.indices,prepared),{componentType:5125,count:v.indices.length/4,type:'SCALAR'});replaced++;continue;
+    }
     const restored=mesh.primitives[0];
     // A return to native UVs retains the chart seams and the alternate UV set.
     // Switching back can therefore reuse the same geometry and binary buffer.
@@ -85,7 +96,7 @@ export function patchNativeUvPreview(source:ArrayBuffer,recipe:SourceRecipe,prep
         const accessor={...a,count:v.newCount};delete accessor.bufferView;delete accessor.byteOffset;
         const copied=append(bytes,accessor);if(name==='TEXCOORD_0')originalUv=copied;else attributes[name]=copied;
       }
-      if(originalUv===undefined)return fail();attributes._SOURCE_UV=originalUv;
+      if(originalUv===undefined)return fail();if(rememberSourceUv)attributes._SOURCE_UV=originalUv;
       attributes.TEXCOORD_0=append(data(v.uv,prepared),{componentType:5126,count:v.newCount,type:'VEC2'});
       primitive.attributes=attributes;primitive.indices=append(data(v.indices,prepared),{componentType:5125,count:v.indices.length/4,type:'SCALAR'});
     }replaced++;
@@ -109,7 +120,7 @@ export async function restoreNativeUvMesh(mesh:Uint8Array,original:Uint8Array,la
   const result=original.slice();let shift=0;
   for(const v of recipe.visuals){
     const mapping=new DataView(prepared.bytes.buffer,prepared.bytes.byteOffset+v.mapping.offset,v.mapping.length);
-    for(let i=0;i<v.oldCount;i++)if(mapping.getUint16(i*2,true)!==i)fail();
+    if(!v.staticPreview)for(let i=0;i<v.oldCount;i++)if(mapping.getUint16(i*2,true)!==i)fail();
     for(const c of v.copies)result.set(mesh.subarray(v.offset+shift+c.target,v.offset+shift+c.target+c.stride*v.oldCount),v.offset+c.source);
     shift+=v.resultLength-v.length;
   }
@@ -137,7 +148,7 @@ export async function restoreNativeModel(project:Skin3DProject):Promise<Skin3DPr
   if(!project.uvAtlas)return project;if(!project.preview)return fail();
   const prepared=await loadUvModelRecipes(),layout=project.detailsLayout??'stock';
   const recipe=prepared.manifest.sources.find(s=>s.layout===layout&&s.resultByteLength===project.mesh.length);if(!recipe)return fail();
-  const template=await loadPreparedReliefTemplate(recipe.id.includes('-True-'));
+  const template=await loadPreparedReliefTemplate(recipe.id.includes('-full-')?'full':recipe.id.includes('-True-'));
   let original:Skin3DProject={name:project.name,mesh:template.variants[recipe.id.endsWith('-normal')?'normal':'standard'],preview:template.preview.slice().buffer,passthrough:[]};
   if(project.detailsLayout)original=await splitDetailsSidesModel(original,project.detailsLayout);
   const {uvAtlas,...rest}=project;void uvAtlas;

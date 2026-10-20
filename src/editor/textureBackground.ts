@@ -2,9 +2,16 @@ import { FabricImage, Group, Rect, type StaticCanvas } from 'fabric';
 import { UNDERBODY_PANEL_LAYOUT, PANEL_BOUNDS, PANEL_SCALE, PANEL_SOURCE, panelPoint } from '../underbodyPanel';
 import type { DetailsLayout } from '../detailsSides';
 import { drawRealAtlas, drawSourceAtlas, realAtlasLayout, validAtlasSource, type AtlasSourceLayout } from '../realUvAtlas';
+import { createMaterialDefinition } from '../materials/types';
+import { createMaterialProjector } from '../materials/projection';
+import type { ProjectionTriangle } from '../three/decalProjection';
 
 export type BackgroundFit = 'cover' | 'contain' | 'stretch';
+export interface BackgroundPlacement { scale: number; angle: number; offsetX: number; offsetY: number }
+export const DEFAULT_BACKGROUND_PLACEMENT: Readonly<BackgroundPlacement> = { scale: 1, angle: 0, offsetX: 0, offsetY: 0 };
 export interface TextureBackgroundSettings {
+  projection?: 'surface';
+  placement?: BackgroundPlacement;
   uvAtlas?: { family:'skin'|'details'|'wheels'; source:AtlasSourceLayout; reverse?:boolean };
   name: string;
   fit: BackgroundFit;
@@ -21,9 +28,15 @@ export function textureBackgroundName(name: string): string {
 export function validTextureBackgroundSettings(value: unknown): value is TextureBackgroundSettings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const data = value as Record<string, unknown>;
+  const placement = data.placement as Record<string, unknown> | undefined;
+  const bounded = (value: unknown, min: number, max: number) => typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
   return typeof data.name === 'string' && data.name.length > 0 && data.name.length <= 160 &&
     data.name === textureBackgroundName(data.name) && ['cover', 'contain', 'stretch'].includes(String(data.fit)) &&
     typeof data.colorOpacity === 'number' && Number.isFinite(data.colorOpacity) && data.colorOpacity >= 0 && data.colorOpacity <= 1 &&
+    (data.projection === undefined || data.projection === 'surface' && data.layout === undefined && data.uvAtlas === undefined) &&
+    (placement === undefined || data.projection === 'surface' && !!placement && typeof placement === 'object' && !Array.isArray(placement) &&
+      Object.keys(placement).every(key => ['scale', 'angle', 'offsetX', 'offsetY'].includes(key)) &&
+      bounded(placement.scale, .1, 4) && bounded(placement.angle, -180, 180) && bounded(placement.offsetX, -2048, 2048) && bounded(placement.offsetY, -2048, 2048)) &&
     (data.layout === undefined || data.layout === 'independent-v1' || data.layout === UNDERBODY_PANEL_LAYOUT) &&
     (data.uvAtlas===undefined||!!data.uvAtlas&&typeof data.uvAtlas==='object'&&['skin','details','wheels'].includes((data.uvAtlas as Record<string,unknown>).family as string)&&validAtlasSource((data.uvAtlas as Record<string,unknown>).source)&&((data.uvAtlas as Record<string,unknown>).reverse===undefined||typeof (data.uvAtlas as Record<string,unknown>).reverse==='boolean'));
 }
@@ -32,13 +45,33 @@ function backgroundGroup(canvas: StaticCanvas): BackgroundGroup | null {
   const group = canvas.backgroundImage as BackgroundGroup | undefined;
   if (!(group instanceof Group) || !validTextureBackgroundSettings(group.textureBackground)) return null;
   const children = group.getObjects();
-  return children.length === (group.textureBackground.layout||group.textureBackground.uvAtlas ? 3 : 2) && children[0] instanceof FabricImage &&
-    (!(group.textureBackground.layout||group.textureBackground.uvAtlas) || children[1] instanceof FabricImage) && children.at(-1) instanceof Rect ? group : null;
+  return children.length === (group.textureBackground.layout||group.textureBackground.uvAtlas||group.textureBackground.projection ? 3 : 2) && children[0] instanceof FabricImage &&
+    (!(group.textureBackground.layout||group.textureBackground.uvAtlas||group.textureBackground.projection) || children[1] instanceof FabricImage) && children.at(-1) instanceof Rect ? group : null;
 }
 
 export function readTextureBackground(canvas: StaticCanvas): TextureBackgroundInfo | null {
   const group = backgroundGroup(canvas);
-  return group ? { ...group.textureBackground, src: (group.item(group.textureBackground.uvAtlas?1:0) as FabricImage).getSrc() } : null;
+  return group ? { ...group.textureBackground, src: (group.item(group.textureBackground.uvAtlas||group.textureBackground.projection?1:0) as FabricImage).getSrc() } : null;
+}
+
+const bodyGeometry = new WeakMap<readonly ProjectionTriangle[], readonly ProjectionTriangle[]>();
+function surfaceBackground(image: FabricImage, width: number, height: number, settings: TextureBackgroundSettings, geometry: readonly ProjectionTriangle[]) {
+  if (geometry.length > 500000) throw new Error('Modèle trop complexe pour adapter l’image de fond.');
+  let body = bodyGeometry.get(geometry);
+  if (!body) { body = geometry.filter(triangle => triangle.family === 'skin'); bodyGeometry.set(geometry, body); }
+  if (!body.length) throw new Error('Attendez le chargement de la carrosserie 3D pour adapter l’image de fond.');
+  const original = image.getOriginalSize();
+  const source = document.createElement('canvas'); source.width = original.width; source.height = original.height;
+  const target = document.createElement('canvas');
+  const size = Math.min(4096, Math.max(width, height, original.width, original.height)); target.width = target.height = size;
+  try {
+    source.getContext('2d')!.drawImage(image.getElement(), 0, 0);
+    const placement = settings.placement ?? DEFAULT_BACKGROUND_PLACEMENT;
+    const definition = createMaterialDefinition();
+    definition.transform = { ...definition.transform, projection: 'surface', mode: settings.fit, size: 256 * placement.scale, angle: placement.angle, offsetX: placement.offsetX, offsetY: placement.offsetY };
+    createMaterialProjector({ definition, family: 'skin', regions: [], exclusions: [] }, body, size, source)!.place(target, source);
+    return new FabricImage(target, { left: 0, top: 0, originX: 'left', originY: 'top', scaleX: width / size, scaleY: height / size, strokeWidth: 0, objectCaching: false });
+  } finally { source.width = source.height = 0; }
 }
 
 function fitImage(image: FabricImage, width: number, height: number, fit: BackgroundFit, grouped = false) {
@@ -76,7 +109,15 @@ function panelBackground(image:FabricImage,width:number,height:number,fit:Backgr
 
 /** Fabric draws its background image above its background color. Keep the image
  * and the translucent color together, below ordinary layers, at atlas precision. */
-export function createTextureBackground(image: FabricImage, width: number, height: number, color: string, settings: TextureBackgroundSettings): Group {
+export function createTextureBackground(image: FabricImage, width: number, height: number, color: string, settings: TextureBackgroundSettings, geometry: readonly ProjectionTriangle[] = []): Group {
+  if (settings.projection) {
+    const visible = surfaceBackground(image, width, height, settings, geometry);
+    const hidden = new FabricImage(image.getElement(), { left: 0, top: 0, originX: 'left', originY: 'top', scaleX: 1 / Math.max(1, image.width), scaleY: 1 / Math.max(1, image.height), visible: false, objectCaching: false });
+    const overlay = new Rect({ left: 0, top: 0, originX: 'left', originY: 'top', width, height, strokeWidth: 0, fill: color, opacity: settings.colorOpacity, objectCaching: false });
+    const group = new Group([visible, hidden, overlay], { left: 0, top: 0, originX: 'left', originY: 'top', strokeWidth: 0, selectable: false, evented: false, objectCaching: false }) as BackgroundGroup;
+    group.textureBackground = { name: settings.name, fit: settings.fit, colorOpacity: settings.colorOpacity, projection: 'surface', ...(settings.placement ? { placement: { ...settings.placement } } : {}) };
+    return group;
+  }
   if(settings.uvAtlas){
     const {uvAtlas,...nativeSettings}=settings;
     const original=new FabricImage(image.getElement()),native=createTextureBackground(original,width,height,'#000000',{...nativeSettings,colorOpacity:0});
@@ -110,11 +151,15 @@ export function createTextureBackground(image: FabricImage, width: number, heigh
   return group;
 }
 
-export function updateTextureBackground(canvas: StaticCanvas, changes: Partial<Pick<TextureBackgroundSettings, 'fit' | 'colorOpacity'>> = {}) {
+export function updateTextureBackground(canvas: StaticCanvas, changes: Partial<Pick<TextureBackgroundSettings, 'fit' | 'colorOpacity' | 'placement'>> = {}, geometry: readonly ProjectionTriangle[] = []) {
   const group = backgroundGroup(canvas);
   if (!group) return;
   const settings = { ...group.textureBackground, ...changes };
   if (!validTextureBackgroundSettings(settings)) return;
+  if (settings.projection && (changes.placement || changes.fit && changes.fit !== group.textureBackground.fit)) {
+    const replacement = createTextureBackground(group.item(1) as FabricImage, canvas.width, canvas.height, canvas.backgroundColor as string, settings, geometry);
+    canvas.backgroundImage = replacement; group.removeAll(); group.dispose(); syncTextureBackgroundCanvas(canvas); return;
+  }
   if (changes.fit && changes.fit !== group.textureBackground.fit) {
     if(settings.uvAtlas){
       const replacement=createTextureBackground(group.item(1) as FabricImage,canvas.width,canvas.height,canvas.backgroundColor as string,settings);

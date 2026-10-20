@@ -33,6 +33,7 @@ const originalNormalPixels = normalCanvas.toDataURL();
 const definition = createMaterialDefinition(); definition.name = 'Pierre conservée'; definition.color = '#ffffff'; definition.transform.mode = 'contain';
 definition.textures.normal = { src: normalCanvas.toDataURL('image/png'), name: 'rock_normal.png', component: 'luminance', invert: false };
 definition.textures.color = { src: normalCanvas.toDataURL('image/png'), name: 'rock_color.png', component: 'luminance', invert: false };
+definition.textures.height = { src: normalCanvas.toDataURL('image/png'), name: 'rock_height.png', component: 'r', invert: false };
 const region = { key: 'piece', label: 'Pièce', polygons: [[{ x: .1, y: .1 }, { x: .2, y: .1 }, { x: .2, y: .2 }, { x: .1, y: .2 }]] };
 const material: MaterialLayer = { definition, family: 'skin', regions: [region], exclusions: [] };
 const originalMaterial = structuredClone(material);
@@ -73,7 +74,7 @@ const runtime = {
   async loadTemplate() { return template; },
   async build(options: BuildReliefOptions): Promise<ReliefPrototypeResult> {
     builds.push(options); await new Promise(resolve => setTimeout(resolve, 15));
-    return { options: { mode: options.mode, strengthMm: options.strengthMm, normalStrength: options.normalStrength ?? 1, scope: options.scope ?? 'hood', textureResolution: options.textureResolution ?? 1024, diagnostic: options.diagnostic ?? false },
+    return { options: { family:options.family, mode: options.mode, strengthMm: options.strengthMm, normalStrength: options.normalStrength ?? 1, scope: options.scope ?? 'hood', textureResolution: options.textureResolution ?? 1024, diagnostic: options.diagnostic ?? false },
       project: { mesh: new Uint8Array([1]), preview: new ArrayBuffer(1), passthrough: [], name: 'Prototype' }, normalAtlas: null,
       stats: { affectedVertices: options.mode === 'normal' ? 0 : 20, hoodVertices: 20, eligibleVertices: 20, triangleCount: 30, maxDisplacementMm: options.strengthMm, templateVariant: options.mode === 'geometry' ? 'standard' : 'normal' } };
   },
@@ -129,24 +130,24 @@ try {
   assert.equal(builds.at(-1)!.textureResolution, 2048, 'The default uses crisp 2K textures');
   assert.equal(labelled<HTMLSelectElement>('Résolution des textures du relief').value, '2048');
   assert.deepEqual([...labelled<HTMLSelectElement>('Résolution des textures du relief').options].map(option => option.value), ['1024', '2048', '4096']);
-  assert.equal(button('Toute la voiture').getAttribute('aria-pressed'), 'true');
-  assert.equal(builds.at(-1)!.mode, 'normal', 'An older material pack with normals only starts in the mode it supports');
-  assert(button('Volume').disabled && button('Les deux').disabled, 'A normal image cannot masquerade as a height map');
-  assert(host.textContent!.includes('Réimportez son ZIP avec une carte de hauteur'));
-  assert(host.textContent!.includes('Surface densifiée'));
-  assert(host.textContent!.includes('ajustez le volume'));
-  await changeInput('Intensité des normales', '1.5');
+  assert.equal(button('Toute la surface Carrosserie').getAttribute('aria-pressed'), 'true');
+  assert.equal(builds.at(-1)!.mode, 'geometry');
+  assert.equal(builds.at(-1)!.family, 'skin');
+  assert(!buttons().some(b=>['Normales','Les deux'].includes(b.textContent?.trim()??'')), 'Body offers only the game-confirmed geometry route');
+  assert(host.textContent!.includes('Carrosserie uniquement'));
+  await changeInput('Amplitude du volume', '11');
   assert(button('Exporter le skin').disabled, 'Changing a source prevents exporting an outdated result');
   await settle();
   assert.equal(material.definition.normalStrength, 1, 'Normal strength changes only the workshop copy');
   await click('Exporter le skin'); await settle();
   assert.equal(exports.length, 1); assert.equal(exports[0].sourceName, 'Pierre conservée');
   assert(host.textContent!.includes('12.3 Mo · budget 24 Mo'), 'The export reports its real size against the prudent upload budget');
-  for (const id of ['Skin_B', 'Details_B', 'Wheels_B'] as const) {
+  for (const id of ['Skin_B'] as const) {
     assert.equal(exports[0].sizes.get(id), 2048, 'Material color maps use the selected export quality');
     assert.deepEqual(exports[0].colors.get(id), [160, 128, 240, 255], 'The repeated source covers each atlas, even beyond the original selected piece mask');
   }
-  for (const id of ['Skin_R', 'Details_R', 'Wheels_R'] as const) assert.deepEqual(exports[0].colors.get(id), [definition.roughness, definition.metalness, 0, 255], 'The common finish reaches all three material families');
+  assert.deepEqual(exports[0].colors.get('Skin_R'), [definition.roughness, definition.metalness, 0, 255]);
+  for(const id of ['Details_B','Details_R','Wheels_B','Wheels_R'] as const){assert.deepEqual(exports[0].colors.get(id),[124,143,154,255]);assert.equal(exports[0].sizes.get(id),8,'Other families retain their exact texture size');}
   assert.equal(exports[0].sizes.get('Skin_I'), 8, 'Unmodified lighting maps are preserved without pointless upscaling');
   assert.deepEqual(exports[0].colors.get('Skin_I'), [124, 143, 154, 255]);
   assert.equal(material.definition.transform.mode, 'contain', 'Repeat is forced only on the temporary source copy');
@@ -164,7 +165,7 @@ try {
   assert.equal(builds.at(-1)!.scope, 'hood', 'The original capot-only experiment remains available');
   await click('Exporter le skin'); await settle();
   assert.equal(exports.at(-1)!.pixels, originalPixels, 'A selected material on the hood keeps the original texture instead of compositing it twice');
-  await click('Toute la voiture'); await changeSelect('Résolution des textures du relief', '1024'); await settle();
+  await click('Toute la surface Carrosserie'); await changeSelect('Résolution des textures du relief', '1024'); await settle();
   assert.equal(builds.at(-1)!.textureResolution, 1024);
 
   // React preserves component state during a runtime/HMR dependency refresh.
@@ -178,7 +179,7 @@ try {
   assert.equal(disposed, 1, 'Refreshing the runtime also releases the previous independent preview');
   await settle();
   assert.equal(builds.at(-1)!.textureResolution, 1024, 'The runtime refresh preserves the selected quality');
-  assert.equal(labelled<HTMLInputElement>('Intensité des normales').value, '1.5', 'React retains the workshop source settings across the effect restart');
+  assert.equal(labelled<HTMLInputElement>('Amplitude du volume').value, '11', 'React retains the workshop source settings across the effect restart');
   assert(materialSessions[1].loads > 0 && materialSessions[1].renders > 0, 'The retained material is decoded and rendered by the replacement real cache');
   assert(!button('Exporter le skin').disabled, 'A rebuilt source remains exportable after a runtime refresh');
   await click('Exporter le skin'); await settle();
@@ -208,16 +209,16 @@ try {
   const [lowHeight, highHeight] = range(carbonBuild.heightAtlas);
   assert(highHeight - lowHeight > 100, 'Carbon strand crowns generate a nonuniform numeric height atlas');
   assert.equal(carbonBuild.normalAtlas, undefined, 'Geometric carbon isolates actual volume from experimental normals');
-  assert(!button('Normales').disabled && !button('Les deux').disabled, 'Procedural carbon supports all relief modes');
-  assert(labelled<HTMLInputElement>('Intensité des normales').disabled, 'The procedural normal strength remains unavailable in geometry mode');
-  assert(host.textContent!.includes('fibres fines') && host.textContent!.includes('sommets'), 'The carbon hint explains that fine detail is limited by mesh density');
+  assert(!buttons().some(b=>['Normales','Les deux'].includes(b.textContent?.trim()??'')));
+  assert(!host.querySelector('[aria-label="Intensité des normales"]'), 'Body only exposes geometry settings');
+  assert(host.textContent!.includes('fibres fines') && host.textContent!.includes('surface densifiée'), 'The carbon hint explains that fine detail is limited by mesh density');
   await click('Exporter le skin'); await settle();
   const carbonExport = exports.at(-1)!;
   assert.equal(carbonExport.sourceName, 'Carbone tissé');
   assert.notEqual(carbonExport.pixels, originalPixels, 'Carbon has its own appearance instead of reusing the stone editor paint');
   const carbonColor = carbonExport.colors.get('Skin_B')!;
   assert(carbonColor[0] < 80 && carbonColor[1] < 80 && carbonColor[2] < 80 && carbonColor[3] === 255, 'The carbon weave uses the existing dark material palette');
-  for (const id of ['Skin_B', 'Details_B', 'Wheels_B'] as const) {
+  for (const id of ['Skin_B'] as const) {
     assert.deepEqual(carbonExport.colors.get(id), carbonColor, 'The carbon colour reaches all three vehicle material families');
     assert.equal(carbonExport.sizes.get(id), 1024);
   }
@@ -231,16 +232,7 @@ try {
   assert.equal(exports.at(-1)!.pixels, carbonExport.pixels, 'Carbon comparison keeps exactly the same woven colour');
   for (const [id, color] of carbonExport.colors) assert.deepEqual(exports.at(-1)!.colors.get(id), color, 'Comparison keeps carbon finishes and untouched editor maps as well');
   await click('Revenir au relief'); await settle();
-  await click('Normales'); await settle();
-  const carbonNormals = builds.at(-1)!;
-  assert.equal(carbonNormals.mode, 'normal'); assert(carbonNormals.normalAtlas, 'Procedural carbon supplies a tangent normal atlas in normal mode');
-  const [lowNormal, highNormal] = range(carbonNormals.normalAtlas);
-  assert(highNormal - lowNormal > 10, 'The carbon normal atlas contains actual strand slopes');
-  assert(!labelled<HTMLInputElement>('Intensité des normales').disabled);
-  await changeInput('Intensité des normales', '1.5'); await settle();
-  assert.equal(loadedDefinitions.at(-1)!.normalStrength, 1.5, 'Procedural carbon normal strength is edited on its temporary definition');
-  const [strongerLow, strongerHigh] = range(builds.at(-1)!.normalAtlas!);
-  assert(strongerHigh - strongerLow > highNormal - lowNormal, 'Increasing procedural normal strength changes the rendered strand slopes');
+  assert.equal(builds.at(-1)!.mode,'geometry','Body carbon stays on the geometric route');
   assert.deepEqual(material, originalMaterial);
   assert.deepEqual(selectedFiles, [{ name: 'Details_N.dds', data: new Uint8Array([4]) }], 'Procedural tests do not replace the editor surface files');
   assert.equal(materialSessions.length, 2, 'Changing to a procedural source reuses the current owned renderer');
@@ -264,7 +256,7 @@ try {
   const input = labelled<HTMLInputElement>('Importer des textures pour le relief');
   Object.defineProperty(input, 'files', { configurable: true, value: [new File([heightPng], 'stone_height.png', { type: 'image/png' })] });
   await act(async () => input.dispatchEvent(new window.Event('change', { bubbles: true }))); await settle();
-  assert(host.textContent!.includes('Pack importé · carrosserie, détails et roues'));
+  assert(host.textContent!.includes('Pack importé · Carrosserie uniquement'));
   assert(builds.at(-1)!.heightAtlas); assert.equal(input.value, '');
   assert(materialSessions[1].heightSources.includes(normalCanvas.toDataURL('image/png')), 'Import after the effect restart loads height pixels into the live replacement session');
   assert.equal(materialSessions[0].disposed, 1, 'A later import never revives or redisposes the retired session');
@@ -301,10 +293,11 @@ try {
   assert.equal(builds.at(-1)!.strengthMm, 80);
   assert.equal(builds.at(-1)!.scope, 'hood'); assert.equal(builds.at(-1)!.mode, 'geometry');
   assert.equal(builds.at(-1)!.normalAtlas, undefined);
-  assert(button('Normales').disabled && button('Les deux').disabled, 'The geometry diagnostic keeps shader-based detail out of the comparison');
+  assert(!buttons().some(b=>['Normales','Les deux'].includes(b.textContent?.trim()??'')));
   await click('Exporter le skin'); await settle();
   const greyExport = exports.at(-1)!;
-  for (const id of ['Skin_B', 'Details_B', 'Wheels_B'] as const) assert.deepEqual(greyExport.colors.get(id), [96, 96, 96, 255], 'The diagnostic removes photographic texture clues');
+  assert.deepEqual(greyExport.colors.get('Skin_B'),[96,96,96,255]);
+  for(const id of ['Details_B','Wheels_B'] as const)assert.deepEqual(greyExport.colors.get(id),[124,143,154,255],'Diagnostic respects selected family');
   assert.deepEqual(greyExport.colors.get('Skin_R'), [180, 0, 0, 255]);
   assert.deepEqual(greyExport.colors.get('Skin_CoatR'), [0, 0, 0, 255]);
   await click('Comparer sans relief'); await settle(); await click('Exporter sans relief'); await settle();
@@ -348,7 +341,7 @@ const scopedButton=(name:string)=>{const value=[...scopedHost.querySelectorAll<H
 async function settleScoped(){for(let i=0;i<200;i++){await act(async()=>{await new Promise(resolve=>setTimeout(resolve,10));});if(!scopedHost.querySelector('.relief-building')&&!scopedButton('Exporter le skin').disabled)return;}assert.fail('Scoped relief settles');}
 try{
   await act(async()=>scopedRoot.render(<ReliefPrototypeDialog name="Projet" maps={maps} material={scopedMaterial} surfaceFiles={[]} runtime={runtime} preserveMaterialMask onClose={()=>{}} onExport={exportFixture} onApply={async(result,settings,_maps,appearance)=>{applications.push({result,settings,appearance});}}/>));
-  await settleScoped();assert(scopedHost.textContent!.includes('Volume du calque « Pierre conservée »'));
+  await settleScoped();assert(scopedHost.textContent!.includes('Carrosserie · calque « Pierre conservée »'));
   assert(scopedHost.querySelector('[aria-label="Calque ciblé"]'));assert(!scopedHost.querySelector('[aria-label="Zone du relief"]'),'No vehicle-wide scope override is offered for a selected layer');
   assert(![...scopedHost.querySelectorAll('button')].some(b=>b.textContent?.trim()==='Carbone tissé'),'Changing to a demonstration cannot discard the selected layer mask');
   const scopedBuild=builds.at(-1)!;assert.equal(scopedBuild.mode,'geometry');assert.equal(scopedBuild.scope,'vehicle');assert(scopedBuild.heightAtlas);
@@ -361,3 +354,22 @@ try{
   assert.deepEqual(scopedMaterial,scopedOriginal,'Opening and exporting preserves the source owner');
 }finally{await act(async()=>scopedRoot.unmount());scopedHost.remove();}
 console.log('✓ Volume du calque : masque et exclusions exacts, portée verrouillée, pile couleur intacte, roues/détails préservés, application limitée à Skin');
+
+for(const family of ['details','wheels'] as const){
+ const target=document.createElement('div');document.body.append(target);const familyRoot=createRoot(target);
+ const normalOnly:MaterialLayer={...structuredClone(material),family,regions:[],exclusions:[]};delete normalOnly.definition.textures.height;
+ const find=(name:string)=>{const b=[...target.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent?.trim()===name);assert(b,name);return b;};
+ const done=async()=>{for(let i=0;i<200;i++){await act(async()=>{await new Promise(r=>setTimeout(r,10));});if(!target.querySelector('.relief-building'))return;}assert.fail('Family preview settles');};
+ try{
+  await act(async()=>familyRoot.render(<ReliefPrototypeDialog family={family} name="Famille" maps={maps} material={normalOnly} surfaceFiles={[]} runtime={runtime} onClose={()=>{}} onExport={exportFixture} onApply={async(result,settings)=>{applications.push({result,settings});}}/>));
+  await done();assert.equal(builds.at(-1)!.family,family);assert.equal(builds.at(-1)!.scope,'vehicle');assert.equal(builds.at(-1)!.mode,'normal');assert(find('Volume').disabled);assert(!find('Normales').disabled);
+  assert(![...target.querySelectorAll('button')].some(b=>b.textContent?.trim()==='Capot'),'No body scope in another family');
+  await act(async()=>find('Carbone tissé').click());await done();assert.equal(builds.at(-1)!.mode,'geometry');assert.equal(builds.at(-1)!.family,family);
+  await act(async()=>find('Exporter le skin').click());await done();
+  const prefix=family==='details'?'Details':'Wheels',last=exports.at(-1)!;
+  for(const map of ['Skin_B','Details_B','Wheels_B'] as const){if(map.startsWith(prefix))assert.notDeepEqual(last.colors.get(map),[124,143,154,255]);else{assert.deepEqual(last.colors.get(map),[124,143,154,255]);assert.equal(last.sizes.get(map),8);}}
+  await act(async()=>find('Les deux').click());await done();assert.equal(builds.at(-1)!.mode,'combined');assert(builds.at(-1)!.normalAtlas);assert(builds.at(-1)!.heightAtlas);
+  await act(async()=>find('Appliquer au projet').click());await done();assert.equal(applications.at(-1)!.settings.family,family);assert.equal(applications.at(-1)!.settings.material!.family,family);
+ }finally{await act(async()=>familyRoot.unmount());target.remove();}
+}
+console.log('✓ Détails/Roues : normales, volume et combinaison disponibles, couleur et géométrie ciblent uniquement la famille active');

@@ -191,8 +191,9 @@ assert.equal(qualityMetadata.prototype.exportProfile.actualArchiveBytes, quality
 assert.deepEqual(qualityMetadata.prototype.exportProfile.fallbackUsed, []);
 assert.deepEqual(qualityMetadata.prototype.exportProfile.resolutions['Skin_B.dds'], { width: 2048, height: 2048 });
 assert.equal(qualityMetadata.prototype.gameValidation, 'pending');
-assert.match(await qualityZip.file('ReadMe.txt')!.async('string'), /voiture entière.*2048 px/);
-for (const file of ['Skin_N.dds', 'Details_N.dds', 'Wheels_N.dds']) assert(qualityZip.file(file), `${file} accompanies the whole-vehicle export`);
+assert.match(await qualityZip.file('ReadMe.txt')!.async('string'), /surface entière skin.*2048 px/);
+assert(qualityZip.file('Skin_N.dds'));
+for (const file of nativeNormals)assert.equal(byteHash(await qualityZip.file(file.name)!.async('uint8array')),byteHash(limitPrototypeDDSResolution(file.data,2048)), 'The body-only build retains each other family’s original normals');
 for (const [id, canvas] of maps) assert.equal(canvas.toDataURL(), qualitySourceBefore.get(id), '2K export preserves every small source canvas');
 
 // Per-channel caps must take effect before DDS encoding, retain linear R/G data

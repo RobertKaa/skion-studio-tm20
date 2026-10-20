@@ -126,9 +126,9 @@ export function validateProjectDocument(value: unknown, assets: Set<string>): as
     if (node.linkedImageId) fail('un fragment ne peut pas remplacer son image maîtresse.');
     if (node.filters !== undefined && (!Array.isArray(node.filters) || node.filters.length)) fail('filtre d’image non pris en charge.');
     if (node.textureBackground !== undefined && (!validTextureBackgroundSettings(node.textureBackground) ||
-      String(node.type).toLowerCase() !== 'group' || !Array.isArray(node.objects) || node.objects.length !== (node.textureBackground.layout||node.textureBackground.uvAtlas ? 3 : 2) ||
+      String(node.type).toLowerCase() !== 'group' || !Array.isArray(node.objects) || node.objects.length !== (node.textureBackground.layout||node.textureBackground.uvAtlas||node.textureBackground.projection ? 3 : 2) ||
       !record(node.objects[0]) || String(node.objects[0].type).toLowerCase() !== 'image' ||
-      ((node.textureBackground.layout||node.textureBackground.uvAtlas) && (!record(node.objects[1]) || String(node.objects[1].type).toLowerCase() !== 'image')) ||
+      ((node.textureBackground.layout||node.textureBackground.uvAtlas||node.textureBackground.projection) && (!record(node.objects[1]) || String(node.objects[1].type).toLowerCase() !== 'image')) ||
       !record(node.objects.at(-1)) || String(node.objects.at(-1)!.type).toLowerCase() !== 'rect')) fail('image de fond invalide.');
     if (node.illumRole !== undefined && !ROLES.has(String(node.illumRole))) fail('rôle lumineux invalide.');
     if (node.illumCodes !== undefined && !validIllumCodes(node.illumCodes)) fail('masque de comportement lumineux invalide.');

@@ -113,3 +113,42 @@ for(const {id,node} of candidates.values()){
 }
 assert(contacts>=40,'Both real intake boundaries must be checked, including unmatched segment subdivisions');
 console.log(`ok real car seams: ${sharedCorners} coincident boundaries, ${contacts} intake contacts; max physical texture step ${(worst*1000).toFixed(1)}mm`);
+
+// The nose/bonnet join has a closed thin return and mismatched subdivisions.
+// Physical open edges alone miss its painted lip, causing a visible 17–20cm
+// restart of an illustration. Check the actual near-coincident painted edges
+// in both the material frame and the body-only background frame.
+for (const triangles of [geometry, geometry.filter(t => t.family === 'skin')]) {
+ const coordinates=getSurfaceCoordinates(triangles);
+ const seamEdges=new Map<string,{a:number[];b:number[];uvA:number[];uvB:number[];i:number;j:number;uses:number}>();
+ const vertices=new Map<number,{p:number[];uv:number[]}>();
+ triangles.forEach((triangle,f)=>{
+  if(triangle.family!=='skin')return;
+  for(let c=0;c<3;c++){
+   const i=coordinates.triangleNodes[f*3+c],j=coordinates.triangleNodes[f*3+(c+1)%3],a=triangle.points[c],b=triangle.points[(c+1)%3];
+   if(triangle.normals![c][1]>.4)vertices.set(i,{p:a,uv:triangle.uv[c]});
+   const key=[a,b].map(p=>p.map(v=>Math.round(v/4.2e-6)).join(':')).sort().join('/'),old=seamEdges.get(key);
+   if(old)old.uses++;else seamEdges.set(key,{a,b,uvA:triangle.uv[c],uvB:triangle.uv[(c+1)%3],i,j,uses:1});
+  }
+ });
+ const boundary=[...seamEdges.values()].filter(edge=>edge.uses===1);let checked=0,maximum=0;
+ for(const [node,{p,uv}]of vertices){
+  if(Math.abs(p[0])>.55||p[1]<.65||p[2]>-1.65)continue;
+  let nearest:typeof boundary[0]|undefined,best=.003,fraction=0;
+  for(const edge of boundary){
+   if(edge.i===node||edge.j===node)continue;
+   const d=edge.b.map((v,a)=>v-edge.a[a]),length=d.reduce((s,v)=>s+v*v,0);if(length<1e-18)continue;
+   const t=Math.max(0,Math.min(1,d.reduce((s,v,a)=>s+v*(p[a]-edge.a[a]),0)/length));
+   if(Math.hypot(...uv.map((v,a)=>v-edge.uvA[a]-t*(edge.uvB[a]-edge.uvA[a])))<.05)continue;
+   const distance=Math.hypot(...edge.a.map((v,a)=>v+t*d[a]-p[a]));
+   if(distance<best){nearest=edge;best=distance;fraction=t;}
+  }
+  if(!nearest)continue;
+  const step=Math.hypot(coordinates.transverse[node]-(1-fraction)*coordinates.transverse[nearest.i]-fraction*coordinates.transverse[nearest.j],
+   coordinates.longitudinal[node]-(1-fraction)*coordinates.longitudinal[nearest.i]-fraction*coordinates.longitudinal[nearest.j]);
+  assert(step<best*1.5+.002,`Nose/bonnet painted lip ${p}: ${step}m image jump across ${best}m clearance`);
+  maximum=Math.max(maximum,step);checked++;
+ }
+ assert(checked>=15,'The full-width nose/bonnet seam must include both sides and unmatched vertices');
+ console.log(`ok real nose/bonnet seam (${triangles===geometry?'materials':'background'}): ${checked} contacts, maximum ${(maximum*1000).toFixed(2)}mm texture step`);
+}
