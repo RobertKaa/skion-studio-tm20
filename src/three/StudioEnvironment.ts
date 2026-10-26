@@ -9,6 +9,7 @@ export class StudioEnvironment {
   private sun = new THREE.DirectionalLight();
   private ambient = new THREE.HemisphereLight();
   private environmentTarget: THREE.WebGLRenderTarget | null = null;
+  private tyreDetail = false;
 
   constructor() {
     this.root.name = 'studio-neutral-lighting';
@@ -32,6 +33,20 @@ export class StudioEnvironment {
       this.environmentTarget = generator.fromScene(this.reflectionScene, .04);
       return this.environmentTarget.texture;
     } finally { generator.dispose(); }
+  }
+
+  /** Millimetre-scale lugs need a shadow texel and bias smaller than their grooves. */
+  setTyreDetail(enabled: boolean) {
+    if (enabled === this.tyreDetail) return;
+    this.tyreDetail = enabled;
+    this.sun.shadow.map?.dispose(); this.sun.shadow.map = null;
+    this.sun.shadow.mapSize.set(enabled ? 4096 : 2048, enabled ? 4096 : 2048);
+    const extent = enabled ? 4 : 6;
+    Object.assign(this.sun.shadow.camera, { left: -extent, right: extent, top: extent, bottom: -extent });
+    this.sun.shadow.camera.updateProjectionMatrix();
+    this.sun.shadow.normalBias = enabled ? .001 : .025;
+    this.sun.shadow.bias = enabled ? -.00001 : 0;
+    this.sun.shadow.needsUpdate = true;
   }
 
   dispose() {

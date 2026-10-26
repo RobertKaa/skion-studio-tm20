@@ -141,7 +141,7 @@ export function blenderPartsFromGlb(buffer: ArrayBuffer): BlenderPart[] {
       if (!family || primitive.attributes?.TEXCOORD_0 === undefined || (primitive.mode ?? 4) !== 4) continue;
       const uv = accessor(primitive.attributes.TEXCOORD_0, 2); const indices = primitive.indices === undefined ? null : accessor(primitive.indices, 1);
       const count = indices?.count ?? uv.count;
-      if (count % 3 || (faceCount += count / 3) > 250000) throw new Error('Géométrie GLB trop complexe.');
+      if (count % 3 || (faceCount += count / 3) > 500000) throw new Error('Géométrie GLB trop complexe.');
       const triangles: Point[][] = [];
       for (let i = 0; i < count; i += 3) {
         const triangle = [0, 1, 2].map((c) => { const vi = indices?.read(i + c) ?? i + c; return { x: uv.read(vi), y: 1 - uv.read(vi, 1) }; });

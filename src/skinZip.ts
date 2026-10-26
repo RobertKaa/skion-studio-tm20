@@ -15,6 +15,8 @@ import { createSkinZipEncoder } from './workers/skinZipClient';
 import { INDEPENDENT_DETAILS, type DetailsLayout } from './detailsSides';
 import { REAL_UV_ATLAS, mappedMaterialRegions, type UvAtlasVersion } from './realUvAtlas';
 import { UNDERBODY_PANEL_LAYOUT, panelPoint } from './underbodyPanel';
+import { applyWheelTreadAppearance, hasWheelTreadAppearance } from './wheelTreadAppearance';
+import { isWheelSurfaceMode, type WheelSurfaceSettings } from './wheelSurface';
 import {
   SKIN3D_MESH_FILE,
   SKIN3D_PREVIEW_FILE,
@@ -33,21 +35,21 @@ import {
  * l'échelle l'intégralité du canvas source quelle que soit sa taille interne
  * (backstore) : aucun risque de rognage si le backstore diffère de workRes.
  */
-function canvasToRGBA(source: HTMLCanvasElement, size: number): RGBAImage {
+function canvasToRGBA(source: HTMLCanvasElement, size: number, height = size): RGBAImage {
   const c = document.createElement('canvas');
   c.width = size;
-  c.height = size;
+  c.height = height;
   const ctx = c.getContext('2d', { willReadFrequently: true })!;
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   // Un canvas fabric non encore rendu peut avoir un backstore vide : on ne
   // dessine que s'il a une taille réelle, sinon le buffer reste transparent.
   if (source.width > 0 && source.height > 0) {
-    ctx.drawImage(source, 0, 0, source.width, source.height, 0, 0, size, size);
+    ctx.drawImage(source, 0, 0, source.width, source.height, 0, 0, size, height);
   }
-  const data = ctx.getImageData(0, 0, size, size).data;
+  const data = ctx.getImageData(0, 0, size, height).data;
   c.width = c.height = 1;
-  return { width: size, height: size, data };
+  return { width: size, height, data };
 }
 
 /** Attend la prochaine frame d'animation (fallback timer hors navigateur). */
@@ -62,6 +64,10 @@ function nextAnimationFrame(): Promise<void> {
 }
 
 export interface ExportSources {
+  surfaceTemplate?: 'tyres';
+  wheelSurface?: WheelSurfaceSettings;
+  wheelOfficialModel?: boolean;
+  wheelCavity?: RGBAImage;
   uvAtlas?:UvAtlasVersion;
   detailsLayout?: DetailsLayout;
   previewGlb?: ArrayBuffer;
@@ -274,6 +280,10 @@ export function applyIllumRole(
 }
 
 export interface BuildSkinZipOptions {
+  surfaceTemplate?: 'tyres';
+  wheelSurface?: WheelSurfaceSettings;
+  wheelOfficialModel?: boolean;
+  wheelCavity?: RGBAImage;
   uvAtlas?:UvAtlasVersion;
   detailsLayout?: DetailsLayout;
   previewGlb?: ArrayBuffer;
@@ -295,6 +305,16 @@ export interface BuildSkinZipOptions {
   meshGbx?: Uint8Array;
   /** DDS hors maps (fakeshad) et GBX non-mesh, même règle que SkinMaker. */
   passthrough?: Skin3DFile[];
+}
+
+/** Only declarative local tyre settings may accompany a known native topology. */
+function validStoredWheelSurface(value: unknown): value is WheelSurfaceSettings {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const surface = value as Record<string, unknown>;
+  return Object.keys(surface).every(key => ['mode', 'strength', 'volume'].includes(key))
+    && isWheelSurfaceMode(surface.mode) && typeof surface.strength === 'number' && Number.isFinite(surface.strength)
+    && surface.strength >= 0 && surface.strength <= 1
+    && (surface.volume === undefined || typeof surface.volume === 'boolean' && (surface.mode === 'gravel' || surface.mode === 'mud'));
 }
 
 /**
@@ -375,12 +395,20 @@ export type EncodedSkinMaps = Partial<Record<MapId, Uint8Array>>;
 
 export async function buildSkinZipFromImages(images: Record<MapId, RGBAImage>, opts: BuildSkinZipOptions): Promise<Blob> {
   const encoded: EncodedSkinMaps = {};
-  for (const def of MAPS) encoded[def.id] = encodeSkinMap(def.id, images[def.id], opts);
+  for (const def of MAPS) {
+    const image = hasWheelTreadAppearance(def.id, opts.wheelSurface, opts.wheelOfficialModel ?? true)
+      ? applyWheelTreadAppearance(images[def.id], def.id === 'Wheels_B' ? 'color' : 'roughmetal', opts.wheelSurface, opts.wheelOfficialModel ?? true, opts.wheelCavity)
+      : images[def.id];
+    encoded[def.id] = encodeSkinMap(def.id, image, opts);
+  }
   return buildSkinZipFromEncodedMaps(encoded, opts);
 }
 
 /** Retain compact DDS files, never all thirteen uncompressed RGBA atlases. */
 export async function buildSkinZipFromEncodedMaps(images: EncodedSkinMaps, opts: BuildSkinZipOptions): Promise<Blob> {
+  if (opts.surfaceTemplate !== undefined && opts.surfaceTemplate !== 'tyres') throw new Error('Gabarit de surface inconnu.');
+  if (opts.surfaceTemplate === 'tyres' && opts.wheelSurface !== undefined && !validStoredWheelSurface(opts.wheelSurface)
+    || opts.wheelSurface?.volume === true && opts.surfaceTemplate !== 'tyres') throw new Error('Réglages de sculpture des pneus invalides.');
   const hornAudio = opts.horn ? normalizeHornAudio(opts.horn.data) : null;
   const zip = new JSZip();
   for (const def of MAPS) {
@@ -396,10 +424,11 @@ export async function buildSkinZipFromEncodedMaps(images: EncodedSkinMaps, opts:
   if (opts.meshGbx) {
     zip.file(SKIN3D_MESH_FILE, opts.meshGbx);
   }
-  if (opts.detailsLayout||opts.uvAtlas) {
+  if (opts.detailsLayout||opts.uvAtlas||opts.surfaceTemplate) {
     if ((opts.detailsLayout&&![INDEPENDENT_DETAILS,UNDERBODY_PANEL_LAYOUT].includes(opts.detailsLayout)) || (opts.uvAtlas&&opts.uvAtlas!==REAL_UV_ATLAS) || !opts.meshGbx || !opts.previewGlb) throw new Error('Modèle UV incomplet.');
     zip.file(SKIN3D_PREVIEW_FILE, opts.previewGlb);
-    zip.file('skin3d.json', JSON.stringify({ version: 1, name: opts.skinName, detailsLayout: opts.detailsLayout,uvAtlas:opts.uvAtlas }));
+    zip.file('skin3d.json', JSON.stringify({ version: 1, name: opts.skinName, detailsLayout: opts.detailsLayout,uvAtlas:opts.uvAtlas, surfaceTemplate: opts.surfaceTemplate,
+      ...(opts.surfaceTemplate === 'tyres' && opts.wheelSurface ? { wheelSurface: opts.wheelSurface } : {}) }));
   }
   for (const extra of opts.passthrough ?? []) {
     const name = baseName(extra.name);
@@ -439,9 +468,9 @@ export async function exportSkinZip(
   await nextAnimationFrame();
 
   const options: BuildSkinZipOptions = {
-    horn: sources.horn, skinName, dirtEnabled: sources.dirtEnabled, illumRole: sources.illumRole, speedColor: sources.speedColor,
+    horn: sources.horn, skinName, dirtEnabled: sources.dirtEnabled, illumRole: sources.illumRole, speedColor: sources.speedColor, wheelSurface: sources.wheelSurface,
     iconTGA: sources.icon ? encodeTGA(canvasToRGBA(sources.icon, 256)) : undefined,
-    meshGbx: sources.meshGbx, detailsLayout: sources.detailsLayout, uvAtlas: sources.uvAtlas, previewGlb: sources.previewGlb, passthrough: sources.passthrough,
+    meshGbx: sources.meshGbx, detailsLayout: sources.detailsLayout, uvAtlas: sources.uvAtlas, surfaceTemplate: sources.surfaceTemplate, previewGlb: sources.previewGlb, passthrough: sources.passthrough,
   };
   const encoder = await createSkinZipEncoder(options, () => {
     const encoded: EncodedSkinMaps = {};
@@ -468,8 +497,11 @@ export async function exportSkinZip(
       const canvas = sources.getMapCanvas(def.id);
       // Blank editable channels already have a tiny, exact preview. Avoid expanding
       // them to 4096² only to shrink them again after the uniform-colour check.
-      const flat = def.id !== 'Details_I' && canvas.width === FLAT_MAP_RES && canvas.height === FLAT_MAP_RES ? canvasToRGBA(canvas, FLAT_MAP_RES) : null;
-      const image = flat && uniformColor(flat) ? flat : canvasToRGBA(canvas, res);
+      const tread = hasWheelTreadAppearance(def.id, sources.wheelSurface, sources.wheelOfficialModel ?? true);
+      const flat = !tread && def.id !== 'Details_I' && canvas.width === FLAT_MAP_RES && canvas.height === FLAT_MAP_RES ? canvasToRGBA(canvas, FLAT_MAP_RES) : null;
+      const raw = flat && uniformColor(flat) ? flat : canvasToRGBA(canvas, res, tread ? Math.min(4096, res * 2) : res);
+      const image = tread ? applyWheelTreadAppearance(raw, def.id === 'Wheels_B' ? 'color' : 'roughmetal', sources.wheelSurface,
+        sources.wheelOfficialModel ?? true, sources.wheelCavity) : raw;
       let roles: RGBAImage | undefined;
       const roleSource = def.kind === 'illum' ? sources.getIllumRoleCanvas?.(def.id) : undefined;
       if (roleSource) {
@@ -491,6 +523,7 @@ export interface ImportFailure {
 }
 
 export interface ImportResult {
+  wheelSurface?: WheelSurfaceSettings;
   horn?: SkinHorn;
   imported: { id: MapId; image: RGBAImage; path: string }[];
   skipped: string[];
@@ -580,6 +613,8 @@ export async function importSkinZipFromBuffer(buf: ArrayBuffer): Promise<ImportR
   let parts: BlenderPart[] | undefined;
   let detailsLayout: DetailsLayout | undefined;
   let uvAtlas:UvAtlasVersion|undefined;
+  let surfaceTemplate: 'tyres' | undefined;
+  let wheelSurface: WheelSurfaceSettings | undefined;
   const passthrough: Skin3DFile[] = [];
   // Decode a single candidate; prefer the game file at the root over archived alternatives.
   const hornCandidates = entries.filter((entry) => /^horn\.(wav|ogg|mp3)$/i.test(baseName(entry.name)));
@@ -614,12 +649,16 @@ export async function importSkinZipFromBuffer(buf: ArrayBuffer): Promise<ImportR
         if (size > 4 * 1024 * 1024) throw new Error('Métadonnées Blender trop volumineuses.');
         const metadata = await entry.async('string');
         if (metadata.length > 4 * 1024 * 1024) throw new Error('Métadonnées Blender trop volumineuses.');
-        const parsed = JSON.parse(metadata) as { name?: unknown; parts?: unknown; detailsLayout?: unknown;uvAtlas?:unknown };
+        const parsed = JSON.parse(metadata) as { name?: unknown; parts?: unknown; detailsLayout?: unknown;uvAtlas?:unknown; surfaceTemplate?: unknown; wheelSurface?: unknown };
+        if (parsed.surfaceTemplate !== undefined && parsed.surfaceTemplate !== 'tyres') throw new Error('Gabarit de surface inconnu.');
+        if (parsed.wheelSurface !== undefined && (parsed.surfaceTemplate !== 'tyres' || !validStoredWheelSurface(parsed.wheelSurface))) throw new Error('Réglages de sculpture des pneus invalides.');
         if(parsed.uvAtlas!==undefined&&parsed.uvAtlas!==REAL_UV_ATLAS)throw new Error('Disposition UV inconnue.');uvAtlas=parsed.uvAtlas as UvAtlasVersion|undefined;
         if (parsed.detailsLayout !== undefined && ![INDEPENDENT_DETAILS,UNDERBODY_PANEL_LAYOUT].includes(parsed.detailsLayout as DetailsLayout)) throw new Error('Disposition des détails inconnue.');
         detailsLayout = parsed.detailsLayout as DetailsLayout | undefined;
         if (typeof parsed.name === 'string' && parsed.name.trim()) metaName = parsed.name.trim();
         if (parsed.parts !== undefined) { validateBlenderParts(parsed.parts); parts = parsed.parts; }
+        surfaceTemplate = parsed.surfaceTemplate as 'tyres' | undefined;
+        wheelSurface = parsed.wheelSurface as WheelSurfaceSettings | undefined;
       } catch {
         result.failures.push({ path, reason: 'Métadonnées des pièces illisibles : textures conservées.' });
       }
@@ -690,11 +729,12 @@ export async function importSkinZipFromBuffer(buf: ArrayBuffer): Promise<ImportR
   const uniquePassthrough = [...new Map(passthrough.map((entry) => [entry.name.toLowerCase(), entry])).values()];
   result.surfaceTextures = uniquePassthrough.filter((entry) => /^(Details|Wheels)_N\.dds$/i.test(entry.name) || ambientOcclusionFile(entry.name));
   if (mesh) {
+    if (surfaceTemplate === 'tyres' && wheelSurface) result.wheelSurface = wheelSurface;
     if (!parts && preview) {
       try { parts = blenderPartsFromGlb(preview); }
       catch (err) { result.failures.push({ path: SKIN3D_PREVIEW_FILE, reason: `Pièces non séparées : ${String(err)}` }); }
     }
-    result.skin3d = { mesh, preview, passthrough: uniquePassthrough, name: metaName, ...(parts?.length ? { parts } : {}), ...(detailsLayout ? { detailsLayout } : {}),...(uvAtlas?{uvAtlas}:{}) };
+    result.skin3d = { mesh, preview, passthrough: uniquePassthrough, name: metaName, ...(parts?.length ? { parts } : {}), ...(detailsLayout ? { detailsLayout } : {}),...(uvAtlas?{uvAtlas}:{}), ...(surfaceTemplate ? { surfaceTemplate } : {}) };
   }
   return result;
 }

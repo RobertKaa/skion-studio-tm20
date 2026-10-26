@@ -29,7 +29,9 @@ import { PreviewAmbientOcclusion } from './previewAmbientOcclusion';
 import { PlayerDisplay } from './playerDisplay';
 import { ExportColorPreview, type ExportMaterialImage } from './ExportColorPreview';
 import { decodeSurfaceMaterial } from '../material';
-import type { WheelSurfaceSettings } from '../wheelSurface';
+import { normalizeWheelSurface, type WheelSurfaceSettings } from '../wheelSurface';
+import { ensureWheelTangentFrame } from './wheelTangentFrame';
+import { hasWheelTreadAppearance, wheelTreadAppearanceCanvas, wheelTreadAppearanceCavity } from '../wheelTreadAppearance';
 import type { Skin3DFile } from '../skin3d';
 import { hasExperimentalSkinNormalShader, previewMeshMaterialSlot } from './materialSlots';
 import type { UvGuideIsland } from '../uvGuideData';
@@ -110,6 +112,10 @@ export class CarPreview {
   private dirtCanvases = new Map<MapId, HTMLCanvasElement>();
   private dirtAmount = 0;
   private dirtEnabled = true;
+  private wheelSurface = normalizeWheelSurface(undefined);
+  private wheelAppearanceOfficial = true;
+  private wheelRoughnessSource: HTMLCanvasElement | null = null;
+  private wheelAppearanceCanvases = new Map<'color' | 'roughmetal', HTMLCanvasElement>();
   /** Canvas intermédiaires pour repacker R (rugosité) / G (métal) par matériau. */
   private rmPacks = new Map<MapId, { canvas: HTMLCanvasElement; texture: THREE.CanvasTexture }>();
   private skinMat: THREE.MeshPhysicalMaterial;
@@ -386,6 +392,8 @@ export class CarPreview {
     if (options.nativeSurfaceLayout) {
       this.surfaceTextures.setOfficialModel(true);
       this.ambientOcclusion.setOfficialModel(true);
+      this.wheelAppearanceOfficial = true;
+      this.refreshWheelAppearance();
     }
   }
 
@@ -432,6 +440,7 @@ export class CarPreview {
         if (m && !this.importedMaterials.includes(m)) this.importedMaterials.push(m);
       }
       const slot = slotFromObject(obj);
+      if (slot === 'wheels') ensureWheelTangentFrame(obj.geometry);
       obj.userData.paintSlot = slot;
       obj.material = this.materialForSlot(slot);
       obj.castShadow = true;
@@ -448,6 +457,8 @@ export class CarPreview {
     this.uvAtlas=undefined;model.traverse(object=>{if(object instanceof THREE.Mesh&&object.geometry.getAttribute('_source_uv'))this.uvAtlas=REAL_UV_ATLAS;});
     this.surfaceTextures.setAtlasSource(this.uvAtlas?detailsLayout??'stock':undefined);
     this.ambientOcclusion.setAtlasSource(this.uvAtlas?detailsLayout??'stock':undefined);
+    this.wheelAppearanceOfficial = kind === 'fbx';
+    this.refreshWheelAppearance();
     this.syncIllumPreview();
     this.carRoot.add(model);
     this.vehicleRig = new VehicleRigPreview(model);
@@ -630,6 +641,26 @@ export class CarPreview {
     this.requestRender();
     this.surfaceTextures.setWheelSurface(value);
     this.ambientOcclusion.setWheelSurface(value);
+    const next = normalizeWheelSurface(value);
+    this.studioEnvironment.setTyreDetail(next.volume === true && next.strength > 0);
+    if (next.mode === this.wheelSurface?.mode && next.strength === this.wheelSurface?.strength && next.volume === this.wheelSurface?.volume) return;
+    this.wheelSurface = next;
+    this.refreshWheelAppearance();
+  }
+
+  private refreshWheelAppearance() {
+    if (this.baseSources?.has('Wheels_B')) this.syncDirtPreview('wheels');
+    if (this.wheelRoughnessSource) this.updateRoughnessPack('Wheels_R', this.wheelRoughnessSource);
+  }
+
+  private wheelAppearanceCanvas(source: HTMLCanvasElement, channel: 'color' | 'roughmetal'): HTMLCanvasElement {
+    const official = this.wheelAppearanceOfficial !== false || !!this.uvAtlas;
+    if (!hasWheelTreadAppearance(channel === 'color' ? 'Wheels_B' : 'Wheels_R', this.wheelSurface, official)) return source;
+    this.wheelAppearanceCanvases ??= new Map();
+    const target = this.wheelAppearanceCanvases.get(channel) ?? document.createElement('canvas');
+    this.wheelAppearanceCanvases.set(channel, target);
+    const cavity = wheelTreadAppearanceCavity(this.wheelSurface, official, this.uvAtlas ? this.detailsLayout ?? 'stock' : undefined);
+    return wheelTreadAppearanceCanvas(source, target, channel, this.wheelSurface, official, cavity);
   }
 
   setExportColorPreview(images: readonly ExportMaterialImage[]) {
@@ -662,6 +693,7 @@ export class CarPreview {
     }
     // Les maps _R sont repackées séparément (canaux R/G → G/B).
     if (id === 'Skin_R' || id === 'Details_R' || id === 'Wheels_R') {
+      if (id === 'Wheels_R') this.wheelRoughnessSource = source;
       this.updateRoughnessPack(id, source);
       return;
     }
@@ -715,6 +747,7 @@ export class CarPreview {
   }
 
   private attachMapCanvas(id: MapId, source: HTMLCanvasElement) {
+    if (id === 'Wheels_B') source = this.wheelAppearanceCanvas(source, 'color');
     let tex = this.textures.get(id);
     if (!tex || tex.image !== source) {
       tex?.dispose();
@@ -754,6 +787,7 @@ export class CarPreview {
   private updateRoughnessPack(id: MapId, source: HTMLCanvasElement) {
     const pack = this.rmPacks.get(id);
     if (!pack) return;
+    if (id === 'Wheels_R') source = this.wheelAppearanceCanvas(source, 'roughmetal');
     const { canvas, texture } = pack;
     if (canvas.width !== source.width || canvas.height !== source.height) {
       texture.dispose(); // WebGL allocates immutable texture storage for each size.
@@ -1291,22 +1325,36 @@ export class CarPreview {
     const minDistance = this.uvFocus?.minDistance ?? this.controls.minDistance, near = this.uvFocus?.near ?? this.camera.near;
     const plan = planUvFocus(this.getUvFocusScene(), region, this.getViewState(), this.camera.fov, this.camera.aspect, occurrence);
     if (!plan) { this.clearUvFocus(); return false; }
+    const inspectTyre = region.family === 'wheels' && region.key === 'tyres:tread';
+    let displayTriangles = plan.triangles;
+    if (inspectTyre) {
+      const center = plan.bounds.getCenter(new THREE.Vector3()), vehicleCenter = this.carBounds.getCenter(new THREE.Vector3());
+      const direction = new THREE.Vector3(center.x >= vehicleCenter.x ? .8 : -.8, .75, center.z >= vehicleCenter.z ? 1.2 : -1.2);
+      Object.assign(plan, uvFocusView(plan.bounds, direction, this.camera.fov, this.camera.aspect));
+      // Keep the same physical wheel complete when inspecting its tread in isolation.
+      const wheelBounds = plan.bounds.clone().expandByScalar(.05), point = new THREE.Vector3();
+      displayTriangles = this.getUvFocusScene().filter(triangle => triangle.family === 'wheels'
+        && triangle.points.every(position => wheelBounds.containsPoint(point.fromArray(position))));
+    }
     this.clearUvFocus(false);
     const root = new THREE.Group(); root.name = 'uv-focus-preview';
     const geometry = new THREE.BufferGeometry();
-    const order = plan.triangles.map(t => {
+    const order = displayTriangles.map(t => {
       const face = new THREE.Vector3(...t.points[1]).sub(new THREE.Vector3(...t.points[0])).cross(new THREE.Vector3(...t.points[2]).sub(new THREE.Vector3(...t.points[0])));
       return t.normals && face.dot(new THREE.Vector3(...t.normals[0])) < 0 ? [0,2,1] : [0,1,2];
     });
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(plan.triangles.flatMap((t,i) => order[i].flatMap(j=>t.points[j])), 3));
-    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(plan.triangles.flatMap((t,i) => order[i].flatMap(j=>t.uv[j])), 2));
-    if (plan.triangles.every(t => t.normals)) geometry.setAttribute('normal', new THREE.Float32BufferAttribute(plan.triangles.flatMap((t,i) => order[i].flatMap(j=>t.normals![j])), 3));
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(displayTriangles.flatMap((t,i) => order[i].flatMap(j=>t.points[j])), 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(displayTriangles.flatMap((t,i) => order[i].flatMap(j=>t.uv[j])), 2));
+    if (displayTriangles.every(t => t.normals)) geometry.setAttribute('normal', new THREE.Float32BufferAttribute(displayTriangles.flatMap((t,i) => order[i].flatMap(j=>t.normals![j])), 3));
     else geometry.computeVertexNormals();
     // AO uses the same native UV set in the original meshes.
     geometry.setAttribute('uv1', geometry.getAttribute('uv').clone());
+    if (region.family === 'wheels') ensureWheelTangentFrame(geometry);
     const isolatedMesh = new THREE.Mesh(geometry, this.materialForSlot(region.family));
+    isolatedMesh.castShadow = true; isolatedMesh.receiveShadow = true;
     isolatedMesh.userData.paintSlot = region.family; root.add(isolatedMesh);
-    const outline = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 55), new THREE.LineBasicMaterial({ color: 0x7be4c7, transparent: true, opacity: .8, depthTest: false, depthWrite: false }));
+    const tyre = region.family === 'wheels';
+    const outline = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, tyre ? 180 : 55), new THREE.LineBasicMaterial({ color: 0x7be4c7, transparent: true, opacity: tyre ? .4 : .8, depthTest: tyre, depthWrite: false }));
     outline.renderOrder = 20; root.add(outline); this.scene.add(root);
     this.uvFocus = { region, plan, root, isolated: plan.visible < .55, previous, minDistance, near };
     const span = plan.bounds.getSize(new THREE.Vector3()).length();
@@ -1587,6 +1635,8 @@ export class CarPreview {
     for (const t of this.textures.values()) t.dispose();
     for (const state of this.illumination.values()) state.texture?.dispose();
     for (const { texture } of this.rmPacks.values()) texture.dispose();
+    for (const canvas of this.wheelAppearanceCanvases.values()) canvas.width = canvas.height = 1;
+    this.wheelAppearanceCanvases.clear(); this.wheelRoughnessSource = null;
     this.stadium?.dispose();
     this.studioEnvironment.dispose();
     this.studioRoot.traverse((object) => {

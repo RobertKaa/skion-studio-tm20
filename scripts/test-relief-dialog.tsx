@@ -12,6 +12,8 @@ import type { PreviewViewState } from '../src/three/CarPreview';
 import type { ReliefPrototypeRuntime } from '../src/ui/ReliefPrototypeDialog';
 import type { RGBAImage } from '../src/dds';
 import type { ReliefSettings } from '../src/relief/settings';
+import type { WheelSurfaceSettings } from '../src/wheelSurface';
+import { WHEEL_TREAD_UV } from '../src/wheelTreads';
 
 registerHooks({ load(url, context, next) { return url.endsWith('.css') ? { format: 'module', source: 'export {};', shortCircuit: true } : next(url, context); } });
 setEnv(getEnv());
@@ -373,3 +375,78 @@ for(const family of ['details','wheels'] as const){
  }finally{await act(async()=>familyRoot.unmount());target.remove();}
 }
 console.log('✓ Détails/Roues : normales, volume et combinaison disponibles, couleur et géométrie ciblent uniquement la famille active');
+
+// Changing tyre relief must never recolour or resample the independent
+// workshop's painted colour and material maps, including recessed floors.
+const tyreHost = document.createElement('div'); document.body.append(tyreHost); const tyreRoot = createRoot(tyreHost);
+const floorU = WHEEL_TREAD_UV.minU + .233 * (WHEEL_TREAD_UV.maxU - WHEEL_TREAD_UV.minU);
+const sampledPixel = (source: HTMLCanvasElement, u: number, v: number) => [...source.getContext('2d')!.getImageData(Math.floor(u * source.width), Math.floor(v * source.height), 1, 1).data];
+const tyreBindings: { id: MapId; source: HTMLCanvasElement; width: number; height: number; floor: number[]; flank: number[] }[] = [];
+const tyreModes: WheelSurfaceSettings[] = [];
+const tyreRuntime: ReliefPrototypeRuntime = { ...runtime, createPreview() {
+  return { ...runtime.createPreview(),
+    setMapCanvas(id, source) {
+      if (id === 'Wheels_B' || id === 'Wheels_R') tyreBindings.push({ id, source, width: source.width, height: source.height,
+        floor: sampledPixel(source, floorU, .33), flank: sampledPixel(source, .97, .33) });
+    }, setWheelSurface(settings) { tyreModes.push({ ...settings }); },
+  };
+} };
+const tyreButton = (label: string) => {
+  const control = [...tyreHost.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent?.trim() === label);
+  assert(control, label); return control;
+};
+async function settleTyres() {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+    if (!tyreHost.querySelector('.relief-building') && !tyreButton('Exporter le skin').disabled) return;
+  }
+  assert.fail('Procedural tyre workshop settles');
+}
+let tyreExports = 0, tyreApplications = 0;
+try {
+  await act(async () => tyreRoot.render(<ReliefPrototypeDialog name="Pneus conservés" maps={maps} material={material} surfaceFiles={selectedFiles}
+    wheelSurface={{ mode: 'road', strength: 1 }} runtime={tyreRuntime} onClose={() => {}}
+    onExport={async (_result, outputMaps) => {
+      for (const id of ['Wheels_B', 'Wheels_R'] as const) {
+        assert.equal(outputMaps.get(id)!.toDataURL(), originalPixels, 'The exporter receives exactly the painted colour and material maps');
+        assert.equal(outputMaps.get(id)!.width, 8);
+      }
+      tyreExports++;
+    }} onApply={async (_result, _settings, outputMaps) => {
+      for (const id of ['Wheels_B', 'Wheels_R'] as const) assert.equal(outputMaps.get(id)!.toDataURL(), originalPixels, 'Applying relief does not bake cavity darkness into editable paint');
+      tyreApplications++;
+    }} />));
+  const initialWheelBindings = tyreBindings.slice(-2).map(binding => binding.source);
+  assert.equal(initialWheelBindings.length, 2);
+  assert(initialWheelBindings.every(source => source === canvas), 'Initial preview binds the original painted canvas without a derived colour/material copy');
+  await settleTyres();
+  assert(initialWheelBindings.every(source => source.width === 8), 'Completing the relief build does not resize the original colour/material source');
+  for (const id of ['Wheels_B', 'Wheels_R'] as const) {
+    const binding = tyreBindings.findLast(entry => entry.id === id)!;
+    assert.notEqual(binding.source, canvas, 'The independent preview never mutates the source wheel canvas');
+    assert.deepEqual([binding.width, binding.height], [8, 8], 'Relief selection does not upsample the painted colour or finish');
+    assert.deepEqual(binding.flank, [124, 143, 154, 255], 'Sidewall artwork retains its exact appearance');
+    assert.deepEqual(binding.floor, [124, 143, 154, 255], 'Recessed-floor colour and finish also retain the exact painted RGBA values');
+    assert.equal(binding.source.toDataURL(), originalPixels, 'The complete painted map remains unchanged, not only its sampled pixels');
+  }
+  assert.deepEqual(tyreModes.at(-1), { mode: 'relief', strength: 1 }, 'Generated wheel DDS normals remain authoritative in the independent preview');
+  assert.equal(canvas.toDataURL(), originalPixels);
+  const beforeRebuild = tyreBindings.slice(-2).map(binding => binding.source);
+  await act(async () => tyreButton('Relief marqué · 20 mm').click()); await settleTyres();
+  assert(beforeRebuild.every(source => source.width === 0), 'A rebuild releases its superseded working-map copies');
+  for (const id of ['Wheels_B', 'Wheels_R'] as const) {
+    const binding = tyreBindings.findLast(entry => entry.id === id)!;
+    assert.deepEqual([binding.width, binding.height], [8, 8]);
+    assert.deepEqual(binding.floor, [124, 143, 154, 255], 'Changing relief depth cannot bake a colour or material difference into the floor');
+  }
+  await act(async () => tyreButton('Exporter le skin').click()); await settleTyres();
+  assert.equal(tyreExports, 1);
+  await act(async () => tyreButton('Appliquer au projet').click()); await settleTyres();
+  assert.equal(tyreApplications, 1); assert.equal(canvas.toDataURL(), originalPixels);
+} finally {
+  const lastCopies = tyreBindings.slice(-2).map(binding => binding.source);
+  await act(async () => tyreRoot.unmount()); tyreHost.remove();
+  assert(lastCopies.every(source => source.width === 0), 'Closing releases the active working-map copies');
+  assert.equal(canvas.toDataURL(), originalPixels, 'Closing the workshop retains the source painting');
+}
+console.log('✓ Pneus du relief : couleur/matière et RGBA des creux conservés, aucune dérivation ni mise à l’échelle, normales DDS séparées et sources intactes après reconstruction/export/application');

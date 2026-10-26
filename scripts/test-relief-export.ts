@@ -102,6 +102,13 @@ assert.equal(stopped.profile.finishResolution, 2048);
 const stopped2K = await fitReliefArchiveToBudget(adaptiveFixture(), 2048, async selected => ({ size: selected.fallbackUsed.length ? 23_000_000 : 25_000_000 }));
 assert.equal(stopped2K.profile.colourResolution, 2048);
 assert.deepEqual(stopped2K.profile.fallbackUsed, ['secondary-normals-1k'], '2K exports use the same measured budget');
+const preservedPaintZip = adaptiveFixture();
+const preservedPaint = await fitReliefArchiveToBudget(preservedPaintZip, 4096,
+  async selected => ({ size: [29_000_000, 26_000_000, 23_000_000][selected.fallbackUsed.length] }), { preservePaint: true });
+assert.deepEqual(preservedPaint.profile.fallbackUsed, ['secondary-normals-1k', 'body-normal-1k'], 'Native tyre budgeting only reduces normals after preserving painted surfaces');
+for (const name of ['Skin_B.dds', 'Details_B.dds', 'Wheels_B.dds', 'Skin_R.dds', 'Details_R.dds', 'Wheels_R.dds', 'Skin_CoatR.dds', 'Details_I.dds']) {
+  assert.equal(byteHash(await preservedPaintZip.file(name)!.async('uint8array')), byteHash(bigDDS), 'Even 4K paint, finish and illumination bytes survive normal-only fallback');
+}
 let lowQualityAttempts = 0;
 await assert.rejects(() => fitReliefArchiveToBudget(adaptiveFixture(), 1024, async () => { lowQualityAttempts++; return { size: 24_000_000 }; }), /cible prudente/);
 assert.equal(lowQualityAttempts, 1, '1K does not retry identical fallback caps');
@@ -150,6 +157,15 @@ const nativeNormals = ['Details_N.dds', 'Wheels_N.dds'].map(name => ({ name, dat
 const geometricBlob = await exportReliefPrototype('Essai', 'Pack de test', geometry, maps, [...result.project.passthrough, ...nativeNormals], {}, maps.get('Skin_B')!);
 const geometricZip = await JSZip.loadAsync(await geometricBlob.arrayBuffer());
 assert.equal(geometricZip.file('Skin_N.dds'), null, 'Geometry-only mode drops an old experimental normal');
+const wheelSettings = { mode: 'mud' as const, strength: .75, volume: true };
+const normalShaderWheels = { ...result, options: { ...result.options, mode: 'geometry' as const, family: 'wheels' as const }, normalAtlas: null,
+  project: { ...result.project, surfaceTemplate: 'tyres' as const } };
+const normalShaderZip = await JSZip.loadAsync(await (await exportReliefPrototype('Essai pneus', 'Pack de test', normalShaderWheels, maps, [], { wheelSurface: wheelSettings }, maps.get('Skin_B')!)).arrayBuffer());
+assert.equal(byteHash(await normalShaderZip.file('Skin_N.dds')!.async('uint8array')), byteHash(await zip.file('Skin_N.dds')!.async('uint8array')), 'Wheel geometry preserves the earlier body normal when its native shader is retained');
+const wheelMetadata = JSON.parse(await normalShaderZip.file('skin3d.json')!.async('string'));
+assert.equal(wheelMetadata.surfaceTemplate, 'tyres'); assert.deepEqual(wheelMetadata.wheelSurface, wheelSettings);
+const wheelReimport = await importSkinZip({ size: 1, name: 'wheels.zip', arrayBuffer: () => normalShaderZip.generateAsync({ type: 'arraybuffer' }) } as File);
+assert.deepEqual(wheelReimport.wheelSurface, wheelSettings);
 for (const file of nativeNormals) assert.equal(byteHash(await geometricZip.file(file.name)!.async('uint8array')),
   byteHash(limitPrototypeDDSResolution(file.data, geometry.options.textureResolution)), 'Geometry-only mode retains the native Details/Wheels normal mip chain at the selected quality');
 

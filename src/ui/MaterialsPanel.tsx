@@ -336,7 +336,7 @@ export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, 
     <details className="material-details" open>
       <summary>Placement du motif</summary>
       <fieldset className="materials-fields" disabled={unavailable}>
-        <label className="material-select-row">Alignement<select aria-label="Alignement de la matière" value={projection}
+        <label className="material-select-row">Alignement<select aria-label="Alignement de la matière" value={projection} disabled={!!draft.wheelDesign}
           onChange={(event) => { const projection = event.target.value as MaterialDefinition['transform']['projection']; changeTransform({ projection, ...(['surface','wheel','wheel-face'].includes(projection ?? '') && draft.transform.mode === 'stretch' ? { mode: 'cover' as const } : {}) }); onCommit(); }}>
           {wheelPlacement && <><option value="wheel">Pneu · enroulement 360°</option><option value="wheel-face">Flanc · vue circulaire</option></>}
           {(family !== 'wheels' || projection === 'surface') && <option value="surface">{family === 'wheels' ? 'Pneu · suivi de surface' : 'Suivre la surface 3D'}</option>}
@@ -346,7 +346,9 @@ export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, 
           <option value="front">Voiture · face</option>
           <option value="uv">Feuille UV</option>
         </select></label>
-        <p className="hint material-placement-hint">{family === 'wheels' && following
+        <p className="hint material-placement-hint">{draft.wheelDesign
+          ? 'Ce motif conserve son placement circulaire. Modifiez son dessin dans l’atelier de flancs.'
+          : family === 'wheels' && following
           ? projection === 'wheel-face' ? 'Pour une image ou un logo sur le flanc, choisissez Couvrir ou Contenir. Le placement suit une vue de face de la roue.' : 'Le placement utilise la largeur et la circonférence réelles du pneu. En mode Répéter, le pas et l’angle s’ajustent légèrement pour raccorder le motif après un tour, sans étirer l’image.'
           : projection === 'surface'
           ? 'Le motif accompagne les courbes de la pièce en préservant ses proportions. Répéter convient aux matières. Des raccords restent possibles aux courbes les plus fortes.'

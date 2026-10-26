@@ -54,6 +54,16 @@ __pycache__/
 !/scripts/test-uv-focus.ts
 !/scripts/test-uv-focus-ui.tsx
 !/scripts/test-wheel-material-projection.ts
+!/scripts/test-wheel-design.ts
+!/scripts/test-wheel-design-ui.tsx
+!/scripts/test-wheel-design-roundtrip.ts
+!/scripts/test-wheel-controls.tsx
+!/scripts/test-wheel-treads.ts
+!/scripts/test-wheel-surface.ts
+!/scripts/test-wheel-realism.ts
+!/scripts/test-wheel-tread-appearance.ts
+!/scripts/test-wheel-tangents.ts
+!/scripts/test-project-file.ts
 !/scripts/test-layer-reorder.ts
 !/scripts/test-layer-drag.tsx
 !/scripts/test-relief-prototype.ts
@@ -135,3 +145,7 @@ __pycache__/
 !/scripts/prepare-surface-relief.py
 !/scripts/prepare-surface-layouts.py
 !/scripts/dense_heightfield_core.py
+!/scripts/prepare-wheel-relief.py
+!/scripts/test-wheel-tread-volume.ts
+!/scripts/test-skin-import-preview.ts
+!/scripts/test-tyre-archive.ts

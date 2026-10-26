@@ -2176,7 +2176,7 @@ export class EditorCore {
     if(this.getSelection()!==image)throw new Error('Le calque ciblé a changé pendant l’application du relief.');
   }
 
-  setSelectionMaterialMask(regions: string[], exclusions: string[]) {
+  setSelectionMaterialMask(regions: string[], exclusions: string[], coalesce?: string) {
     const image = this.getSelection() as EditorObject | null;
     if (!image?.materialLayer) return;
     const family = image.materialLayer.family;
@@ -2186,7 +2186,7 @@ export class EditorCore {
     const layer = { ...image.materialLayer, regions: !regions.length && frame ? [panelCanvasRegion(frame.placement)] : !regions.length && side ? [detailsWholeSide(side)] : sourceRegions(regions), exclusions: sourceRegions(exclusions) };
     if (!isValidMaterialLayer(layer)) throw new Error('Masque du matériau invalide.');
     image.materialLayer = layer;
-    this.refreshLinkedImages(); this.pushHistory(this.activeMap);
+    this.refreshLinkedImages(); this.pushHistory(this.activeMap, coalesce);
     this.emit('selection'); this.emit('layers'); this.flushTexture();
   }
 

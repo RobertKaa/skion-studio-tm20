@@ -1,7 +1,7 @@
 import type { RGBAImage } from '../dds';
 import { patchReliefPreview } from './glb';
 import { packReliefNormal, unpackReliefNormal, reliefGeometryFamily, reliefVertexKey } from './engine';
-import type { PreparedReliefTemplate, ReliefPrototypeResult, ReliefVariant } from './types';
+import type { PreparedReliefTemplate, ReliefFamily, ReliefPrototypeResult, ReliefVariant } from './types';
 import { validateReliefAtlas } from './height';
 
 /** Find an exact, unique native UV stream. Details-layout patches can move its
@@ -20,9 +20,11 @@ function uniqueStream(bytes:Uint8Array,needle:Uint8Array,optional=false):number{
 
 /** Keep volumes already present outside the current material mask. The base
  * must be an app-generated relief in the original UV frame, on the same template. */
-export function retainOtherLayerVolumes(template:PreparedReliefTemplate,result:ReliefPrototypeResult,base:{mesh:Uint8Array;variant:ReliefVariant},mask:RGBAImage,vertexUv?:ReadonlyMap<number,readonly number[]>):ReliefPrototypeResult{
+export function retainOtherLayerVolumes(template:PreparedReliefTemplate,result:ReliefPrototypeResult,base:{mesh:Uint8Array;variant:ReliefVariant},mask:RGBAImage,vertexUv?:ReadonlyMap<number,readonly number[]>,options?:{replaceFamilies?:readonly ReliefFamily[]}):ReliefPrototypeResult{
   validateReliefAtlas(mask);
   if(base.mesh.length>64*1024*1024||base.mesh[0]!==71||base.mesh[1]!==66||base.mesh[2]!==88||!['standard','normal'].includes(base.variant))throw new Error('Modèle précédent incompatible avec le volume du calque.');
+  const replaced=new Set(options?.replaceFamilies??[]);
+  if([...replaced].some(family=>!['skin','details','wheels'].includes(family)||family!==(result.options.family??'skin'))||replaced.size&&result.options.mode==='normal')throw new Error('Remplacement de famille de relief invalide.');
   const source=template.variants[base.variant],previous=new DataView(base.mesh.buffer,base.mesh.byteOffset,base.mesh.byteLength);
   const mesh=result.project.mesh.slice(),out=new DataView(mesh.buffer),variant=result.stats.templateVariant;
   const positions:Float32Array[]=[],normals:Float32Array[]=[];
@@ -34,8 +36,20 @@ export function retainOtherLayerVolumes(template:PreparedReliefTemplate,result:R
   // Match the engine's welded UV seams across LODs: one seam cannot open merely
   // because its duplicate lies just outside a painted polygon.
   const touched=new Set<string>();
-  if(result.options.mode!=='normal')for(const g of template.manifest.geometries)if(reliefGeometryFamily(g)===(result.options.family??'skin')){const uv=vertexUv?.get(g.visualIndex)??g.uv;for(let i=0;i<g.bodyVertices.length;i++)if(g.bodyVertices[i]&&coverage(uv[i*2],uv[i*2+1])>0)touched.add(reliefVertexKey(g,i));}
+  if(result.options.mode!=='normal')for(const g of template.manifest.geometries)if(!replaced.has(reliefGeometryFamily(g))&&reliefGeometryFamily(g)===(result.options.family??'skin')){const uv=vertexUv?.get(g.visualIndex)??g.uv;for(let i=0;i<g.bodyVertices.length;i++)if(g.bodyVertices[i]&&coverage(uv[i*2],uv[i*2+1])>0)touched.add(reliefVertexKey(g,i));}
   for(const g of template.manifest.geometries){
+    const to=g.offsets[variant],normalStride=g.normalEncoding==='dec3n'?4:12;
+    // A whole rebuilt family may have new visuals, UV streams and topology.
+    // Its freshly computed native streams are authoritative; only the other
+    // families need matching against the previous app-generated model.
+    if(replaced.has(reliefGeometryFamily(g))){
+      const p=new Float32Array(g.positions.length),n=new Float32Array(g.normals.length);
+      for(let i=0;i<g.bodyVertices.length;i++){
+        for(let axis=0;axis<3;axis++)p[i*3+axis]=out.getFloat32(to.positionOffset+i*12+axis*4,true);
+        n.set(g.normalEncoding==='dec3n'?unpackReliefNormal(out.getUint32(to.normalOffset+i*normalStride,true)):[0,1,2].map(axis=>out.getFloat32(to.normalOffset+i*normalStride+axis*4,true)),i*3);
+      }
+      positions.push(p);normals.push(n);continue;
+    }
     const uv=new Uint8Array(Float32Array.from(g.uv).buffer),originalUv=uniqueStream(source,uv);
     let oldUv=uniqueStream(base.mesh,uv,true),from=g.offsets[base.variant],previousCount=g.bodyVertices.length,shift=oldUv-originalUv;
     if(oldUv<0){
@@ -43,7 +57,6 @@ export function retainOtherLayerVolumes(template:PreparedReliefTemplate,result:R
       oldUv=uniqueStream(base.mesh,uv.subarray(0,g.legacyVertexCount*8));
       from=g.legacyOffsets[base.variant];previousCount=g.legacyVertexCount;shift=oldUv-g.legacyOffsets[base.variant].uvOffset;
     }
-    const to=g.offsets[variant],normalStride=g.normalEncoding==='dec3n'?4:12;
     const p=new Float32Array(g.positions.length),n=new Float32Array(g.normals.length);
     for(let i=0;i<g.bodyVertices.length;i++){
       const keep=g.bodyVertices[i]&&!touched.has(reliefVertexKey(g,i));

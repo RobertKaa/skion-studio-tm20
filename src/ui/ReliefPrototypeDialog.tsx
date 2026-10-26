@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { RGBAImage } from '../dds';
 import type { MapId } from '../maps';
 import { importMaterialFilesDetailed } from '../materials/import';
@@ -18,7 +18,8 @@ import type { Skin3DFile } from '../skin3d';
 import type { DetailsLayout } from '../detailsSides';
 import type { ProjectionTriangle } from '../three/decalProjection';
 import { CarPreview, type PreviewViewState } from '../three/CarPreview';
-import { DEFAULT_WHEEL_SURFACE } from '../wheelSurface';
+import { DEFAULT_WHEEL_SURFACE, normalizeWheelSurface, type WheelSurfaceSettings } from '../wheelSurface';
+import { hasWheelTreadAppearance, wheelTreadAppearanceCanvas } from '../wheelTreadAppearance';
 import { SliderField } from './controls';
 import { Icon } from './Icon';
 import './reliefPrototypeDialog.css';
@@ -32,14 +33,15 @@ interface PrototypeMaterialSession {
 }
 export interface ReliefPrototypeRuntime {
   createPreview(host: HTMLElement): PrototypePreview;
-  loadTemplate(): Promise<PreparedReliefTemplate>;
+  loadTemplate(kind?: 'full' | 'tyres'): Promise<PreparedReliefTemplate>;
   build(options: BuildReliefOptions): Promise<ReliefPrototypeResult>;
   createMaterialSession?(): PrototypeMaterialSession;
 }
 const DEFAULT_RUNTIME: ReliefPrototypeRuntime = {
-  createPreview: (host) => new CarPreview(host), loadTemplate: () => loadPreparedReliefTemplate('full'), build: buildReliefPrototype,
+  createPreview: (host) => new CarPreview(host), loadTemplate: (kind = 'full') => loadPreparedReliefTemplate(kind), build: buildReliefPrototype,
 };
 export interface ReliefPrototypeDialogProps {
+  tyreTemplate?: boolean;
   family?:ReliefFamily;
   detailsLayout?:DetailsLayout;
   preserveMaterialMask?:boolean;
@@ -49,6 +51,7 @@ export interface ReliefPrototypeDialogProps {
   material: MaterialLayer | null;
   projectionGeometry?: readonly ProjectionTriangle[];
   surfaceFiles: readonly Skin3DFile[];
+  wheelSurface?: WheelSurfaceSettings;
   onClose(): void;
   settings?: ReliefSettings | null;
   onApply?(result: ReliefPrototypeResult, settings: ReliefSettings, maps: ReadonlyMap<MapId, HTMLCanvasElement>, appearance?: MaterialDefinition): Promise<void>;
@@ -129,7 +132,7 @@ function hoodAppearance(definition: MaterialDefinition, channels: Map<MaterialRe
 const nextPaint = () => new Promise<void>(resolve => window.setTimeout(resolve, 0));
 
 /** The workshop owns a separate preview and canvas copies; the editor is never modified. */
-export function ReliefPrototypeDialog({ name, maps, material, family=material?.family??'skin', detailsLayout, projectionGeometry, surfaceFiles, onClose, onExport, settings, onApply,preserveMaterialMask=false,baseVolume, runtime = DEFAULT_RUNTIME }: ReliefPrototypeDialogProps) {
+export function ReliefPrototypeDialog({ name, maps, material, family=material?.family??'skin', detailsLayout, projectionGeometry, surfaceFiles, wheelSurface, onClose, onExport, settings, onApply,preserveMaterialMask=false,baseVolume,tyreTemplate=false, runtime = DEFAULT_RUNTIME }: ReliefPrototypeDialogProps) {
   const familyLabel=family==='skin'?'Carrosserie':family==='details'?'Détails':'Roues';
   const familyMap:MapId=family==='skin'?'Skin_B':family==='details'?'Details_B':'Wheels_B';
   const id = useId(), panel = useRef<HTMLDivElement>(null), previewHost = useRef<HTMLDivElement>(null);
@@ -138,6 +141,25 @@ export function ReliefPrototypeDialog({ name, maps, material, family=material?.f
   const materialSession = useRef<PrototypeMaterialSession | null>(null);
   const numericHeight = useRef<{ src: string; component: string; field: HeightSource | null; aspect: number } | null>(null);
   const vertexUv=useRef<BuildReliefOptions['vertexUv']>(undefined);
+  const wheelPreviewCanvases = useRef<HTMLCanvasElement[]>([]);
+  const wheelAppearance = useMemo(() => normalizeWheelSurface(wheelSurface), [wheelSurface]);
+  // DDS normals stay owned by the relief build. Only the preview receives
+  // cavity-adjusted colour/finish copies; applying and exporting retain raw paint.
+  const bindPreviewMaps = useCallback((instance: PrototypePreview, sources: ReadonlyMap<MapId, HTMLCanvasElement>, size: number) => {
+    const derived: HTMLCanvasElement[] = [];
+    try {
+      for (const [map, source] of sources) {
+        let canvas = source;
+        if (hasWheelTreadAppearance(map, wheelAppearance)) {
+          canvas = document.createElement('canvas'); derived.push(canvas);
+          wheelTreadAppearanceCanvas(source, canvas, map === 'Wheels_B' ? 'color' : 'roughmetal', wheelAppearance, true, undefined, size);
+        }
+        instance.setMapCanvas(map, canvas);
+      }
+    } catch (reason) { release(derived); throw reason; }
+    const previous = wheelPreviewCanvases.current;
+    wheelPreviewCanvases.current = derived; release(previous);
+  }, [wheelAppearance]);
   const selected = useRef(usable(material) ? repeatingLayer(material!) : null);
   const layerScoped=preserveMaterialMask&&!!selected.current;
   const [source, setSource] = useState<Source>(() => settings
@@ -190,9 +212,9 @@ export function ReliefPrototypeDialog({ name, maps, material, family=material?.f
     try {
       instance = runtime.createPreview(previewHost.current!); preview.current = instance;
       instance.setCoatIntensity(1); instance.setDirtPreview(0); instance.setWheelSurface({ ...DEFAULT_WHEEL_SURFACE });
-      for (const [map, canvas] of maps) instance.setMapCanvas(map, canvas);
+      bindPreviewMaps(instance, maps, 2048);
       instance.setSurfaceTextures(surfaceFiles);
-      void runtime.loadTemplate().then(async value => {
+      void runtime.loadTemplate(tyreTemplate ? 'tyres' : 'full').then(async value => {
         const coordinates=detailsLayout?await(await import('../surfaceLayouts')).surfaceReliefUv(value,detailsLayout):undefined;
         if (alive.current) { vertexUv.current=coordinates; setTemplate(value); }
       }).catch(reason => {
@@ -203,11 +225,12 @@ export function ReliefPrototypeDialog({ name, maps, material, family=material?.f
       alive.current = false; invalidatePending();
       document.removeEventListener('keydown', onKey, true); document.removeEventListener('keyup', onKeyUp, true);
       instance?.dispose(); session.dispose();
+      release(wheelPreviewCanvases.current); wheelPreviewCanvases.current = [];
       if (materialSession.current === session) materialSession.current = null;
       preview.current = null; current.current = null; numericHeight.current = null;
       previousFocus?.focus();
     };
-  }, [maps, surfaceFiles, runtime,detailsLayout]);
+  }, [maps, surfaceFiles, runtime,detailsLayout,bindPreviewMaps,tyreTemplate]);
 
   useEffect(() => {
     const session = materialSession.current;
@@ -296,7 +319,7 @@ export function ReliefPrototypeDialog({ name, maps, material, family=material?.f
         const camera = current.current ? instance.getViewState() : null;
         await instance.loadCustomPreview(displayed.project.preview, { nativeSurfaceLayout: true });
         if (!alive.current || generation.current !== ticket) return;
-        for (const [map, canvas] of owned) instance.setMapCanvas(map, canvas);
+        bindPreviewMaps(instance, owned, textureResolution);
         instance.setSurfaceTextures(mergedFiles(surfaceFiles, displayed.project.passthrough));
         // The independent preview uses the same wheel DDS as the exported ZIP.
         instance.setWheelSurface({ mode: 'relief', strength: 1 });
@@ -312,7 +335,7 @@ export function ReliefPrototypeDialog({ name, maps, material, family=material?.f
       } finally { if (rendered) release(rendered.values()); }
     })(); }, 120);
     return () => { window.clearTimeout(timer); invalidate(); if (owned) release(owned.values()); };
-  }, [template, source, mode, strengthMm, compare, maps, surfaceFiles, buildKey, runtime, scope, textureResolution, exaggerated, projectionGeometry,preserveMaterialMask,layerScoped,baseVolume,family,familyMap,detailsLayout]);
+  }, [template, source, mode, strengthMm, compare, maps, surfaceFiles, buildKey, runtime, scope, textureResolution, exaggerated, projectionGeometry,preserveMaterialMask,layerScoped,baseVolume,family,familyMap,detailsLayout,bindPreviewMaps]);
 
   async function importFiles(files: File[]) {
     const ticket = ++importGeneration.current;

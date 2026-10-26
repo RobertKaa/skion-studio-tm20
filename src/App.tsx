@@ -13,6 +13,8 @@ import { CarPreview, type PaintFamily, type PreviewViewState, type UvPreviewFocu
 import { EnvironmentControls } from './ui/EnvironmentControls';
 import { VehiclePoseControls } from './ui/VehiclePoseControls';
 import { WheelSurfaceControls } from './ui/WheelSurfaceControls';
+import { WheelDesignDialog, type WheelDesignTarget } from './ui/WheelDesignDialog';
+import { createWheelDesignDefinition, type WheelDesignSettings } from './wheelDesign';
 import { WheelReliefOverlay } from './ui/WheelReliefOverlay';
 import { TextureBackgroundControls } from './ui/TextureBackgroundControls';
 import type { TextureBackgroundInfo } from './editor/textureBackground';
@@ -34,11 +36,14 @@ import {
 import { exportSkinZip, formatImportError, importSkinZip, rgbaToCanvas } from './skinZip';
 import type { Skin3DFile, Skin3DProject } from './skin3d';
 import { DEFAULT_WHEEL_SURFACE, WHEEL_SURFACE_PRESETS, normalizeWheelSurface, withWheelNormalFile, type WheelSurfaceSettings } from './wheelSurface';
+import { buildWheelTreadVolume } from './wheelTreadVolume';
+import { hasWheelTreadAppearance, wheelTreadAppearanceCanvas, wheelTreadAppearanceCavity } from './wheelTreadAppearance';
 import type { ExportMaterialImage, ExportMaterialMapId } from './exportColorPreview';
 import { replaceSkin3DGeometry } from './skin3d';
 import { loadSkinImportPreview } from './skinImportPreview';
 import UvGuideOverlay from './UvGuideOverlay';
-import { blenderPartsFromGlb, paintIslandsForModel, uvElementIsland, uvRegionBounds } from './blenderParts';
+import { blenderPartsFromGlb, embeddedGlbData, paintIslandsForModel, uvElementIsland, uvRegionBounds } from './blenderParts';
+import { hasExperimentalSkinNormalShader } from './three/materialSlots';
 import type { GenerationSummary } from './generator';
 import type { GeneratorOptions } from './generatorCatalog';
 import { loadRandomPrefs, saveRandomPrefs, sanitizeRandomOptions } from './randomPrefs';
@@ -65,7 +70,7 @@ import { selectLayerInspector, selectionInspector } from './ui/layerNavigation';
 import type { MaterialDefinition, MaterialLayer } from './materials/types';
 import { exportMaterialSurfaces } from './materials/exportSurfaces';
 import { TEXTURE_RESOLUTION, type TextureResolution } from './editor/resolution';
-import { exportReliefPrototype, prototypeSurfaceFiles, reliefPrototypeName } from './relief/export';
+import { exportReliefPrototype, fitTyreArchiveToBudget, prototypeSurfaceFiles, reliefPrototypeName } from './relief/export';
 import type { ReliefPrototypeResult } from './relief/types';
 import { captureReliefSettings, type ReliefSettings } from './relief/settings';
 import type { DetailsSide } from './detailsSides';
@@ -103,6 +108,7 @@ interface ReliefSession {
   speedColor: string;
   dirtEnabled: boolean;
   horn: SkinHorn | null;
+  wheelSurface: WheelSurfaceSettings;
 }
 
 // ----------------------------------------------------------------- constantes
@@ -260,6 +266,9 @@ export default function App() {
   const [layers, setLayers] = useState<LayerInfo[]>([]);
   const [selection, setSelection] = useState<SelectionState | null>(null);
   const [selectedMaterialLayer, setSelectedMaterialLayer] = useState<MaterialLayer | null>(null);
+  const [wheelDesignSession, setWheelDesignSession] = useState<{ layerId?: string; definition?: MaterialDefinition; target: WheelDesignTarget } | null>(null);
+  const wheelDesignSessionRef = useRef(wheelDesignSession); wheelDesignSessionRef.current = wheelDesignSession;
+  const closeWheelDesign = useCallback(() => setWheelDesignSession(null), []);
   const [historyState, setHistoryState] = useState({ undo: false, redo: false });
   const [dirtyMaps, setDirtyMaps] = useState<Partial<Record<MapId, boolean>>>({});
   const [skinName, setSkinName] = useState('MonSkin');
@@ -330,6 +339,9 @@ export default function App() {
   const [dirtEnabled, setDirtEnabled] = useState(true);
   const [dirtPreview, setDirtPreview] = useState(0);
   const [wheelSurface, setWheelSurface] = useState<WheelSurfaceSettings>({ ...DEFAULT_WHEEL_SURFACE });
+  const nativeWheelLayout = !skin3d?.preview || !!skin3d.uvAtlas || !!reliefSettings || skin3d.surfaceTemplate === 'tyres';
+  const wheelVolumeAvailable = (!skin3d || !!skin3d.preview && (skin3d.surfaceTemplate === 'tyres' || !!reliefSettings))
+    && !skin3d?.uvAtlas && !skin3d?.detailsLayout;
   const [surfaceFiles, setSurfaceFiles] = useState<Skin3DFile[]>([]);
   const [horn, setHorn] = useState<SkinHorn | null>(null);
   const [textureResolution, setTextureResolutionState] = useState<TextureResolution>(TEXTURE_RESOLUTION);
@@ -750,7 +762,7 @@ export default function App() {
       if (model?.preview && !model.parts) { try { model.parts = blenderPartsFromGlb(model.preview); } catch { /* old preview remains usable */ } }
       ed.setBlenderParts(model?.parts);
       ed.setDetailsLayout(model?.detailsLayout); ed.setUvAtlas(model?.uvAtlas);
-      if (model?.preview) void pv.loadCustomPreview(model.preview, {nativeSurfaceLayout:!!recovery.session?.reliefSettings || !!model.detailsLayout, detailsLayout:model.detailsLayout}).catch((error) => console.error('[CarPreview] Restauration du modèle custom :', error));
+      if (model?.preview) void pv.loadCustomPreview(model.preview, {nativeSurfaceLayout:!!recovery.session?.reliefSettings || !!model.detailsLayout || model.surfaceTemplate === 'tyres', detailsLayout:model.detailsLayout}).catch((error) => console.error('[CarPreview] Restauration du modèle custom :', error));
       ed.adoptObjectUrls(recovery.urls ?? []);
       void ed.restoreCheckpoint(recovery.checkpoint).then(() => {
         if (editorRef.current !== ed) return;
@@ -790,7 +802,15 @@ export default function App() {
 
   useEffect(() => {
     if (!ready) return;
-    previewRef.current?.setWheelSurface(wheelSurface);
+    textureRevisionRef.current++;
+    if (exportColorPreviewRef.current) {
+      exportColorPreviewRef.current = false; setExportColorPreview(false);
+      previewRef.current?.clearExportColorPreview();
+    }
+    // Keep numeric controls responsive while dragging; rebuild the detailed
+    // colour/material atlases once the gesture briefly settles.
+    const timer = window.setTimeout(() => previewRef.current?.setWheelSurface(wheelSurface), 120);
+    return () => window.clearTimeout(timer);
   }, [ready, wheelSurface]);
 
   useEffect(() => {
@@ -904,7 +924,7 @@ export default function App() {
       const ed = editorRef.current;
       if (!ed) return;
       // Les modales gèrent leurs raccourcis : Ctrl+Z/Suppr ne doivent pas toucher l’éditeur derrière.
-      if (showRandomRef.current || libraryOpenRef.current || downloadsOpenRef.current || reliefSessionRef.current || confirmDialogOpenRef.current || busyRef.current || imagePlacementRef.current || placingImageRef.current) return;
+      if (showRandomRef.current || libraryOpenRef.current || downloadsOpenRef.current || reliefSessionRef.current || wheelDesignSessionRef.current || confirmDialogOpenRef.current || busyRef.current || imagePlacementRef.current || placingImageRef.current) return;
       if ((e.target as HTMLElement).closest('.element-copy-menu')) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault(); void saveProjectRef.current(); return;
@@ -1357,9 +1377,15 @@ export default function App() {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       ed.flushTexture();
       const revision = textureRevisionRef.current;
+      const wheelOfficial = nativeWheelLayout;
+      const wheelCavity = wheelTreadAppearanceCavity(wheelSurface, wheelOfficial, skin3d?.uvAtlas ? skin3d.detailsLayout ?? 'stock' : undefined);
       const sources = (['Skin_B', 'Details_B', 'Wheels_B', 'Skin_R', 'Details_R', 'Wheels_R', 'Skin_CoatR'] as ExportMaterialMapId[]).map((id) => {
-        const canvas = ed.getExportCanvasElement(id);
+        const sourceCanvas = ed.getExportCanvasElement(id);
+        const canvas = hasWheelTreadAppearance(id, wheelSurface, wheelOfficial)
+          ? wheelTreadAppearanceCanvas(sourceCanvas, document.createElement('canvas'), id === 'Wheels_B' ? 'color' : 'roughmetal', wheelSurface, wheelOfficial, wheelCavity, ed.getTextureResolution())
+          : sourceCanvas;
         const image = canvas.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, canvas.width, canvas.height);
+        if (canvas !== sourceCanvas) canvas.width = canvas.height = 1;
         return { id, image: { width: image.width, height: image.height, data: image.data } };
       });
       const worker = new Worker(new URL('./workers/exportColorPreview.worker.ts', import.meta.url), { type: 'module' });
@@ -1416,6 +1442,8 @@ export default function App() {
       await previewRef.current?.loadOfficialModel();
       setSurfaceFiles([...new Map([...(skin3d?.passthrough.filter((entry) => /^(?:(Details|Wheels)_N|(Skin|Details|Wheels)_AO)\.dds$/i.test(entry.name)) ?? []), ...surfaceFiles].map((entry) => [entry.name.toLowerCase(), entry])).values()]);
       setSkin3d(null);
+      skin3dRef.current = null; setReliefSettings(null);
+      if (wheelSurface.volume) setWheelSurface({ ...wheelSurface, volume: false });
       editorRef.current?.setBlenderParts();
       editorRef.current?.setDetailsLayout();
       editorRef.current?.setUvAtlas();
@@ -1468,6 +1496,76 @@ export default function App() {
     void editorRef.current?.setSelectionMaterialDefinition(definition).catch(error => notify(projectError(error)));
   };
 
+  const openWheelDesign = (edit = false) => {
+    const editor = editorRef.current;
+    if (!editor || !ready || busyRef.current || placingImage) return;
+    const layer = edit ? editor.getSelectionMaterialLayer() : null;
+    const owner = edit ? editor.getSelection() as (FabricObject & { id?: string }) | null : null;
+    if (edit && (!layer?.definition.wheelDesign || !owner?.id)) return;
+    const keys = layer?.regions.map(region => region.key) ?? [];
+    const hasSide = (side: string) => keys.some(key => key === `tyres:${side}` || key.startsWith(`tyres:${side}:`));
+    setWheelDesignSession({
+      ...(owner?.id && layer ? { layerId: owner.id, definition: structuredClone(layer.definition) } : {}),
+      target: hasSide('inner') ? hasSide('outer') ? 'both' : 'inner' : 'outer',
+    });
+  };
+
+  const changeWheelSurface = async (value: WheelSurfaceSettings) => {
+    if (busyRef.current) return;
+    const next = normalizeWheelSurface(value);
+    if (next.volume === true && !wheelVolumeAvailable) return;
+    const resetImportedTread = skin3dRef.current?.surfaceTemplate === 'tyres' && wheelSurface.mode === 'relief' && next.mode !== 'relief';
+    if (!wheelVolumeAvailable || !next.volume && !wheelSurface.volume && !resetImportedTread) { setWheelSurface(next); return; }
+    const ed = editorRef.current, pv = previewRef.current, previous = skin3dRef.current;
+    if (!ed || !pv) return;
+    const camera = pv.getViewState();
+    busyRef.current = true; setBusy('Moulage des crampons des quatre pneus…');
+    try {
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      const normalShader = previous?.preview && embeddedGlbData(previous.preview).gltf.materials?.some((material: { name?: string }) => hasExperimentalSkinNormalShader(material.name ?? ''));
+      const result = await buildWheelTreadVolume(next, previous ? {
+        mesh: previous.mesh, variant: normalShader ? 'normal' : reliefSettings?.stats?.templateVariant ?? 'standard',
+      } : undefined);
+      const files = new Map([...(previous?.passthrough ?? []), ...result.project.passthrough].map(file => [file.name.toLowerCase(), file]));
+      const model: Skin3DProject = { ...result.project, name: previous?.name ?? skinName,
+        parts: blenderPartsFromGlb(result.project.preview!), passthrough: [...files.values()] };
+      await pv.loadCustomPreview(model.preview!, { nativeSurfaceLayout: true });
+      ed.setBlenderParts(model.parts); ed.flushTexture();
+      pv.setWheelSurface(next); pv.restoreViewState(camera); pv.setVehiclePose(vehiclePose);
+      skin3dRef.current = model; setSkin3d(model); setWheelSurface(next);
+      setSavedMetadata(null);
+    } catch (error) {
+      if (previous?.preview) await pv.loadCustomPreview(previous.preview, { nativeSurfaceLayout: nativeWheelLayout, detailsLayout: previous.detailsLayout });
+      else await pv.loadOfficialModel();
+      ed.setBlenderParts(previous?.parts); ed.flushTexture(); pv.setWheelSurface(wheelSurface);
+      pv.restoreViewState(camera); pv.setVehiclePose(vehiclePose);
+      notify(`Crampons non appliqués : ${projectError(error)}`);
+    } finally { busyRef.current = false; setBusy(null); }
+  };
+
+  const applyWheelDesign = async (settings: WheelDesignSettings, target: WheelDesignTarget) => {
+    const editor = editorRef.current, session = wheelDesignSessionRef.current;
+    if (!editor || !session || busyRef.current) throw new Error('L’atelier n’est plus disponible. Rouvrez-le depuis Roues.');
+    const definition = createWheelDesignDefinition(settings);
+    const regions = target === 'both' ? ['tyres:outer', 'tyres:inner'] : [`tyres:${target}`];
+    editor.endHistoryCoalescing();
+    if (session.layerId && session.definition) {
+      await editor.updateMaterialLayerDefinition(session.layerId, {
+        ...session.definition, wheelDesign: definition.wheelDesign,
+        name: session.definition.name.startsWith('Flanc · ') ? definition.name : session.definition.name,
+        textures: { ...session.definition.textures, color: definition.textures.color },
+      });
+      if (target !== session.target) editor.setSelectionMaterialMask(regions, [], 'material-definition');
+      editor.commitMaterialLayers();
+    } else {
+      if (MAP_BY_ID[editor.activeMap].group !== 'wheels') throw new Error('La surface a changé. Rouvrez l’atelier depuis Roues.');
+      await editor.addMaterialLayer(definition, regions, [], skin3d?.uvAtlas ? skin3d.detailsLayout ?? 'stock' : undefined);
+    }
+    editor.endHistoryCoalescing();
+    setWheelDesignSession(null); setTool('select'); setInspectorTab('materials');
+    notify(session.layerId ? 'Motif du flanc mis à jour. Le calque et sa finition sont conservés.' : 'Motif ajouté. Superposez d’autres calques ou modifiez-le dans Matières.');
+  };
+
   const onMaterialMaskChange = (regions: string[], exclusions: string[]) => {
     try { editorRef.current?.setSelectionMaterialMask(regions, exclusions); }
     catch (error) { notify(projectError(error)); }
@@ -1497,16 +1595,16 @@ export default function App() {
       const material = requested?editor.materialForRelief(requested.definition,requested.regions,requested.exclusions):editor.getSelectionMaterialLayer(!!atlasSource),geometry=previewRef.current?.getProjectionTriangles()??[];
       const layerScoped=!!requested||material?.family===targetFamily;
       const layerId=material?.family===targetFamily?(editor.getSelection() as (FabricObject&{id?:string})|null)?.id:undefined;
-      let priorVolume=reliefSettings?.stats&&skin3dRef.current?await restoreNativeModel(skin3dRef.current):null;
+      let priorVolume=(reliefSettings?.stats||skin3dRef.current?.surfaceTemplate==='tyres')&&skin3dRef.current?await restoreNativeModel(skin3dRef.current):null;
       if(priorVolume?.detailsLayout)priorVolume=await restoreDetailsSidesModel(priorVolume,reliefSettings!.stats!.templateVariant);
-      const baseVolume=priorVolume?{mesh:priorVolume.mesh,variant:reliefSettings!.stats!.templateVariant}:undefined;
+      const baseVolume=priorVolume?{mesh:priorVolume.mesh,variant:reliefSettings?.stats?.templateVariant??'standard' as const}:undefined;
       const savedFamily=reliefSettings?.family??reliefSettings?.material?.family??'skin';
       const savedStrength=reliefSettings?.strengthByFamily?.[targetFamily]??(savedFamily===targetFamily?reliefSettings?.strengthMm:undefined);
       const savedMode=reliefSettings?.modeByFamily?.[targetFamily]??(savedFamily===targetFamily?reliefSettings?.mode:undefined);
       const settings:ReliefSettings|undefined=layerScoped&&layerId&&savedStrength!==undefined&&reliefSettings?.appliedLayers?.[targetMap]===layerId?{...reliefSettings,family:targetFamily,source:'material',appearanceScope:targetFamily,material,sourceName:material!.definition.name,strengthMm:savedStrength,mode:targetFamily==='skin'?'geometry':savedMode??'geometry',diagnostic:savedStrength>30,scope:'vehicle'}:undefined;
       setReliefSession({ family:targetFamily, detailsLayout:skin3dRef.current?.detailsLayout, name: skinName, maps, roles, atlasSource, preferMaterial:layerScoped,layerId,baseVolume,settings,material: material?.family === targetFamily ? material : null,
         projectionGeometry: atlasSource?sourceAtlasGeometry(geometry):geometry,
-        surfaceFiles: prepared, illumRole, speedColor, dirtEnabled, horn });
+        surfaceFiles: prepared, illumRole, speedColor, dirtEnabled, horn, wheelSurface: { ...wheelSurface } });
     } catch (error) { notify(`Atelier de relief indisponible : ${projectError(error)}`); }
     finally { setBusy(null); }
   };
@@ -1526,6 +1624,8 @@ export default function App() {
     let blob:Blob;try{blob = await exportReliefPrototype(session.name, sourceName, result, maps, files, {
       illumRole: session.illumRole, speedColor: session.speedColor, dirtEnabled: session.dirtEnabled,
       horn: session.horn,
+      wheelSurface: session.wheelSurface, wheelOfficialModel: true,
+      wheelCavity: wheelTreadAppearanceCavity(session.wheelSurface, true, session.atlasSource),
       getIllumRoleCanvas: id => roles.get(id)!,
     }, icon);}finally{for(const canvas of converted)canvas.width=canvas.height=1;}
     const url = URL.createObjectURL(blob), anchor = document.createElement('a');
@@ -1578,7 +1678,7 @@ export default function App() {
       ed.commitCheckpoint(checkpoint); ed.setActiveMap(activeMap); ed.flushTexture();
       const files = new Map([...(reliefSessionRef.current?.surfaceFiles ?? []), ...result.project.passthrough].map(file => [file.name.toLowerCase(), file]));
       if (result.options.mode === 'geometry') files.delete('skin_n.dds');
-      const model = { ...result.project, parts, passthrough: atlasSource?await reorganizeSurfaceFiles([...files.values()],atlasSource):[...files.values()] };
+      const model = { ...result.project, ...(previousModel?.surfaceTemplate ? { surfaceTemplate: previousModel.surfaceTemplate } : {}), parts, passthrough: atlasSource?await reorganizeSurfaceFiles([...files.values()],atlasSource):[...files.values()] };
       skin3dRef.current = model; setSkin3d(model); setSurfaceFiles([]);
       const priorFamily=reliefSettings?.family??reliefSettings?.material?.family??'skin';
       setReliefSettings({ ...settings, appliedLayers, stats: result.stats, heightSourceBits:result.options.heightSourceBits,
@@ -1725,8 +1825,10 @@ export default function App() {
         if (!modelOnly) {
           setSurfaceFiles(result.skin3d ? [] : result.surfaceTextures ?? []);
           setHorn(result.horn ?? null);
-          setWheelSurface(result.surfaceTextures?.some((entry) => /^Wheels_N\.dds$/i.test(entry.name))
+          setWheelSurface(result.wheelSurface ? normalizeWheelSurface(result.wheelSurface) : result.surfaceTextures?.some((entry) => /^Wheels_N\.dds$/i.test(entry.name))
             ? { mode: 'relief', strength: 1 } : { ...DEFAULT_WHEEL_SURFACE });
+        } else {
+          setWheelSurface(result.wheelSurface ? normalizeWheelSurface(result.wheelSurface) : normalizeWheelSurface({ ...wheelSurface, volume: false }));
         }
       }
       if (normalsOnly) {
@@ -1786,6 +1888,7 @@ export default function App() {
     const assets = new Map<string, Blob | Uint8Array>(content.assets);
     const model = projectModel ? { mesh: 'assets/mesh.gbx', preview: projectModel.preview ? 'assets/preview.glb' : null, name: projectModel.name,
       ...(projectModel.parts ? { parts: projectModel.parts } : {}), ...(projectModel.detailsLayout ? { detailsLayout: projectModel.detailsLayout } : {}), ...(projectModel.uvAtlas ? {uvAtlas:projectModel.uvAtlas}:{}),
+      ...(projectModel.surfaceTemplate ? { surfaceTemplate: projectModel.surfaceTemplate } : {}),
       passthrough: projectModel.passthrough.map((entry, index) => ({ name: entry.name, asset: `assets/extra-${index}.bin` })) } : null;
     if (projectModel) {
       assets.set('assets/mesh.gbx', projectModel.mesh);
@@ -1932,7 +2035,7 @@ export default function App() {
       await ed.loadProject(hydrated.document.editor.maps, { ...hydrated.document.editor, textureResolution: hydrated.document.workspace.textureResolution });
       if (hydrated.model?.preview && !hydrated.model.parts) { try { hydrated.model.parts = blenderPartsFromGlb(hydrated.model.preview); } catch { /* preserve legacy projects */ } }
       ed.setBlenderParts(hydrated.model?.parts);
-      if (hydrated.model?.preview) await pv.loadCustomPreview(hydrated.model.preview, { nativeSurfaceLayout: !!hydrated.document.workspace.relief || !!hydrated.model.detailsLayout, detailsLayout: hydrated.model.detailsLayout });
+      if (hydrated.model?.preview) await pv.loadCustomPreview(hydrated.model.preview, { nativeSurfaceLayout: !!hydrated.document.workspace.relief || !!hydrated.model.detailsLayout || hydrated.model.surfaceTemplate === 'tyres', detailsLayout: hydrated.model.detailsLayout });
       else if (mode !== 'reset') await pv.loadOfficialModel();
       const document = hydrated.document; const workspace = document.workspace;
       for (const url of ed.takeObjectUrls()) URL.revokeObjectURL(url);
@@ -2048,10 +2151,12 @@ export default function App() {
       try { pv.setDirtPreview(0, dirtEnabled); exportIcon = pv.snapshot(256); }
       finally { pv.setDirtPreview(dirtPreview, dirtEnabled); }
       const extraFiles = [...new Map([...(skin3d?.passthrough ?? []), ...surfaceFiles].map((entry) => [entry.name.toLowerCase(), entry])).values()];
-      const wheelNormal = await buildAtlasWheelNormalFile(wheelSurface, extraFiles, !skin3d?.preview,skin3d?.uvAtlas?skin3d.detailsLayout??'stock':undefined);
-      const wheelOcclusion = await buildAtlasWheelOcclusionFile(wheelSurface, !skin3d?.preview,skin3d?.uvAtlas?skin3d.detailsLayout??'stock':undefined);
+      const wheelNormal = await buildAtlasWheelNormalFile(wheelSurface, extraFiles, nativeWheelLayout,skin3d?.uvAtlas?skin3d.detailsLayout??'stock':undefined);
+      const wheelOcclusion = await buildAtlasWheelOcclusionFile(wheelSurface, nativeWheelLayout,skin3d?.uvAtlas?skin3d.detailsLayout??'stock':undefined);
       const exportSources = {
         horn,
+        wheelSurface, wheelOfficialModel: nativeWheelLayout,
+        wheelCavity: wheelTreadAppearanceCavity(wheelSurface, nativeWheelLayout, skin3d?.uvAtlas ? skin3d.detailsLayout ?? 'stock' : undefined),
         textureResolution: ed.getTextureResolution(),
         dirtEnabled,
         getMapCanvas: (id: MapId) => ed.getExportCanvasElement(id),
@@ -2060,11 +2165,11 @@ export default function App() {
         speedColor,
         icon: exportIcon,
         meshGbx: skin3d?.mesh,
-        detailsLayout: skin3d?.detailsLayout, uvAtlas:skin3d?.uvAtlas,
+        detailsLayout: skin3d?.detailsLayout, uvAtlas:skin3d?.uvAtlas, surfaceTemplate: skin3d?.surfaceTemplate,
         previewGlb: skin3d?.preview ?? undefined,
         passthrough: await exportMaterialSurfaces(withWheelNormalFile(extraFiles, wheelNormal, wheelSurface, wheelOcclusion), ed.getMaterialSurfaceOverlays(), ed.getTextureResolution(), !skin3d?.preview, wheelSurface, extraFiles.some(file => /^Wheels_N\.dds$/i.test(file.name))),
       };
-      const blob = reliefSettings && skin3d?.preview && reliefSettings.stats
+      let blob = reliefSettings && skin3d?.preview && reliefSettings.stats
         ? await exportReliefPrototype(skinName, reliefSettings.sourceName, { options: {
           family:reliefSettings.family??reliefSettings.material?.family??'skin', mode: reliefSettings.mode, strengthMm: reliefSettings.strengthMm, normalStrength: 1, scope: reliefSettings.scope,
           textureResolution: ed.getTextureResolution(), diagnostic: reliefSettings.diagnostic, surfaceMethod: 'dense-heightfield-v1',
@@ -2072,6 +2177,10 @@ export default function App() {
         }, project: skin3d, normalAtlas: null, stats: reliefSettings.stats },
         new Map(MAPS.map(map => [map.id, ed.getExportCanvasElement(map.id)])), exportSources.passthrough, exportSources, exportIcon)
         : await exportSkinZip(skinName, exportSources);
+      if (skin3d?.surfaceTemplate === 'tyres' && !(reliefSettings && skin3d.preview && reliefSettings.stats)) {
+        setBusy('Finalisation du ZIP des pneus et vérification de sa taille…');
+        blob = await fitTyreArchiveToBudget(blob, ed.getTextureResolution());
+      }
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = `${skinName || 'skin'}.zip`;
@@ -2828,8 +2937,17 @@ export default function App() {
 
   const renderTextureProps = () => (
     <>
+      {family === 'wheels' && <Section title="Décoration des flancs">
+        <button type="button" className="wheel-design-entry" disabled={!ready || !!busy || placingImage || !nativeWheelLayout} onClick={() => openWheelDesign()}>
+          <Icon name="circle" size={34} /><span><strong>Ouvrir l’atelier de flancs</strong><small>Anneaux, damiers, repères et lettrage.<br />Un motif précis, un calque éditable.</small></span><Icon name="chevronRight" size={15} />
+        </button>
+        {!nativeWheelLayout && <p className="hint">Cet atelier utilise les flancs de la Stadium. Pour ce modèle, adaptez une image depuis Élément.</p>}
+      </Section>}
       {family === 'wheels' && <Section title="Relief des pneus">
-        <WheelSurfaceControls value={wheelSurface} onChange={setWheelSurface} officialModel={!skin3d?.preview||!!skin3d.uvAtlas} />
+        <WheelSurfaceControls value={wheelSurface} onChange={value => void changeWheelSurface(value)} officialModel={nativeWheelLayout} volumeAvailable={wheelVolumeAvailable} volumeBusy={!!busy} onInspect={ready && !busy ? () => {
+          const region = guideIslands.find(island => island.key === 'tyres:tread') ?? guideIslands.find(island => island.key === 'tyres');
+          if (region) { setView('3d'); focusOrganizedRegion(region); }
+        } : undefined} />
       </Section>}
       {tool === 'region' && renderRegionControls()}
       {layers.some((layer) => layer.name === 'Texture importée') && <Section title="Retrouver les pièces">
@@ -3271,7 +3389,7 @@ export default function App() {
               <div className={`canvas-frame${tool === 'draw' ? ' canvas-frame--draw' : ''}`} ref={canvasFrameRef}>
                 <div ref={editorHostRef} className="canvas-host" />
                 <div className="canvas-overlays" style={{ transform: overlayTransform }}>
-                  <WheelReliefOverlay atlasSource={skin3d?.uvAtlas?skin3d.detailsLayout??'stock':undefined} visible={family === 'wheels' && showWheelRelief && view !== '3d'} value={wheelSurface} files={wheelSurfaceFiles} officialModel={!skin3d?.preview} technicalChannel={mapDef.kind !== 'basecolor'} />
+                  <WheelReliefOverlay atlasSource={skin3d?.uvAtlas?skin3d.detailsLayout??'stock':undefined} visible={family === 'wheels' && showWheelRelief && view !== '3d'} value={wheelSurface} files={wheelSurfaceFiles} officialModel={nativeWheelLayout} technicalChannel={mapDef.kind !== 'basecolor'} />
                   {showGrid && <div className="grid-overlay" style={{ backgroundSize: `${100 / gridDiv}% ${100 / gridDiv}%` }} />}
                   <UvGuideOverlay activeMap={activeMap} atlas={skin3d?.uvAtlas?realAtlasLayout(family,skin3d.detailsLayout??'stock'):undefined} islands={guideIslands} zoom={zoomPercent / 100} visible={(showGuide || tool === 'region') && guideIslands.length > 0} focusedRegion={family === 'skin' ? focusedRegion : null} selectedRegion={tool === 'region' && regionPrecision === 'piece' ? quickRegionKey : null} selectedElement={tool === 'region' ? selectedElement : null} onSelect={tool === 'region' ? (key) => { setQuickRegionKey(key); setRegionElement(null); setInspectorTab(previous => previous === 'materials' ? previous : 'texture'); } : undefined} />
                 </div>
@@ -3388,7 +3506,7 @@ export default function App() {
               </div>}
               <button type="button" className="btn btn-full" disabled={placingImage} onClick={() => setImagePlacement(null)}>Annuler le placement</button></div> : <>
             {mapDef.kind === 'illum' && inspectorTab !== 'layers' && renderLightPreview()}
-            {inspectorTab === 'materials' ? <><div className="relief-prototype-entry"><button type="button" className="btn btn-full" disabled={!ready || !!busy || placingImage} onClick={() => void openReliefPrototype()}><Icon name="box" size={15} /> Textures et relief · v1.0</button>{reliefSettings && <p className="hint">Pour modifier la hauteur, rouvrez l’atelier. Les calques règlent l’apparence.</p>}</div><MaterialsPanel family={family} islands={guideIslands} selectedRegion={selectedElement ?? selectedIsland ?? null} selection={selectedMaterialLayer}
+            {inspectorTab === 'materials' ? <>{selectedMaterialLayer?.definition.wheelDesign && <button type="button" className="wheel-design-entry wheel-design-edit" disabled={!ready || !!busy || placingImage} onClick={() => openWheelDesign(true)}><Icon name="circle" size={28} /><span><strong>Modifier le motif du flanc</strong><small>Rayon, largeur, rotation et inscription</small></span><Icon name="chevronRight" size={15} /></button>}<div className="relief-prototype-entry"><button type="button" className="btn btn-full" disabled={!ready || !!busy || placingImage} onClick={() => void openReliefPrototype()}><Icon name="box" size={15} /> Textures et relief · v1.0</button>{reliefSettings && <p className="hint">Pour modifier la hauteur, rouvrez l’atelier. Les calques règlent l’apparence.</p>}</div><MaterialsPanel family={family} islands={guideIslands} selectedRegion={selectedElement ?? selectedIsland ?? null} selection={selectedMaterialLayer}
               disabled={!ready || !!busy || placingImage} onApply={(definition, regions, exclusions) => void onApplyMaterial(definition, regions, exclusions)}
               onChange={onMaterialChange} onChangeMask={onMaterialMaskChange} onCommit={() => { editorRef.current?.commitMaterialLayers(); endHistoryGesture(); }} onError={notify} onOpenRelief={(definition,regions,exclusions)=>void openReliefPrototype({definition,regions,exclusions})} /></>
             : inspectorTab === 'layers' ? renderLayers() : inspectorTab === 'texture' || tool === 'region' ? renderTextureProps() : tool !== 'select' ? (
@@ -3417,7 +3535,9 @@ export default function App() {
 
       {downloadsOpen && <DownloadDialog onClose={closeDownloads} onPrepareProject={downloadCurrentProject} onExport={onExport} horn={horn} onHornChange={setHorn} />}
 
-      {reliefSession && <Suspense fallback={<div className="modal-overlay" role="status">Chargement de l’atelier de relief…</div>}><ReliefPrototypeDialog family={reliefSession.family} detailsLayout={reliefSession.detailsLayout} name={reliefSession.name} maps={reliefSession.maps} material={reliefSession.material} projectionGeometry={reliefSession.projectionGeometry} surfaceFiles={reliefSession.surfaceFiles} settings={reliefSession.settings??null} preserveMaterialMask={reliefSession.preferMaterial} baseVolume={reliefSession.baseVolume} onApply={applyRelief} onClose={closeReliefPrototype} onExport={downloadReliefPrototype} /></Suspense>}
+      {wheelDesignSession && <WheelDesignDialog initial={wheelDesignSession.definition?.wheelDesign} initialTarget={wheelDesignSession.target} editing={!!wheelDesignSession.layerId} onApply={applyWheelDesign} onClose={closeWheelDesign} />}
+
+      {reliefSession && <Suspense fallback={<div className="modal-overlay" role="status">Chargement de l’atelier de relief…</div>}><ReliefPrototypeDialog tyreTemplate={skin3d?.surfaceTemplate === 'tyres'} family={reliefSession.family} detailsLayout={reliefSession.detailsLayout} name={reliefSession.name} maps={reliefSession.maps} material={reliefSession.material} projectionGeometry={reliefSession.projectionGeometry} surfaceFiles={reliefSession.surfaceFiles} wheelSurface={reliefSession.wheelSurface} settings={reliefSession.settings??null} preserveMaterialMask={reliefSession.preferMaterial} baseVolume={reliefSession.baseVolume} onApply={applyRelief} onClose={closeReliefPrototype} onExport={downloadReliefPrototype} /></Suspense>}
 
       {libraryOpen && <ProjectLibrary currentId={projectId} needsSave={projectModified && (dirtyCount > 0 || !!projectId || skinName !== 'MonSkin' || !!editorRef.current?.hasProjectContent() || !!skin3d || coatIntensity !== 1 || neonIntensity !== 1.4 || !dirtEnabled || textureResolution !== TEXTURE_RESOLUTION)}
         onClose={() => setLibraryOpen(false)} onSave={saveProject} onOpen={openSavedProject} onImport={importProjectFile} onDownloadCurrent={downloadCurrentProject}

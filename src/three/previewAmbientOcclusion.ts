@@ -122,7 +122,7 @@ export class PreviewAmbientOcclusion {
   /** Each generated tread uses its own prelight; imported/native AO is reserved for source relief. */
   setWheelSurface(value: WheelSurfaceSettings) {
     const next = normalizeWheelSurface(value);
-    if (next.mode === this.wheelSurface.mode && next.strength === this.wheelSurface.strength) return;
+    if (next.mode === this.wheelSurface.mode && next.strength === this.wheelSurface.strength && next.volume === this.wheelSurface.volume) return;
     this.wheelSurface = next;
     this.sync();
   }
@@ -155,7 +155,7 @@ export class PreviewAmbientOcclusion {
         ? this.wheelSurface.mode === 'smooth' || this.wheelSurface.strength === 0
           ? null
           : isWheelTreadPreset(this.wheelSurface.mode)
-            ? this.officialModel||this.atlasSource ? getWheelTreadOcclusion(this.wheelSurface.mode) : null
+            ? this.officialModel||this.atlasSource ? getWheelTreadOcclusion(this.wheelSurface.mode, this.wheelSurface.volume === true) : null
             : resolveAmbientOcclusion(file, this.imported, this.native, this.officialModel||!!this.atlasSource, this.importedWheelNormal)
         : resolveAmbientOcclusion(file, this.imported, this.native, this.officialModel||!!this.atlasSource, this.importedWheelNormal);
       const source=raw&&this.atlasSource&&(wheel&&isWheelTreadPreset(this.wheelSurface.mode)||!this.imported.has(file))?cachedAtlasPixels(raw,file==='Skin_AO.dds'?'skin':file==='Details_AO.dds'?'details':'wheels',this.atlasSource,false):raw;

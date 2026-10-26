@@ -33,7 +33,7 @@ export function validReliefSettings(value: unknown, sourceValidator?: (src: stri
     || !['standard','normal'].includes(v.stats.templateVariant)
     || !Number.isFinite(v.stats.maxDisplacementMm) || v.stats.maxDisplacementMm < 0 || v.stats.maxDisplacementMm > 80.001
     || !['affectedVertices','hoodVertices','eligibleVertices','triangleCount'].every(key => {
-      const n = v.stats![key as 'affectedVertices']; return Number.isSafeInteger(n) && n >= 0 && n <= 400000;
+      const n = v.stats![key as 'affectedVertices']; return Number.isSafeInteger(n) && n >= 0 && n <= (key === 'triangleCount' ? 2_000_000 : 600_000);
     }))) return false;
   return v.version === 1 && ['material','demo','diagnostic'].includes(v.source)
     && typeof v.sourceName === 'string' && v.sourceName.length > 0 && v.sourceName.length <= 160 && ![...v.sourceName].some(c=>c.charCodeAt(0)<32)

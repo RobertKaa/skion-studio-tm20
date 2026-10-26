@@ -1,0 +1,57 @@
+.wheel-design-overlay { z-index: 180; padding: 24px; }
+.wheel-design-dialog { width: 1010px; max-width: calc(100vw - 48px); max-height: calc(100vh - 48px); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 18px; background: var(--bg-1); box-shadow: 0 32px 100px #0009; }
+.wheel-design-header { display: flex; align-items: flex-start; justify-content: space-between; padding: 23px 28px 20px; border-bottom: 1px solid var(--line); }
+.wheel-design-eyebrow { font-size: 9px; letter-spacing: .2em; color: var(--accent); font-weight: 600; }
+.wheel-design-header h2 { margin: 5px 0 4px; font-size: 30px; letter-spacing: -.045em; font-weight: 550; }
+.wheel-design-header p { margin: 0; color: var(--fg-2); font-size: 12px; }
+.wheel-design-body { display: grid; grid-template-columns: 1.08fr 1fr; overflow: hidden; min-height: 0; }
+.wheel-design-preview { position: relative; display: flex; flex-direction: column; justify-content: center; padding: 18px 28px; background: radial-gradient(ellipse at center, #24303966, transparent 65%), var(--bg-0); border-right: 1px solid var(--line); }
+.wheel-design-preview-head { display: flex; align-items: center; justify-content: space-between; font-size: 9px; letter-spacing: .13em; color: var(--fg-3); }
+.wheel-design-preview-head label { display: flex; align-items: center; gap: 5px; font-size: 10px; letter-spacing: 0; }
+.wheel-design-preview-head input { accent-color: var(--accent); }
+.wheel-design-dial { position: relative; flex-shrink: 0; aspect-ratio: 1; width: min(100%, calc(100vh - 390px)); margin: 12px auto; }
+.wheel-design-dial > svg, .wheel-design-dial > canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.wheel-design-center { position: absolute; inset: 35%; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; }
+.wheel-design-center > span { font-size: 46px; font-weight: 300; font-variant-numeric: tabular-nums; letter-spacing: -.06em; color: var(--fg); }
+.wheel-design-center small { color: var(--accent); font-size: 28px; }
+.wheel-design-center p { font-size: 8px; letter-spacing: .2em; color: var(--fg-3); margin: 4px 0; }
+.wheel-design-measures { display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-top: 1px solid var(--line); }
+.wheel-design-measures > span { color: var(--fg-3); letter-spacing: .08em; font-size: 8px; }
+.wheel-design-measures strong { display: block; color: var(--fg); font-size: 15px; margin-top: 5px; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.wheel-design-preview-note { margin: 0; font-size: 10px; color: var(--fg-3); line-height: 1.5; }
+.wheel-design-controls { padding: 22px 24px; min-height: 0; overflow-y: auto; }
+.wheel-design-controls fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.wheel-design-controls legend, .wheel-design-divider { color: var(--accent); font-size: 10px; font-variant-numeric: tabular-nums; }
+.wheel-design-controls legend span, .wheel-design-divider span { color: var(--fg); margin-left: 9px; font-size: 12px; font-weight: 600; }
+.wheel-design-divider { padding-top: 20px; margin-top: 20px; border-top: 1px solid var(--line); }
+.wheel-design-patterns { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 12px; }
+.wheel-design-patterns button { display: flex; flex-direction: column; align-items: center; gap: 5px; min-width: 0; padding: 7px 3px; border: 1px solid var(--line); background: var(--bg-0); border-radius: 8px; cursor: pointer; color: var(--fg-2); }
+.wheel-design-patterns button.is-active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.wheel-design-patterns canvas { width: 48px; height: 48px; }
+.wheel-design-patterns span { font-size: 9px; line-height: 1.2; }
+.wheel-design-color { display: flex; justify-content: space-between; align-items: center; margin: 16px 0; color: var(--fg-2); font-size: 11px; }
+.wheel-design-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 18px; }
+.wheel-design-field { display: grid; gap: 6px; min-width: 0; }
+.wheel-design-field > span { font-size: 10px; color: var(--fg-2); }
+.wheel-design-field > div { display: flex; align-items: center; background: var(--bg-0); border: 1px solid var(--line); border-radius: 6px; }
+.wheel-design-field input[type="number"] { width: 100%; min-width: 0; border: 0; background: transparent; color: var(--fg); padding: 7px 9px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.wheel-design-field > div > span { padding-right: 10px; font-size: 10px; color: var(--fg-3); }
+.wheel-design-field input[type="range"] { width: 100%; min-width: 0; height: 12px; margin: 0; accent-color: var(--accent); }
+.wheel-design-lettering { display: grid; gap: 13px; margin-top: 15px; }
+.wheel-design-lettering > label, .wheel-design-target { display: grid; gap: 7px; font-size: 10px; color: var(--fg-2); }
+.wheel-design-lettering input[type="text"] { width: 100%; padding: 9px; font-size: 13px; letter-spacing: .06em; }
+.wheel-design-target { margin-top: 13px; }
+.wheel-design-target select { width: 100%; }
+.wheel-design-controls .hint { font-size: 10px; margin: 11px 0 0; line-height: 1.6; }
+.wheel-design-footer { display: flex; align-items: center; gap: 10px; padding: 17px 24px; border-top: 1px solid var(--line); }
+.wheel-design-footer > div { flex: 1; min-width: 0; }
+.wheel-design-footer strong { display: block; font-size: 12px; }
+.wheel-design-footer > div > span { display: block; font-size: 10px; color: var(--fg-3); margin-top: 3px; }
+.wheel-design-error { color: var(--danger); font-size: 11px; margin: 0; }
+.wheel-design-entry { display: flex; align-items: center; gap: 13px; padding: 14px 12px; border: 1px solid var(--accent-line); border-radius: 10px; background: linear-gradient(120deg, var(--accent-soft), transparent); color: var(--fg); cursor: pointer; text-align: left; width: 100%; }
+.wheel-design-entry > svg { flex-shrink: 0; color: var(--accent); }
+.wheel-design-entry strong { display: block; font-size: 12px; }
+.wheel-design-entry small { display: block; color: var(--fg-2); font-size: 10px; line-height: 1.5; margin-top: 3px; }
+.wheel-design-entry:disabled { opacity: .4; cursor: default; }
+.wheel-design-entry:hover:not(:disabled) { border-color: var(--accent); }
+.wheel-design-edit { margin-bottom: 12px; }

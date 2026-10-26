@@ -34,6 +34,8 @@ export interface Skin3DFile {
 
 /** Projet 3D chargé depuis un zip (dossier projet ou skin déjà compilé). */
 export interface Skin3DProject {
+  /** Trusted native surface topology; persists when wheel volume is disabled. */
+  surfaceTemplate?: 'tyres';
   uvAtlas?: UvAtlasVersion;
   detailsLayout?: DetailsLayout;
   parts?: BlenderPart[];

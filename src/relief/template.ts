@@ -1,11 +1,12 @@
 import type { PreparedReliefTemplate, ReliefTemplateAsset, ReliefTemplateManifest, ReliefVariant } from './types';
 
 const MAX_ASSET_BYTES = 64 * 1024 * 1024;
+const MAX_MANIFEST_BYTES = 48 * 1024 * 1024;
 
 function asset(value: ReliefTemplateAsset): boolean {
   return !!value && Number.isSafeInteger(value.byteLength) && value.byteLength > 0 && value.byteLength <= MAX_ASSET_BYTES
     && typeof value.sha256 === 'string' && /^[0-9a-f]{64}$/.test(value.sha256)
-    && typeof value.url === 'string' && /^(?:\/models\/relief\/)?(?:(?:dense|full)\/)?[a-zA-Z0-9_.-]+$/.test(value.url)
+    && typeof value.url === 'string' && /^(?:\/models\/relief\/)?(?:(?:dense|full|tyres)\/)?[a-zA-Z0-9_.-]+$/.test(value.url)
     && !value.url.includes('..');
 }
 function numbers(values: number[], length: number, min: number, max: number): boolean {
@@ -20,7 +21,7 @@ export function decodeReliefManifest(input: unknown): ReliefTemplateManifest {
   if (value.encoding !== 'numeric-base64-v1' || !Array.isArray(value.geometries) || value.geometries.length > 32) throw new Error('Encodage du relief invalide.');
   let total = 0;
   function decode(source: unknown, kind: 'float' | 'uint' | 'bool'): number[] | boolean[] {
-    if (typeof source !== 'string' || source.length % 4 || source.length > 20_000_000 || !/^[A-Za-z0-9+/]*={0,2}$/.test(source) || (total += source.length) > 40 * 1024 * 1024) throw new Error('Tableau du relief trop volumineux ou invalide.');
+    if (typeof source !== 'string' || source.length % 4 || source.length > 20_000_000 || !/^[A-Za-z0-9+/]*={0,2}$/.test(source) || (total += source.length) > MAX_MANIFEST_BYTES) throw new Error('Tableau du relief trop volumineux ou invalide.');
     const raw = atob(source), stride = kind === 'bool' ? 1 : 4;
     if (raw.length % stride) throw new Error('Dimensions du relief invalides.');
     const bytes = Uint8Array.from(raw, c => c.charCodeAt(0)), view = new DataView(bytes.buffer);
@@ -135,10 +136,10 @@ export async function verifyPreparedReliefTemplate(template: PreparedReliefTempl
   }
 }
 
-const loading = new Map<boolean | 'full', Promise<PreparedReliefTemplate>>();
+const loading = new Map<boolean | 'full' | 'tyres', Promise<PreparedReliefTemplate>>();
 
 /** No uploaded .blend or GBX is parsed or executed; this loads product assets. */
-export function loadPreparedReliefTemplate(dense: boolean | 'full' = false): Promise<PreparedReliefTemplate> {
+export function loadPreparedReliefTemplate(dense: boolean | 'full' | 'tyres' = false): Promise<PreparedReliefTemplate> {
   const cached = loading.get(dense); if (cached) return cached;
   const base = import.meta.env?.BASE_URL ?? '/';
   const withBase = (url: string) => `${base.replace(/\/$/, '')}${url.startsWith('/') ? url : `/models/relief/${url}`}`;
@@ -151,10 +152,10 @@ export function loadPreparedReliefTemplate(dense: boolean | 'full' = false): Pro
     await checkAsset(data, entry); return data;
   };
   const pending = (async () => {
-    const response = await fetch(withBase(`/models/relief/${dense === 'full' ? 'full/' : dense ? 'dense/' : ''}manifest.json`), { signal: AbortSignal.timeout(20_000) });
+    const response = await fetch(withBase(`/models/relief/${dense === 'full' || dense === 'tyres' ? `${dense}/` : dense ? 'dense/' : ''}manifest.json`), { signal: AbortSignal.timeout(20_000) });
     if (!response.ok) throw new Error('Le modèle du prototype est indisponible.');
     const text = await response.text();
-    if (text.length > 40 * 1024 * 1024) throw new Error('Description du modèle de relief trop volumineuse.');
+    if (text.length > MAX_MANIFEST_BYTES) throw new Error('Description du modèle de relief trop volumineuse.');
     const manifest = decodeReliefManifest(JSON.parse(text));
     validateReliefManifest(manifest);
     const [preview, standard, normal, dependencies] = await Promise.all([

@@ -1,3 +1,5 @@
+import { isValidWheelDesign, type WheelDesignSettings } from '../wheelDesign';
+
 export type MaterialPreset = 'solid' | 'carbon' | 'brushed' | 'rubber' | 'fabric' | 'scratched';
 export type MaterialChannel = 'color' | 'roughness' | 'metalness' | 'roughmetal' | 'coat' | 'emission' | 'dirt' | 'normal' | 'ao' | 'height';
 export type MaterialTextureChannel = MaterialChannel;
@@ -14,6 +16,8 @@ export interface MaterialTexture {
 /** Texture bytes. Placement uses 2048 reference pixels in the UV sheet, or along
  * the longest vehicle dimension for projections and surface coordinates. */
 export interface MaterialDefinition {
+  /** Editable construction settings for a generated tyre-sidewall motif. */
+  wheelDesign?: WheelDesignSettings;
   surfaceOnly?:boolean;
   surfaceRelief?: import('./relief').SurfaceReliefSettings;
   version: 1;
@@ -131,7 +135,8 @@ function validateSource(source: string): boolean {
 }
 
 export function isValidMaterialDefinition(value: unknown, sourceValidator: (src: string) => boolean = isLocalMaterialSource): value is MaterialDefinition {
-  if (!record(value) || !exactKeys(value, ['version', 'name', 'preset', 'color', 'roughness', 'metalness', 'coat', 'dirt', 'emissionColor', 'emissionStrength', 'emissionRole', 'normalStrength', 'aoStrength', 'opacity', 'transform', 'textures','surfaceRelief','surfaceOnly'])) return false;
+  if (!record(value) || !exactKeys(value, ['version', 'name', 'preset', 'color', 'roughness', 'metalness', 'coat', 'dirt', 'emissionColor', 'emissionStrength', 'emissionRole', 'normalStrength', 'aoStrength', 'opacity', 'transform', 'textures','surfaceRelief','surfaceOnly','wheelDesign'])) return false;
+  if (value.wheelDesign !== undefined && (!isValidWheelDesign(value.wheelDesign) || !record(value.transform) || value.transform.projection !== 'wheel-face')) return false;
   if(value.surfaceOnly!==undefined&&typeof value.surfaceOnly!=='boolean')return false;
   const relief=value.surfaceRelief;
   if(relief!==undefined&&(!record(relief)||!exactKeys(relief,['source','heightStrength','midpoint','contrast','heightOrigin'])||!['auto','normal','height','combined','none'].includes(String(relief.source))||!bounded(relief.heightStrength,0,4)||!bounded(relief.midpoint,0,1)||!bounded(relief.contrast,.1,4)||(relief.heightOrigin!==undefined&&relief.heightOrigin!=='normal-estimate')))return false;

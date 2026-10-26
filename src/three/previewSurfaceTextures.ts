@@ -130,7 +130,7 @@ export class PreviewSurfaceTextures {
   /** Smooth is a flat normal, just like the explicit Wheels_N exported to game. */
   setWheelSurface(value: WheelSurfaceSettings) {
     const next = normalizeWheelSurface(value);
-    if (next.mode === this.wheelSurface.mode && next.strength === this.wheelSurface.strength) return;
+    if (next.mode === this.wheelSurface.mode && next.strength === this.wheelSurface.strength && next.volume === this.wheelSurface.volume) return;
     this.wheelSurface = next;
     this.sync();
   }
@@ -142,7 +142,7 @@ export class PreviewSurfaceTextures {
     // Use the same explicit flat fallback as export on unknown custom UVs.
     if (isWheelTreadPreset(mode)) {
       if (!this.officialModel&&!this.atlasSource) return SMOOTH_WHEEL_NORMAL;
-      source = getWheelTreadNormal(mode, this.native.get('Wheels_N.dds'));
+      source = getWheelTreadNormal(mode, this.native.get('Wheels_N.dds'), this.wheelSurface.volume === true);
       if(this.atlasSource)source=cachedAtlasPixels(source,'wheels',this.atlasSource);
     }
     if (!source) return null;

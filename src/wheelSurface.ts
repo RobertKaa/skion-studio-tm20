@@ -1,8 +1,8 @@
 import { decodeDDS, encodeDDS, type RGBAImage } from './dds';
 import { baseName, type Skin3DFile } from './skin3d';
-import { getWheelTreadNormal, getWheelTreadOcclusion, isWheelTreadPreset, type WheelTreadPresetMode } from './wheelTreads';
+import { getWheelTreadNormal, getWheelTreadOcclusion, isWheelTreadPreset, WHEEL_TREAD_DEPTH_MM, type WheelTreadPresetMode } from './wheelTreads';
 
-export { getWheelTreadNormal, getWheelTreadSwatch, isWheelTreadPreset, type WheelTreadPresetMode } from './wheelTreads';
+export { getWheelTreadNormal, getWheelTreadSwatch, isWheelTreadPreset, WHEEL_TREAD_DEPTH_MM, type WheelTreadPresetMode } from './wheelTreads';
 export type WheelSurfaceMode = 'smooth' | 'relief' | WheelTreadPresetMode;
 
 /** A real skin setting: the same normal is used by the preview and game ZIP. */
@@ -10,6 +10,8 @@ export interface WheelSurfaceSettings {
   mode: WheelSurfaceMode;
   /** Normal strength, from a smooth tyre to the source's full relief. */
   strength: number;
+  /** Native mesh displacement for the two off-road moulds. */
+  volume?: boolean;
 }
 
 export const DEFAULT_WHEEL_SURFACE: Readonly<WheelSurfaceSettings> = Object.freeze({ mode: 'smooth', strength: 1 });
@@ -17,13 +19,25 @@ export const WHEEL_NORMAL_FILE = 'Wheels_N.dds';
 export const WHEEL_OCCLUSION_FILE = 'Wheels_AO.dds';
 const nativeWheelUrl = new URL('./assets/model/car/Wheels_N.dds', import.meta.url);
 
-export const WHEEL_SURFACE_PRESETS: readonly Readonly<{ id: WheelSurfaceMode; label: string; description: string }>[] = Object.freeze([
-  { id: 'smooth', label: 'Lisse / slick', description: 'Sans sculpture, pour les pneus de compétition sur piste sèche.' },
-  { id: 'relief', label: 'Relief d’origine / importé', description: 'Conserve la texture de relief du skin, ou celle du modèle officiel.' },
-  { id: 'semi-slick', label: 'Semi-slick circuit', description: 'Trois canaux inégaux, nervures continues et large épaule extérieure peu entaillée. Inspiration pneus de trackday.' },
-  { id: 'road', label: 'Routier sportif', description: 'Quatre canaux, épaulements asymétriques et petites encoches décalées. Inspiration pneus routiers haute performance.' },
-  { id: 'rain', label: 'Pluie compétition', description: 'Larges canaux de drainage, sorties courbes sur les épaules et rainures de pavés décalées. Inspiration rallye sur asphalte mouillé.' },
-  { id: 'gravel', label: 'Rallye terre', description: 'Pavés imbriqués à arêtes obliques, épaules ouvertes et rainures profondes. Inspiration pneus de rallye sur terre.' },
+export interface WheelSurfacePreset {
+  id: WheelSurfaceMode;
+  label: string;
+  description: string;
+  category: string;
+  /** Depth of the source height field; the preview and export use normal mapping. */
+  depthMm: number | null;
+}
+export const WHEEL_SURFACE_PRESETS: readonly Readonly<WheelSurfacePreset>[] = Object.freeze([
+  { id: 'smooth', label: 'Lisse / slick', category: 'Piste', depthMm: 0, description: 'Sans sculpture, pour les pneus de compétition sur piste sèche.' },
+  { id: 'relief', label: 'Relief d’origine / importé', category: 'Source', depthMm: null, description: 'Conserve la texture de relief du skin, ou celle du modèle officiel.' },
+  { id: 'semi-slick', label: 'Semi-slick circuit', category: 'Piste', depthMm: WHEEL_TREAD_DEPTH_MM['semi-slick'], description: 'Deux canaux intérieurs profonds, un filet extérieur fin et une large épaule de contact. Incisions aveugles et pas variable de type trackday.' },
+  { id: 'road', label: 'Routier sportif', category: 'Route', depthMm: WHEEL_TREAD_DEPTH_MM.road, description: 'Cinq nervures asymétriques, quatre grands canaux et poches courbes effilées. Les petites lamelles restent distinctes des évacuations profondes.' },
+  { id: 'rain', label: 'Pluie compétition', category: 'Pluie', depthMm: WHEEL_TREAD_DEPTH_MM.rain, description: 'Larges évacuations en V reliées à trois canaux continus. Une sculpture ouverte, aux angles arrondis, inspirée des pneus de rallye full wet.' },
+  { id: 'gravel', label: 'Rallye terre', category: 'Tout-terrain', depthMm: WHEEL_TREAD_DEPTH_MM.gravel, description: 'Cinq rangées asymétriques de pavés anguleux et imbriqués. Chaque pavé conserve son incision centrale ; les épaules restent ouvertes.' },
+  { id: 'touring', label: 'Grand tourisme', category: 'Route', depthMm: WHEEL_TREAD_DEPTH_MM.touring, description: 'Quatre canaux, une nervure centrale continue, des sorties en crochet et de fines lamelles en zigzag. Des pavés de longueurs variées.' },
+  { id: 'winter', label: 'Hiver lamellisé', category: 'Neige', depthMm: WHEEL_TREAD_DEPTH_MM.winter, description: 'Pavés en chevrons imbriqués, épaules étagées et nombreuses lamelles fines. Les petits zigzags découpent chaque pavé sans devenir de larges rainures.' },
+  { id: 'mud', label: 'Tout-terrain boue', category: 'Tout-terrain', depthMm: WHEEL_TREAD_DEPTH_MM.mud, description: 'Quatre rangées de gros crampons polygonaux décalés. De grands espaces continus séparent les blocs et leurs arêtes chanfreinées.' },
+  { id: 'classic', label: 'Classique à nervures', category: 'Vintage', depthMm: WHEEL_TREAD_DEPTH_MM.classic, description: 'Cinq rainures longitudinales en zigzag, des nervures étroites et de petites encoches. Une géométrie angulaire inspirée des sculptures historiques.' },
 ]);
 
 export function isWheelSurfaceMode(value: unknown): value is WheelSurfaceMode {
@@ -38,6 +52,7 @@ export function normalizeWheelSurface(value: unknown): WheelSurfaceSettings {
     mode: isWheelSurfaceMode(settings.mode) ? settings.mode : 'smooth',
     strength: typeof settings.strength === 'number' && Number.isFinite(settings.strength)
       ? Math.max(0, Math.min(1, settings.strength)) : DEFAULT_WHEEL_SURFACE.strength,
+    ...((settings.mode === 'gravel' || settings.mode === 'mud') && typeof settings.volume === 'boolean' ? { volume: settings.volume } : {}),
   };
 }
 
@@ -128,7 +143,7 @@ export async function resolveWheelNormalImage(
   if (isWheelTreadPreset(settings.mode)) {
     if (!officialModel) return SMOOTH_WHEEL_NORMAL;
     const native = normalFromBytes(await loadNative());
-    return applyWheelRelief(getWheelTreadNormal(settings.mode, native), settings.strength);
+    return applyWheelRelief(getWheelTreadNormal(settings.mode, native, settings.volume === true), settings.strength);
   }
   const source = importedWheelNormal(importedFiles) ?? (officialModel ? await loadNative() : undefined);
   return source ? applyWheelRelief(normalFromBytes(source), settings.strength) : SMOOTH_WHEEL_NORMAL;
@@ -142,7 +157,7 @@ export function buildWheelOcclusionFile(value: WheelSurfaceSettings, officialMod
   if (settings.mode === 'relief' && settings.strength > 0) return null;
   let image = WHITE_WHEEL_AO;
   if (isWheelTreadPreset(settings.mode) && officialModel && settings.strength > 0) {
-    image = getWheelTreadOcclusion(settings.mode);
+    image = getWheelTreadOcclusion(settings.mode, settings.volume === true);
     if (settings.strength < 1) {
       const data = image.data.slice();
       for (let i = 0; i < data.length; i += 4) {

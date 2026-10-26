@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { decodeDDS, encodeDDS, type RGBAImage } from '../src/dds';
 import { PreviewSurfaceTextures, decodeNormalTexture, normalTextureFile, resolveNormalTexture } from '../src/three/previewSurfaceTextures';
 import { getWheelTreadNormal } from '../src/wheelSurface';
+import { WHEEL_TREAD_SIZE } from '../src/wheelTreads';
 
 function solid(r: number, g: number): RGBAImage {
   const data = new Uint8ClampedArray(4 * 4 * 4);
@@ -108,7 +109,7 @@ for (const mode of ['semi-slick', 'road', 'rain', 'gravel'] as const) {
   presetManager.setWheelSurface({ mode, strength: 1 });
   const texture = presetMaterials.wheels.normalMap! as THREE.DataTexture;
   const expectedNormal = getWheelTreadNormal(mode, expected.get('Wheels_N.dds'));
-  assert.deepEqual([texture.image.width, texture.image.height], [1024, 2048]);
+  assert.deepEqual([texture.image.width, texture.image.height], [WHEEL_TREAD_SIZE.width, WHEEL_TREAD_SIZE.height]);
   assert(Buffer.from(texture.image.data as Uint8Array).equals(Buffer.from(expectedNormal.data)), `${mode} uses the same generated band and native moulded flanks as export, independent of imported grooves`);
   assert.equal(texture.colorSpace, THREE.NoColorSpace, 'Generated normals stay linear');
   presetManager.setWheelSurface({ mode, strength: 1 });

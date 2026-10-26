@@ -14,7 +14,7 @@ export async function loadSkinImportPreview(model: Skin3DProject | null, preview
   let warning: string | null = null;
   if (model?.preview) {
     try {
-      await preview.loadCustomPreview(model.preview, { detailsLayout: model.detailsLayout, nativeSurfaceLayout: !!model.detailsLayout });
+      await preview.loadCustomPreview(model.preview, { detailsLayout: model.detailsLayout, nativeSurfaceLayout: !!model.detailsLayout || model.surfaceTemplate === 'tyres' });
       return { model, warning };
     } catch (error) {
       warning = `Aperçu 3D illisible : ${error instanceof Error ? error.message : String(error)}.`;

@@ -9,6 +9,7 @@ import { createMaterialLibrary, type MaterialLibraryStorage, type StoredMaterial
 import { getMaterialSourceCanvas, loadMaterialSources } from '../src/materials/render';
 import type { UvGuideIsland } from '../src/uvGuideData';
 import { WHEEL_PART_GUIDES } from '../src/wheelParts';
+import { createWheelDesignDefinition, DEFAULT_WHEEL_DESIGN } from '../src/wheelDesign';
 
 // The desktop DOM provides a real Canvas2D backend. Styles are checked in the desktop browser.
 registerHooks({ load(url, context, next) {
@@ -418,6 +419,16 @@ try {
   await changeSelect('Alignement de la matière','wheel');assert(host.textContent!.includes('raccorder le motif après un tour'));
   selectedRegion=WHEEL_PART_GUIDES[0];instanceKey='wheel-tread';await act(async()=>draw());
   assert.equal(labelled<HTMLSelectElement>('Alignement de la matière').value,'wheel','The tread starts with physical 360 degree wrapping');
+  selectedRegion=WHEEL_PART_GUIDES[1];instanceKey='wheel-design-layer';
+  selection={definition:createWheelDesignDefinition({...DEFAULT_WHEEL_DESIGN}),family:'wheels',regions:[WHEEL_PART_GUIDES[1]],exclusions:[]};
+  await act(async()=>draw());
+  assert.equal(labelled<HTMLSelectElement>('Alignement de la matière').value,'wheel-face','A generated sidewall design retains its valid circular projection');
+  assert(labelled<HTMLSelectElement>('Alignement de la matière').disabled,'A generated sidewall design cannot select an invalid projection');
+  assert.equal(host.querySelector('.material-placement-hint')!.textContent,'Ce motif conserve son placement circulaire. Modifiez son dessin dans l’atelier de flancs.');
+  selection={definition:createMaterialDefinition('rubber'),family:'wheels',regions:[WHEEL_PART_GUIDES[1]],exclusions:[]};
+  await act(async()=>draw());
+  assert(!labelled<HTMLSelectElement>('Alignement de la matière').disabled,'Selecting a regular material restores projection editing');
+  assert(!host.querySelector('.material-placement-hint')!.textContent!.includes('Modifiez son dessin dans l’atelier de flancs.'),'Regular materials retain their existing placement guidance');
   family='skin';selectedRegion=islands[0];instanceKey='height-workflow';const heightDefinition=createMaterialDefinition();heightDefinition.surfaceOnly=true;heightDefinition.textures.height={src:source,name:'height.png',component:'r',invert:false};selection={definition:heightDefinition,family,regions:[islands[0]],exclusions:[islands[2]]};await act(async()=>draw());
   assert.equal(labelled<HTMLInputElement>('Niveau neutre').value,'0.5');await changeInput('Niveau neutre','0.3');assert.equal(selection!.definition.surfaceRelief!.midpoint,.3);
   await click('Préparer le volume 3D');assert.equal(volumeRequests.length,1);assert.equal(volumeRequests[0].definition.surfaceRelief!.midpoint,.3);assert.deepEqual(volumeRequests[0].regions,['top']);assert.deepEqual(volumeRequests[0].exclusions,['right']);

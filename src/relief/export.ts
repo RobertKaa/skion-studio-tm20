@@ -8,6 +8,8 @@ import type { ReliefPrototypeResult, ReliefTextureResolution } from './types';
 export const RELIEF_GAME_ZIP_LIMIT_BYTES = 24_000_000;
 
 export interface ReliefExportProfile {
+  /** Native tyre exports retain every painted DDS byte. Only N/AO mips shrink. */
+  preservedPaint?: true;
   colourResolution: ReliefTextureResolution;
   secondaryColourResolution: ReliefTextureResolution;
   bodyNormalResolution: ReliefTextureResolution;
@@ -79,7 +81,7 @@ export function limitPrototypeDDSResolution(data: Uint8Array, maximum: number): 
 
 /** Only this experimental game export changes the resolutions of secondary atlases. */
 export async function applyReliefExportProfile(zip: JSZip, resolution: ReliefTextureResolution,
-  profile: ReliefExportProfile = reliefExportProfile(resolution)): Promise<ReliefExportProfile> {
+  profile: ReliefExportProfile = reliefExportProfile(resolution), options?: { preservePaint?: boolean }): Promise<ReliefExportProfile> {
   for (const entry of Object.values(zip.files)) {
     if (entry.dir || !/\.dds$/i.test(entry.name)) continue;
     const name = entry.name.toLowerCase();
@@ -92,6 +94,7 @@ export async function applyReliefExportProfile(zip: JSZip, resolution: ReliefTex
     else if (/^(details|wheels)_r\.dds$/.test(name) || name === 'skin_coatr.dds') maximum = profile.finishResolution;
     else if (/^(skin|details|wheels)_i\.dds$/.test(name)) maximum = profile.illuminationResolution;
     else if (/^(skin|details|wheels)_(ao|dirtmask)\.dds$/.test(name)) maximum = Math.min(resolution, 2048);
+    if (options?.preservePaint && !/^(skin|details|wheels)_(n|ao)\.dds$/.test(name)) maximum = undefined;
     const source = await entry.async('uint8array');
     const data = maximum === undefined ? source : limitPrototypeDDSResolution(source, maximum);
     if (data !== source) zip.file(entry.name, data);
@@ -115,17 +118,21 @@ export function assertReliefGameZipBudget(byteLength: number): void {
 /** Measure the real compressed ZIP after each fallback, preserving Skin_B quality. */
 export async function fitReliefArchiveToBudget<T extends { size: number }>(zip: JSZip,
   resolution: ReliefTextureResolution, createArchive: (profile: ReliefExportProfile) => Promise<T>,
+  options?: { preservePaint?: boolean },
 ): Promise<{ archive: T; profile: ReliefExportProfile }> {
-  const profile = await applyReliefExportProfile(zip, resolution);
+  const profile = await applyReliefExportProfile(zip, resolution, undefined, options);
+  if (options?.preservePaint) profile.preservedPaint = true;
   const canReduce = (names: RegExp) => Object.entries(profile.resolutions).some(([name, size]) =>
     names.test(name) && Math.max(size.width, size.height) > 1024);
   const fallbacks = [
     { name: 'secondary-normals-1k', needed: () => canReduce(/^(details|wheels)_n\.dds$/i),
       apply: () => { profile.detailsWheelNormalResolution = 1024; } },
-    { name: 'secondary-finishes-1k', needed: () => canReduce(/^(details_r|wheels_r|skin_coatr)\.dds$/i),
+    { name: 'secondary-finishes-1k', needed: () => !options?.preservePaint && canReduce(/^(details_r|wheels_r|skin_coatr)\.dds$/i),
       apply: () => { profile.finishResolution = 1024; } },
-    { name: 'body-finish-1k', needed: () => canReduce(/^skin_r\.dds$/i),
+    { name: 'body-finish-1k', needed: () => !options?.preservePaint && canReduce(/^skin_r\.dds$/i),
       apply: () => { profile.bodyFinishResolution = 1024; } },
+    { name: 'body-normal-1k', needed: () => options?.preservePaint === true && canReduce(/^skin_n\.dds$/i),
+      apply: () => { profile.bodyNormalResolution = 1024; } },
   ];
   let archive = await createArchive(profile);
   profile.actualArchiveBytes = archive.size;
@@ -134,7 +141,7 @@ export async function fitReliefArchiveToBudget<T extends { size: number }>(zip: 
     if (archive.size < RELIEF_GAME_ZIP_LIMIT_BYTES) break;
     if (!fallback.needed()) continue;
     fallback.apply(); profile.fallbackUsed.push(fallback.name);
-    await applyReliefExportProfile(zip, resolution, profile);
+    await applyReliefExportProfile(zip, resolution, profile, options);
     archive = await createArchive(profile);
     profile.actualArchiveBytes = archive.size;
     if (!Number.isSafeInteger(archive.size) || archive.size < 0) assertReliefGameZipBudget(archive.size);
@@ -172,6 +179,33 @@ export async function generateReliefArchive(zip: JSZip, profile: ReliefExportPro
   const archive = await finalZip.generateAsync(options);
   if (archive.size !== measured.size) throw new Error('La taille finale du prototype a changé pendant sa vérification.');
   return archive;
+}
+
+/** Fit native tyre ZIPs without altering painted colours, finishes or geometry.
+ * Existing linear N/AO mip levels are promoted without re-encoding their blocks. */
+export async function fitTyreArchiveToBudget(blob: Blob, resolution: ReliefTextureResolution): Promise<Blob> {
+  if (![1024, 2048, 4096].includes(resolution) || !Number.isSafeInteger(blob.size) || blob.size > 128 * 1024 * 1024) throw new Error('Archive des pneus invalide ou trop volumineuse.');
+  const zip = await JSZip.loadAsync(await blob.arrayBuffer()), entries = Object.values(zip.files).filter(entry => !entry.dir);
+  let expanded = 0;
+  if (entries.length > 512 || entries.some(entry => {
+    const size = (entry as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize;
+    return typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0 || size > 64 * 1024 * 1024 || (expanded += size) > 256 * 1024 * 1024;
+  })) throw new Error('Archive des pneus trop volumineuse après décompression.');
+  const document = zip.file('skin3d.json');
+  if (!document) throw new Error('Le gabarit natif des pneus manque dans le ZIP.');
+  const source = await document.async('string');
+  if (source.length > 4 * 1024 * 1024) throw new Error('Métadonnées des pneus trop volumineuses.');
+  const metadata = JSON.parse(source) as Record<string, unknown>;
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || metadata.surfaceTemplate !== 'tyres' || !zip.file('MainBody.Mesh.gbx') || !zip.file('preview.glb')) throw new Error('Le ZIP ne contient pas un gabarit natif des pneus complet.');
+  const previousReadme = (await zip.file('ReadMe.txt')?.async('string') ?? '').trimEnd();
+  const fitted = await fitReliefArchiveToBudget(zip, resolution, profile => generateReliefArchive(zip, profile,
+    { ...metadata, exportProfile: profile }, measured => [previousReadme, '', 'SCULPTURE NATIVE DES PNEUS — SKION STUDIO',
+      'Maillage, aperçu et textures peintes conservés. Seuls les mipmaps existants des normales et ombrages peuvent être réduits.',
+      ...Object.entries(measured.resolutions).filter(([name]) => /_(n|ao)\.dds$/i.test(name)).map(([name, size]) => `${name} : ${size.width} × ${size.height} px.`),
+      `Optimisation supplémentaire : ${measured.fallbackUsed.length ? measured.fallbackUsed.join(', ') : 'aucune'}.`,
+      `Taille finale du ZIP : ${measured.actualArchiveBytes} octets.`,
+    ].join('\n')), { preservePaint: true });
+  return fitted.archive;
 }
 
 const nativeUrls = {
@@ -212,26 +246,26 @@ export function reliefPrototypeName(name: string, result: ReliefPrototypeResult)
 export async function exportReliefPrototype(
   name: string, sourceName: string, result: ReliefPrototypeResult,
   maps: ReadonlyMap<MapId, HTMLCanvasElement>, baseFiles: readonly Skin3DFile[],
-  settings: Pick<ExportSources, 'illumRole' | 'speedColor' | 'getIllumRoleCanvas' | 'dirtEnabled' | 'horn'>,
+  settings: Pick<ExportSources, 'illumRole' | 'speedColor' | 'getIllumRoleCanvas' | 'dirtEnabled' | 'horn' | 'wheelSurface' | 'wheelOfficialModel' | 'wheelCavity'>,
   icon: HTMLCanvasElement,
 ): Promise<Blob> {
   if (!result.project.preview || !MAPS.every(map => maps.has(map.id))) throw new Error('Le prototype est incomplet.');
   const archiveName = reliefPrototypeName(name, result);
   const extras = new Map([...baseFiles, ...result.project.passthrough].map(file => [file.name.toLowerCase(), file]));
-  if (result.options.mode === 'geometry') extras.delete('skin_n.dds');
+  if (result.options.mode === 'geometry' && result.stats.templateVariant === 'standard') extras.delete('skin_n.dds');
   const blob = await exportSkinZip(archiveName, {
     ...settings, textureResolution: result.options.textureResolution,
     mapResolutions: Object.fromEntries(MAPS.map(map => [map.id,
       map.id === 'Skin_B' ? result.options.textureResolution : Math.min(result.options.textureResolution, 2048),
     ])),
     getMapCanvas: id => maps.get(id)!, icon, meshGbx: result.project.mesh,
-    detailsLayout: result.project.detailsLayout, uvAtlas:result.project.uvAtlas, previewGlb: result.project.preview,
+    detailsLayout: result.project.detailsLayout, uvAtlas:result.project.uvAtlas, surfaceTemplate: result.project.surfaceTemplate, previewGlb: result.project.preview,
     passthrough: [...extras.values()],
   });
   const zip = await JSZip.loadAsync(await blob.arrayBuffer());
   zip.file('preview.glb', result.project.preview);
   const fitted = await fitReliefArchiveToBudget(zip, result.options.textureResolution, exportProfile =>
-    generateReliefArchive(zip, exportProfile, { version: 1, name: archiveName, ...(result.project.detailsLayout ? { detailsLayout: result.project.detailsLayout } : {}), ...(result.project.uvAtlas?{uvAtlas:result.project.uvAtlas}:{}), [result.options.surfaceMethod ? 'relief' : 'prototype']: {
+    generateReliefArchive(zip, exportProfile, { version: 1, name: archiveName, ...(result.project.detailsLayout ? { detailsLayout: result.project.detailsLayout } : {}), ...(result.project.uvAtlas?{uvAtlas:result.project.uvAtlas}:{}), ...(result.project.surfaceTemplate ? { surfaceTemplate: result.project.surfaceTemplate, ...(settings.wheelSurface ? { wheelSurface: settings.wheelSurface } : {}) } : {}), [result.options.surfaceMethod ? 'relief' : 'prototype']: {
       version: result.options.surfaceMethod ? '1.0.0' : 1, source: sourceName.slice(0, 160), ...result.options, ...result.stats,
       exportProfile, gameValidation: 'pending',
     } }, profile => [

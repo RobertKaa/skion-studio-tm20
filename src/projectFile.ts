@@ -31,7 +31,7 @@ export interface ProjectDocument {
   format: 'tm-skin-studio'; version: 1 | 2; name: string;
   editor: { maps: ProjectMaps; speedColor: string; illumRole: IllumRole };
   workspace: ProjectWorkspace;
-  model: null | { mesh: string; preview: string | null; name: string | null; parts?: BlenderPart[]; detailsLayout?: DetailsLayout; uvAtlas?:'organized-v1'; passthrough: { name: string; asset: string }[] };
+  model: null | { mesh: string; preview: string | null; name: string | null; parts?: BlenderPart[]; detailsLayout?: DetailsLayout; uvAtlas?:'organized-v1'; surfaceTemplate?:'tyres'; passthrough: { name: string; asset: string }[] };
   /** Normal/prelight maps also belong to texture-only skins, without a custom mesh. */
   surfaceTextures?: { name: string; asset: string }[];
   /** Optional for older projects. The audio is embedded, never an external URL. */
@@ -94,7 +94,8 @@ export function validateProjectDocument(value: unknown, assets: Set<string>): as
   if (workspace.dirtPreview !== undefined && (typeof workspace.dirtPreview !== 'number' || !Number.isFinite(workspace.dirtPreview) || workspace.dirtPreview < 0 || workspace.dirtPreview > 1)) fail('aperçu de saleté invalide.');
   if (workspace.wheelSurface !== undefined) {
     const surface = workspace.wheelSurface;
-    if (!record(surface) || !isWheelSurfaceMode(surface.mode) || typeof surface.strength !== 'number' || !Number.isFinite(surface.strength) || surface.strength < 0 || surface.strength > 1) fail('relief des pneus invalide.');
+    if (!record(surface) || !isWheelSurfaceMode(surface.mode) || typeof surface.strength !== 'number' || !Number.isFinite(surface.strength) || surface.strength < 0 || surface.strength > 1
+      || (surface.volume !== undefined && (typeof surface.volume !== 'boolean' || (surface.mode !== 'gravel' && surface.mode !== 'mud')))) fail('relief des pneus invalide.');
   }
   const asset = (path: unknown) => { if (typeof path !== 'string' || !ASSET_PATH.test(path) || !assets.has(path)) fail('image ou fichier lié absent.'); };
   if (value.horn !== undefined) {
@@ -161,6 +162,7 @@ export function validateProjectDocument(value: unknown, assets: Set<string>): as
     if (!record(m) || !Array.isArray(m.passthrough) || m.passthrough.length > 64) fail('modèle invalide.');
     const model = m as Record<string, unknown>;
     if(model.uvAtlas!==undefined&&model.uvAtlas!=='organized-v1')fail('Disposition UV inconnue.');
+    if(model.surfaceTemplate!==undefined&&model.surfaceTemplate!=='tyres')fail('Gabarit de surface inconnu.');
     if (model.parts !== undefined) validateBlenderParts(model.parts);
     if (model.detailsLayout !== undefined && ![INDEPENDENT_DETAILS,UNDERBODY_PANEL_LAYOUT].includes(model.detailsLayout as DetailsLayout)) fail('Disposition des détails invalide.');
     if (model.mesh !== 'assets/mesh.gbx' || (model.preview !== null && model.preview !== 'assets/preview.glb')) fail('ressource du modèle invalide.');
@@ -320,7 +322,7 @@ export function hydrateProject(bundle: ProjectBundle): { document: ProjectDocume
   };
   const m = document.model;
   const model: Skin3DProject | null = m ? { mesh: data(m.mesh), preview: m.preview ? data(m.preview).buffer as ArrayBuffer : null,
-    name: m.name, ...(m.detailsLayout?{detailsLayout:m.detailsLayout}:{}), ...(m.uvAtlas?{uvAtlas:m.uvAtlas}:{}), ...(m.parts ? { parts: m.parts } : {}), passthrough: m.passthrough.map((entry) => ({ name: entry.name, data: data(entry.asset) })) } : null;
+    name: m.name, ...(m.detailsLayout?{detailsLayout:m.detailsLayout}:{}), ...(m.uvAtlas?{uvAtlas:m.uvAtlas}:{}), ...(m.surfaceTemplate?{surfaceTemplate:m.surfaceTemplate}:{}), ...(m.parts ? { parts: m.parts } : {}), passthrough: m.passthrough.map((entry) => ({ name: entry.name, data: data(entry.asset) })) } : null;
   const surfaceTextures = (document.surfaceTextures ?? []).map((entry) => ({ name: entry.name, data: data(entry.asset) }));
   const horn = document.horn ? { name: document.horn.name, data: data(document.horn.asset) } : null;
   if (horn) hornDuration(horn.data);
