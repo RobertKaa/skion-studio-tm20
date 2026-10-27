@@ -1,9 +1,9 @@
-import { isValidWheelDesign, type WheelDesignSettings } from '../wheelDesign';
+import { isValidWheelArtwork, type WheelDesignArtwork } from '../wheelDesignComposition';
 
 export type MaterialPreset = 'solid' | 'carbon' | 'brushed' | 'rubber' | 'fabric' | 'scratched';
 export type MaterialChannel = 'color' | 'roughness' | 'metalness' | 'roughmetal' | 'coat' | 'emission' | 'dirt' | 'normal' | 'ao' | 'height';
 export type MaterialTextureChannel = MaterialChannel;
-export type MaterialRenderChannel = 'color' | 'roughmetal' | 'coat' | 'emission' | 'dirt' | 'normal' | 'ao' | 'height';
+export type MaterialRenderChannel = 'color' | 'roughmetal' | 'coat' | 'emission' | 'wheelEmissionRole' | 'dirt' | 'normal' | 'ao' | 'height';
 export type MaterialProjection = 'uv' | 'top' | 'side' | 'front' | 'triplanar' | 'surface' | 'wheel' | 'wheel-face';
 
 export interface MaterialTexture {
@@ -17,7 +17,7 @@ export interface MaterialTexture {
  * the longest vehicle dimension for projections and surface coordinates. */
 export interface MaterialDefinition {
   /** Editable construction settings for a generated tyre-sidewall motif. */
-  wheelDesign?: WheelDesignSettings;
+  wheelDesign?: WheelDesignArtwork;
   surfaceOnly?:boolean;
   surfaceRelief?: import('./relief').SurfaceReliefSettings;
   version: 1;
@@ -45,7 +45,7 @@ export interface MaterialDefinition {
     /** Omitted in existing projects: preserve their original UV placement. */
     projection?: MaterialProjection;
   };
-  textures: Partial<Record<MaterialChannel, MaterialTexture>>;
+  textures: Partial<Record<MaterialChannel, MaterialTexture>> & { wheelEmissionRole?: MaterialTexture };
 }
 
 export interface MaterialRegion {
@@ -136,7 +136,7 @@ function validateSource(source: string): boolean {
 
 export function isValidMaterialDefinition(value: unknown, sourceValidator: (src: string) => boolean = isLocalMaterialSource): value is MaterialDefinition {
   if (!record(value) || !exactKeys(value, ['version', 'name', 'preset', 'color', 'roughness', 'metalness', 'coat', 'dirt', 'emissionColor', 'emissionStrength', 'emissionRole', 'normalStrength', 'aoStrength', 'opacity', 'transform', 'textures','surfaceRelief','surfaceOnly','wheelDesign'])) return false;
-  if (value.wheelDesign !== undefined && (!isValidWheelDesign(value.wheelDesign) || !record(value.transform) || value.transform.projection !== 'wheel-face')) return false;
+  if (value.wheelDesign !== undefined && (!isValidWheelArtwork(value.wheelDesign) || !record(value.transform) || value.transform.projection !== 'wheel-face')) return false;
   if(value.surfaceOnly!==undefined&&typeof value.surfaceOnly!=='boolean')return false;
   const relief=value.surfaceRelief;
   if(relief!==undefined&&(!record(relief)||!exactKeys(relief,['source','heightStrength','midpoint','contrast','heightOrigin'])||!['auto','normal','height','combined','none'].includes(String(relief.source))||!bounded(relief.heightStrength,0,4)||!bounded(relief.midpoint,0,1)||!bounded(relief.contrast,.1,4)||(relief.heightOrigin!==undefined&&relief.heightOrigin!=='normal-estimate')))return false;
@@ -150,7 +150,7 @@ export function isValidMaterialDefinition(value: unknown, sourceValidator: (src:
     || !['repeat', 'cover', 'contain', 'stretch'].includes(transform.mode as string) || !bounded(transform.size, 8, 2048)
     || !bounded(transform.angle, -360, 360) || !bounded(transform.offsetX, -16384, 16384) || !bounded(transform.offsetY, -16384, 16384)
     || typeof transform.flipX !== 'boolean' || typeof transform.flipY !== 'boolean') return false;
-  if (!record(value.textures) || !exactKeys(value.textures, MATERIAL_CHANNELS)) return false;
+  if (!record(value.textures) || !exactKeys(value.textures, [...MATERIAL_CHANNELS, 'wheelEmissionRole']) || value.textures.wheelEmissionRole !== undefined && !value.wheelDesign) return false;
   for (const texture of Object.values(value.textures)) {
     if (!record(texture) || !exactKeys(texture, ['src', 'name', 'component', 'invert']) || !text(texture.name)
       || typeof texture.src !== 'string' || !sourceValidator(texture.src)

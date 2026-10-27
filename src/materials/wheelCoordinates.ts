@@ -2,7 +2,7 @@ import type { ProjectionTriangle, Vec3 } from '../three/decalProjection';
 import type { SurfaceCoordinates } from './surfaceCoordinates';
 
 export interface WheelCoordinates extends SurfaceCoordinates { circumference: number }
-const cache = new WeakMap<readonly ProjectionTriangle[], { wrap: WheelCoordinates; face: WheelCoordinates }>();
+const cache = new WeakMap<readonly ProjectionTriangle[], { wrap: WheelCoordinates; face: WheelCoordinates; faceConflict: boolean | null }>();
 const TAU = Math.PI * 2;
 const fail = () => { throw new Error('Les roues de ce modèle ne permettent pas cet enroulement. Choisissez une projection depuis une vue.'); };
 const keyOf = (u: number, v: number) => `${Math.round(u * 1e6)}:${Math.round(v * 1e6)}`;
@@ -28,6 +28,9 @@ export function getWheelCoordinates(geometry: readonly ProjectionTriangle[], fac
     group.push(t); groups.set(id, group);
   }
   const shared = new Map<string, { u: number; turn: number; radius: number; count: number; core:boolean }>();
+  let faceFrame: { direction: number; phase: number; rank: number } | undefined;
+  const faceFrames: { direction: number; phase: number; coherence: number; samples: number }[] = [];
+  let coincidentConflicts = 0;
   let period = 0, frames = 0;
   for (const group of groups.values()) {
     const bounds = [[Infinity, Infinity, Infinity], [-Infinity, -Infinity, -Infinity]];
@@ -66,6 +69,34 @@ export function getWheelCoordinates(geometry: readonly ProjectionTriangle[], fac
     for (let i = 1; i < rings.length; i++) rings[i].arc = rings[i - 1].arc + Math.hypot(rings[i].x - rings[i - 1].x, rings[i].r - rings[i - 1].r);
     const length = rings.at(-1)!.arc, radius = Math.max(...rings.map(p => p.r));
     if (length < 1e-6 || radius < 1e-6) return fail();
+    // The UV seam is not the physical top. Fit its phase and handedness on one
+    // structural wheel instead of averaging mirrored world angles: native
+    // previews reuse the same chart on wheels whose geometry may be mirrored.
+    // +X is the canonical exterior (screen right = -Z, image down = -Y).
+    const fits = [1, -1].map(direction => {
+      let x = 0, y = 0, samples = 0;
+      for (const s of rows) {
+        if (s.p[0] < left - dy * .05 || s.p[0] > right + dy * .05 || s.r < radius * .5) continue;
+        const angle = Math.atan2(-(s.p[1] - center[1]), -(s.p[2] - center[2])) - direction * s.v * TAU;
+        x += Math.cos(angle); y += Math.sin(angle); samples++;
+      }
+      return { direction, phase: Math.atan2(y, x), coherence: Math.hypot(x, y), samples };
+    });
+    const fit = fits[0].coherence >= fits[1].coherence ? fits[0] : fits[1];
+    faceFrames.push(fit);
+    // Some native models superpose tyre triangles with identical positions but
+    // different UV phases. Their mixed fit is inconclusive, yet the duplicated
+    // top vertices directly prove that one mark occupies different angles.
+    const topVertices = new Map<string, number>();
+    for (const sample of rows) {
+      if (sample.p[0] < left - dy * .05 || sample.p[0] > right + dy * .05 || sample.p[1] - center[1] < .92 * radius) continue;
+      const key = `${sample.p.map(value => Math.round(value * 100_000)).join(':')}:${Math.round(sample.u * 1_000_000)}`;
+      const turn = ((sample.v % 1) + 1) % 1, other = topVertices.get(key);
+      if (other === undefined) topVertices.set(key, turn);
+      else { const difference = Math.abs(turn - other); if (Math.min(difference, 1 - difference) > 10 / 360) coincidentConflicts++; }
+    }
+    const rank = (center[0] >= mid[0] ? 0 : 2) + (center[2] <= mid[2] ? 0 : 1);
+    if (!faceFrame || rank < faceFrame.rank) faceFrame = { direction: fit.direction, phase: fit.phase, rank };
     period += TAU * radius; frames++;
     for (const s of rows) {
       let i = 1; while (i < rings.length - 1 && rings[i].u < s.u) i++;
@@ -91,7 +122,7 @@ export function getWheelCoordinates(geometry: readonly ProjectionTriangle[], fac
     if (id === undefined) {
       const s = shared.get(key); if (!s) return fail();
       id = ids.size; ids.set(key, id);
-      const turn = s.turn / s.count, angle = turn * TAU, r = s.radius / s.count;
+      const turn = s.turn / s.count, angle = faceFrame!.direction * turn * TAU + faceFrame!.phase, r = s.radius / s.count;
       wrapU.push(s.u / s.count); wrapV.push((.5 - turn) * circumference);
       faceU.push(r * Math.cos(angle)); faceV.push(r * Math.sin(angle));
     }
@@ -99,5 +130,24 @@ export function getWheelCoordinates(geometry: readonly ProjectionTriangle[], fac
   }));
   const make = (u: number[], v: number[]): WheelCoordinates => ({ triangleNodes, transverse: Float64Array.from(u), longitudinal: Float64Array.from(v),
     min: [u.reduce((a,b)=>Math.min(a,b),Infinity), v.reduce((a,b)=>Math.min(a,b),Infinity)], max: [u.reduce((a,b)=>Math.max(a,b),-Infinity), v.reduce((a,b)=>Math.max(a,b),-Infinity)], circumference });
-  const result = { wrap: make(wrapU, wrapV), face: make(faceU, faceV) }; cache.set(geometry, result); return face ? result.face : result.wrap;
+  // One shared UV coordinate can occupy different physical angles on different
+  // wheels. In that case one texture cannot align the same graphic on all of them.
+  const topTurn = (frame: { direction: number; phase: number }) => {
+    const turn = (-Math.PI / 2 - frame.phase) / (frame.direction * TAU);
+    return ((turn % 1) + 1) % 1;
+  };
+  const measured = faceFrames.filter(frame => frame.samples >= 12 && frame.coherence / frame.samples >= .85);
+  const referenceTop = measured.length ? topTurn(measured[0]) : 0;
+  const different = measured.some(frame => {
+    const difference = Math.abs(topTurn(frame) - referenceTop);
+    return Math.min(difference, 1 - difference) > 10 / 360;
+  });
+  const faceConflict = different || coincidentConflicts >= 3 ? true : measured.length < 2 || measured.length !== faceFrames.length ? null : false;
+  const result = { wrap: make(wrapU, wrapV), face: make(faceU, faceV), faceConflict }; cache.set(geometry, result); return face ? result.face : result.wrap;
+}
+
+/** True reports differing physical tops; null means the model cannot be measured reliably. */
+export function hasWheelFaceAlignmentConflict(geometry: readonly ProjectionTriangle[]): boolean | null {
+  try { getWheelCoordinates(geometry, true); return cache.get(geometry)!.faceConflict; }
+  catch { return null; }
 }

@@ -57,6 +57,12 @@ __pycache__/
 !/scripts/test-wheel-design.ts
 !/scripts/test-wheel-design-ui.tsx
 !/scripts/test-wheel-design-roundtrip.ts
+!/scripts/test-wheel-composition.ts
+!/scripts/test-wheel-design-area.ts
+!/scripts/test-wheel-composition-roundtrip.ts
+!/scripts/test-wheel-logo.ts
+!/scripts/test-wheel-design-model-preview.tsx
+!/scripts/test-wheel-preview-snapshot.ts
 !/scripts/test-wheel-controls.tsx
 !/scripts/test-wheel-treads.ts
 !/scripts/test-wheel-surface.ts

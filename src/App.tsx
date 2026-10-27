@@ -14,7 +14,9 @@ import { EnvironmentControls } from './ui/EnvironmentControls';
 import { VehiclePoseControls } from './ui/VehiclePoseControls';
 import { WheelSurfaceControls } from './ui/WheelSurfaceControls';
 import { WheelDesignDialog, type WheelDesignTarget } from './ui/WheelDesignDialog';
-import { createWheelDesignDefinition, type WheelDesignSettings } from './wheelDesign';
+import { createWheelArtworkDefinition, mergeWheelArtworkDefinition, type WheelDesignArtwork } from './wheelDesignComposition';
+import { WheelDesignModelPreview } from './ui/WheelDesignModelPreview';
+import type { WheelDesignPreviewContext } from './wheelDesignPreview';
 import { WheelReliefOverlay } from './ui/WheelReliefOverlay';
 import { TextureBackgroundControls } from './ui/TextureBackgroundControls';
 import type { TextureBackgroundInfo } from './editor/textureBackground';
@@ -266,9 +268,25 @@ export default function App() {
   const [layers, setLayers] = useState<LayerInfo[]>([]);
   const [selection, setSelection] = useState<SelectionState | null>(null);
   const [selectedMaterialLayer, setSelectedMaterialLayer] = useState<MaterialLayer | null>(null);
-  const [wheelDesignSession, setWheelDesignSession] = useState<{ layerId?: string; definition?: MaterialDefinition; target: WheelDesignTarget } | null>(null);
+  const [wheelDesignSession, setWheelDesignSession] = useState<{ layerId?: string; definition?: MaterialDefinition; target: WheelDesignTarget; preview?: WheelDesignPreviewContext } | null>(null);
   const wheelDesignSessionRef = useRef(wheelDesignSession); wheelDesignSessionRef.current = wheelDesignSession;
   const closeWheelDesign = useCallback(() => setWheelDesignSession(null), []);
+  const wheelPreviewReleases = useRef(new Map<object, ReturnType<typeof setTimeout>>());
+  useEffect(() => {
+    if (!wheelDesignSession) return;
+    const releases = wheelPreviewReleases.current, session = wheelDesignSession;
+    // StrictMode and Fast Refresh replay effects with the same live snapshots.
+    clearTimeout(releases.get(session)); releases.delete(session);
+    return () => {
+      releases.set(session, setTimeout(() => {
+        for (const { below, above, roles } of session.preview?.maps.values() ?? []) {
+          below.width = below.height = above.width = above.height = 1;
+          if (roles) roles.width = roles.height = 1;
+        }
+        releases.delete(session);
+      }, 0));
+    };
+  }, [wheelDesignSession]);
   const [historyState, setHistoryState] = useState({ undo: false, redo: false });
   const [dirtyMaps, setDirtyMaps] = useState<Partial<Record<MapId, boolean>>>({});
   const [skinName, setSkinName] = useState('MonSkin');
@@ -1499,15 +1517,28 @@ export default function App() {
   const openWheelDesign = (edit = false) => {
     const editor = editorRef.current;
     if (!editor || !ready || busyRef.current || placingImage) return;
+    editor.commitMaterialLayers();
     const layer = edit ? editor.getSelectionMaterialLayer() : null;
     const owner = edit ? editor.getSelection() as (FabricObject & { id?: string }) | null : null;
     if (edit && (!layer?.definition.wheelDesign || !owner?.id)) return;
     const keys = layer?.regions.map(region => region.key) ?? [];
     const hasSide = (side: string) => keys.some(key => key === `tyres:${side}` || key.startsWith(`tyres:${side}:`));
-    setWheelDesignSession({
-      ...(owner?.id && layer ? { layerId: owner.id, definition: structuredClone(layer.definition) } : {}),
-      target: hasSide('inner') ? hasSide('outer') ? 'both' : 'inner' : 'outer',
-    });
+    const target = hasSide('inner') ? hasSide('outer') ? 'both' : 'inner' : 'outer';
+    try {
+      const maps = editor.captureWheelDesignPreviewMaps(owner?.id);
+      const allSurfaceOverlays = editor.getMaterialSurfaceOverlays();
+      const surfaceOverlays = owner?.id ? editor.getMaterialSurfaceOverlays(owner.id) : allSurfaceOverlays;
+      const removedSurfaceIndex = owner?.id ? allSurfaceOverlays.findIndex((surface, index) => surface !== surfaceOverlays[index]) : -1;
+      setWheelDesignSession({
+        ...(owner?.id && layer ? { layerId: owner.id, definition: structuredClone(layer.definition) } : {}), target,
+        preview: { maps, modelPreview: skin3d?.preview ?? null, nativeSurfaceLayout: nativeWheelLayout,
+          detailsLayout: skin3d?.detailsLayout, atlasSource: skin3d?.uvAtlas ? skin3d.detailsLayout ?? 'stock' : undefined,
+          surfaceFiles: wheelSurfaceFiles, surfaceOverlays, surfaceOverlayInsertIndex: removedSurfaceIndex < 0 ? surfaceOverlays.length : removedSurfaceIndex,
+          wheelSurface: { ...wheelSurface }, pose: { ...vehiclePose },
+          ...(layer ? { layer: structuredClone(layer) } : {}), ownerOpacity: owner?.opacity ?? 1,
+          ownerVisible: owner?.visible ?? true, initialTarget: target },
+      });
+    } catch (error) { notify(`L’aperçu de l’atelier est indisponible : ${projectError(error)}`); }
   };
 
   const changeWheelSurface = async (value: WheelSurfaceSettings) => {
@@ -1543,17 +1574,16 @@ export default function App() {
     } finally { busyRef.current = false; setBusy(null); }
   };
 
-  const applyWheelDesign = async (settings: WheelDesignSettings, target: WheelDesignTarget) => {
+  const applyWheelDesign = async (settings: WheelDesignArtwork, target: WheelDesignTarget) => {
     const editor = editorRef.current, session = wheelDesignSessionRef.current;
     if (!editor || !session || busyRef.current) throw new Error('L’atelier n’est plus disponible. Rouvrez-le depuis Roues.');
-    const definition = createWheelDesignDefinition(settings);
+    const definition = await createWheelArtworkDefinition(settings);
     const regions = target === 'both' ? ['tyres:outer', 'tyres:inner'] : [`tyres:${target}`];
     editor.endHistoryCoalescing();
     if (session.layerId && session.definition) {
       await editor.updateMaterialLayerDefinition(session.layerId, {
-        ...session.definition, wheelDesign: definition.wheelDesign,
+        ...mergeWheelArtworkDefinition(session.definition, definition),
         name: session.definition.name.startsWith('Flanc · ') ? definition.name : session.definition.name,
-        textures: { ...session.definition.textures, color: definition.textures.color },
       });
       if (target !== session.target) editor.setSelectionMaterialMask(regions, [], 'material-definition');
       editor.commitMaterialLayers();
@@ -1563,7 +1593,7 @@ export default function App() {
     }
     editor.endHistoryCoalescing();
     setWheelDesignSession(null); setTool('select'); setInspectorTab('materials');
-    notify(session.layerId ? 'Motif du flanc mis à jour. Le calque et sa finition sont conservés.' : 'Motif ajouté. Superposez d’autres calques ou modifiez-le dans Matières.');
+    notify(session.layerId ? 'Composition du flanc mise à jour. Le calque et sa finition sont conservés.' : 'Composition ajoutée. Retrouvez chaque élément dans l’atelier du flanc.');
   };
 
   const onMaterialMaskChange = (regions: string[], exclusions: string[]) => {
@@ -2939,7 +2969,7 @@ export default function App() {
     <>
       {family === 'wheels' && <Section title="Décoration des flancs">
         <button type="button" className="wheel-design-entry" disabled={!ready || !!busy || placingImage || !nativeWheelLayout} onClick={() => openWheelDesign()}>
-          <Icon name="circle" size={34} /><span><strong>Ouvrir l’atelier de flancs</strong><small>Anneaux, damiers, repères et lettrage.<br />Un motif précis, un calque éditable.</small></span><Icon name="chevronRight" size={15} />
+          <Icon name="circle" size={34} /><span><strong>Ouvrir l’atelier de flancs</strong><small>Composez formes, inscriptions et logos.<br />Chaque élément reste personnalisable.</small></span><Icon name="chevronRight" size={15} />
         </button>
         {!nativeWheelLayout && <p className="hint">Cet atelier utilise les flancs de la Stadium. Pour ce modèle, adaptez une image depuis Élément.</p>}
       </Section>}
@@ -3506,7 +3536,7 @@ export default function App() {
               </div>}
               <button type="button" className="btn btn-full" disabled={placingImage} onClick={() => setImagePlacement(null)}>Annuler le placement</button></div> : <>
             {mapDef.kind === 'illum' && inspectorTab !== 'layers' && renderLightPreview()}
-            {inspectorTab === 'materials' ? <>{selectedMaterialLayer?.definition.wheelDesign && <button type="button" className="wheel-design-entry wheel-design-edit" disabled={!ready || !!busy || placingImage} onClick={() => openWheelDesign(true)}><Icon name="circle" size={28} /><span><strong>Modifier le motif du flanc</strong><small>Rayon, largeur, rotation et inscription</small></span><Icon name="chevronRight" size={15} /></button>}<div className="relief-prototype-entry"><button type="button" className="btn btn-full" disabled={!ready || !!busy || placingImage} onClick={() => void openReliefPrototype()}><Icon name="box" size={15} /> Textures et relief · v1.0</button>{reliefSettings && <p className="hint">Pour modifier la hauteur, rouvrez l’atelier. Les calques règlent l’apparence.</p>}</div><MaterialsPanel family={family} islands={guideIslands} selectedRegion={selectedElement ?? selectedIsland ?? null} selection={selectedMaterialLayer}
+            {inspectorTab === 'materials' ? <>{selectedMaterialLayer?.definition.wheelDesign && <button type="button" className="wheel-design-entry wheel-design-edit" disabled={!ready || !!busy || placingImage} onClick={() => openWheelDesign(true)}><Icon name="circle" size={28} /><span><strong>Modifier le motif du flanc</strong><small>Éléments, couleurs, textes et logos</small></span><Icon name="chevronRight" size={15} /></button>}<div className="relief-prototype-entry"><button type="button" className="btn btn-full" disabled={!ready || !!busy || placingImage} onClick={() => void openReliefPrototype()}><Icon name="box" size={15} /> Textures et relief · v1.0</button>{reliefSettings && <p className="hint">Pour modifier la hauteur, rouvrez l’atelier. Les calques règlent l’apparence.</p>}</div><MaterialsPanel family={family} islands={guideIslands} selectedRegion={selectedElement ?? selectedIsland ?? null} selection={selectedMaterialLayer}
               disabled={!ready || !!busy || placingImage} onApply={(definition, regions, exclusions) => void onApplyMaterial(definition, regions, exclusions)}
               onChange={onMaterialChange} onChangeMask={onMaterialMaskChange} onCommit={() => { editorRef.current?.commitMaterialLayers(); endHistoryGesture(); }} onError={notify} onOpenRelief={(definition,regions,exclusions)=>void openReliefPrototype({definition,regions,exclusions})} /></>
             : inspectorTab === 'layers' ? renderLayers() : inspectorTab === 'texture' || tool === 'region' ? renderTextureProps() : tool !== 'select' ? (
@@ -3535,7 +3565,8 @@ export default function App() {
 
       {downloadsOpen && <DownloadDialog onClose={closeDownloads} onPrepareProject={downloadCurrentProject} onExport={onExport} horn={horn} onHornChange={setHorn} />}
 
-      {wheelDesignSession && <WheelDesignDialog initial={wheelDesignSession.definition?.wheelDesign} initialTarget={wheelDesignSession.target} editing={!!wheelDesignSession.layerId} onApply={applyWheelDesign} onClose={closeWheelDesign} />}
+      {wheelDesignSession && <WheelDesignDialog initial={wheelDesignSession.definition?.wheelDesign} initialTarget={wheelDesignSession.target} editing={!!wheelDesignSession.layerId} onApply={applyWheelDesign} onClose={closeWheelDesign}
+        modelPreview={wheelDesignSession.preview ? (artwork, target, onCoverageChange) => <WheelDesignModelPreview artwork={artwork} target={target} context={wheelDesignSession.preview!} onCoverageChange={onCoverageChange} /> : undefined} />}
 
       {reliefSession && <Suspense fallback={<div className="modal-overlay" role="status">Chargement de l’atelier de relief…</div>}><ReliefPrototypeDialog tyreTemplate={skin3d?.surfaceTemplate === 'tyres'} family={reliefSession.family} detailsLayout={reliefSession.detailsLayout} name={reliefSession.name} maps={reliefSession.maps} material={reliefSession.material} projectionGeometry={reliefSession.projectionGeometry} surfaceFiles={reliefSession.surfaceFiles} wheelSurface={reliefSession.wheelSurface} settings={reliefSession.settings??null} preserveMaterialMask={reliefSession.preferMaterial} baseVolume={reliefSession.baseVolume} onApply={applyRelief} onClose={closeReliefPrototype} onExport={downloadReliefPrototype} /></Suspense>}
 

@@ -35,8 +35,9 @@ import { hasWheelTreadAppearance, wheelTreadAppearanceCanvas, wheelTreadAppearan
 import type { Skin3DFile } from '../skin3d';
 import { hasExperimentalSkinNormalShader, previewMeshMaterialSlot } from './materialSlots';
 import type { UvGuideIsland } from '../uvGuideData';
-import { planUvFocus, uvFocusView, type UvFocusPlan } from './uvFocus';
-import { REAL_UV_ATLAS, type UvAtlasVersion } from '../realUvAtlas';
+import { planUvFocus, uvFocusTriangles, uvFocusView, type UvFocusPlan } from './uvFocus';
+import { REAL_UV_ATLAS, organizedAtlasGuides, type UvAtlasVersion } from '../realUvAtlas';
+import { WHEEL_PART_GUIDES } from '../wheelParts';
 
 /** Modèle servi statiquement depuis public/models/ (fiable en dev et prod). */
 const CAR_MODEL_RESOURCE_PATH = `${import.meta.env?.BASE_URL ?? '/'}models/car/`;
@@ -100,7 +101,7 @@ function fitModelToGround(root: THREE.Object3D): number {
 export class CarPreview {
   onModelReady: (() => void) | null = null;
   onUvFocusChange: ((focus: UvPreviewFocus | null) => void) | null = null;
-  private uvFocus: { region: UvGuideIsland; plan: UvFocusPlan; root: THREE.Group; isolated: boolean; previous: PreviewViewState; minDistance: number; near: number } | null = null;
+  private uvFocus: { region: UvGuideIsland; plan: UvFocusPlan; root: THREE.Group; isolated: boolean; previous: PreviewViewState; minDistance: number; near: number; wheelDesignPoints?: readonly Vec3[] } | null = null;
   private uvFocusScene: { projection: readonly ProjectionTriangle[]; triangles: readonly ProjectionTriangle[] } | null = null;
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
@@ -616,7 +617,7 @@ export class CarPreview {
     // déjà manipulée n'est jamais touchée.
     if (aspectChanged && this.uvFocus) {
       const direction = this.camera.position.clone().sub(this.controls.target).normalize();
-      this.restoreViewState(uvFocusView(this.uvFocus.plan.bounds, direction, this.camera.fov, aspect));
+      this.restoreViewState(uvFocusView(this.uvFocus.plan.bounds, direction, this.camera.fov, aspect, this.uvFocus.wheelDesignPoints));
     } else if (aspectChanged && !this.userNavigated) this.applyHomeFraming();
   }
 
@@ -1338,21 +1339,8 @@ export class CarPreview {
     }
     this.clearUvFocus(false);
     const root = new THREE.Group(); root.name = 'uv-focus-preview';
-    const geometry = new THREE.BufferGeometry();
-    const order = displayTriangles.map(t => {
-      const face = new THREE.Vector3(...t.points[1]).sub(new THREE.Vector3(...t.points[0])).cross(new THREE.Vector3(...t.points[2]).sub(new THREE.Vector3(...t.points[0])));
-      return t.normals && face.dot(new THREE.Vector3(...t.normals[0])) < 0 ? [0,2,1] : [0,1,2];
-    });
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(displayTriangles.flatMap((t,i) => order[i].flatMap(j=>t.points[j])), 3));
-    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(displayTriangles.flatMap((t,i) => order[i].flatMap(j=>t.uv[j])), 2));
-    if (displayTriangles.every(t => t.normals)) geometry.setAttribute('normal', new THREE.Float32BufferAttribute(displayTriangles.flatMap((t,i) => order[i].flatMap(j=>t.normals![j])), 3));
-    else geometry.computeVertexNormals();
-    // AO uses the same native UV set in the original meshes.
-    geometry.setAttribute('uv1', geometry.getAttribute('uv').clone());
-    if (region.family === 'wheels') ensureWheelTangentFrame(geometry);
-    const isolatedMesh = new THREE.Mesh(geometry, this.materialForSlot(region.family));
-    isolatedMesh.castShadow = true; isolatedMesh.receiveShadow = true;
-    isolatedMesh.userData.paintSlot = region.family; root.add(isolatedMesh);
+    const isolatedMesh = this.focusedMesh(displayTriangles, region.family), geometry = isolatedMesh.geometry;
+    root.add(isolatedMesh);
     const tyre = region.family === 'wheels';
     const outline = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, tyre ? 180 : 55), new THREE.LineBasicMaterial({ color: 0x7be4c7, transparent: true, opacity: tyre ? .4 : .8, depthTest: tyre, depthWrite: false }));
     outline.renderOrder = 20; root.add(outline); this.scene.add(root);
@@ -1362,6 +1350,89 @@ export class CarPreview {
     this.camera.near = Math.min(near, Math.max(.0001, span * .02)); this.camera.updateProjectionMatrix();
     this.applyUvFocusVisibility(); this.restoreViewState({ position: plan.position, target: plan.target });
     this.emitUvFocus(); return true;
+  }
+
+  private focusedMesh(triangles: readonly ProjectionTriangle[], family: ProjectionTriangle['family']): THREE.Mesh {
+    const geometry = new THREE.BufferGeometry();
+    const order = triangles.map(triangle => {
+      const face = new THREE.Vector3(...triangle.points[1]).sub(new THREE.Vector3(...triangle.points[0]))
+        .cross(new THREE.Vector3(...triangle.points[2]).sub(new THREE.Vector3(...triangle.points[0])));
+      return triangle.normals && face.dot(new THREE.Vector3(...triangle.normals[0])) < 0 ? [0, 2, 1] : [0, 1, 2];
+    });
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(triangles.flatMap((triangle, i) => order[i].flatMap(j => triangle.points[j])), 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(triangles.flatMap((triangle, i) => order[i].flatMap(j => triangle.uv[j])), 2));
+    if (triangles.every(triangle => triangle.normals)) geometry.setAttribute('normal', new THREE.Float32BufferAttribute(triangles.flatMap((triangle, i) => order[i].flatMap(j => triangle.normals![j])), 3));
+    else geometry.computeVertexNormals();
+    // AO uses the same native UV set in the original meshes.
+    geometry.setAttribute('uv1', geometry.getAttribute('uv').clone());
+    if (family === 'wheels') ensureWheelTangentFrame(geometry);
+    const mesh = new THREE.Mesh(geometry, this.materialForSlot(family));
+    mesh.castShadow = true; mesh.receiveShadow = true; mesh.userData.paintSlot = family;
+    return mesh;
+  }
+
+  /** The sidewall workshop uses the real wheel, its rim materials and current paint. */
+  focusWheelForDesign(side: 'outer' | 'inner' = 'outer'): boolean {
+    const guides = this.uvAtlas ? organizedAtlasGuides('wheels', this.detailsLayout) : WHEEL_PART_GUIDES;
+    const tread = guides.find(region => region.key === 'tyres:tread');
+    const occurrence = this.uvFocus?.plan.occurrence;
+    if (!tread || !this.focusUvRegion(tread, occurrence) || !this.uvFocus || !this.carBounds) return false;
+    const focus = this.uvFocus, projection = this.getProjectionTriangles();
+    // The tread box omits the bulging sidewalls. Follow the original tyre's
+    // connected vertices instead, including UV seams without clipping its lips.
+    const vertexKey = (point: Vec3) => point.map(value => Math.round(value * 10_000)).join(',');
+    const vertices = new Map<string, ProjectionTriangle[]>();
+    for (const triangle of projection) {
+      if (triangle.family !== 'wheels') continue;
+      for (const point of triangle.points) {
+        const key = vertexKey(point), neighbors = vertices.get(key) ?? [];
+        neighbors.push(triangle); vertices.set(key, neighbors);
+      }
+    }
+    const connected = new Set(focus.plan.triangles), tyre = [...connected];
+    for (let i = 0; i < tyre.length; i++) for (const point of tyre[i].points) {
+      const key = vertexKey(point), neighbors = vertices.get(key) ?? [];
+      vertices.delete(key);
+      for (const triangle of neighbors) if (!connected.has(triangle)) { connected.add(triangle); tyre.push(triangle); }
+    }
+    const wheelBounds = new THREE.Box3();
+    for (const triangle of tyre) for (const position of triangle.points) wheelBounds.expandByPoint(new THREE.Vector3(...position));
+    // The workshop is a material preview: selection outlines obscure markings.
+    for (const object of [...focus.root.children]) {
+      focus.root.remove(object);
+      if (object instanceof THREE.Mesh || object instanceof THREE.LineSegments) object.geometry.dispose();
+      if (object instanceof THREE.LineSegments) (object.material as THREE.Material).dispose();
+    }
+    const wheel = this.focusedMesh(tyre, 'wheels'); focus.root.add(wheel);
+    const framingPoints = tyre.flatMap(triangle => triangle.points);
+    // The hub and rim can protrude past the tyre's axial bounds. Keep the
+    // complete original faces rather than cutting them at the rubber profile.
+    const diameter = Math.max(wheelBounds.max.y - wheelBounds.min.y, wheelBounds.max.z - wheelBounds.min.z);
+    const bounds = wheelBounds.clone().expandByVector(new THREE.Vector3(diameter * .05, diameter * .01, diameter * .01)), point = new THREE.Vector3();
+    for (const family of ['skin', 'details'] as const) {
+      const triangles = projection.filter(triangle => triangle.family === family
+        && triangle.points.every(position => bounds.containsPoint(point.fromArray(position))));
+      if (triangles.length) { wheel.add(this.focusedMesh(triangles, family)); framingPoints.push(...triangles.flatMap(triangle => triangle.points)); }
+    }
+    this.setUvFocusIsolated(true);
+    const center = wheelBounds.getCenter(new THREE.Vector3()), carCenter = this.carBounds.getCenter(new THREE.Vector3());
+    const sideGuide = guides.find(region => region.key === 'tyres:outer'), axle = new THREE.Vector3();
+    const flank = sideGuide ? uvFocusTriangles(tyre, sideGuide) : [];
+    for (const triangle of flank) {
+      const face = new THREE.Vector3(...triangle.points[1]).sub(new THREE.Vector3(...triangle.points[0]))
+        .cross(new THREE.Vector3(...triangle.points[2]).sub(new THREE.Vector3(...triangle.points[0])));
+      const normal = triangle.normals ? new THREE.Vector3(...triangle.normals[0]).add(new THREE.Vector3(...triangle.normals[1])).add(new THREE.Vector3(...triangle.normals[2])).normalize() : face.clone().normalize();
+      axle.addScaledVector(normal, face.length());
+    }
+    if (axle.lengthSq() < 1e-10) axle.set(center.x >= carCenter.x ? 1 : -1, 0, 0);
+    axle.normalize();
+    const direction = axle.clone().multiplyScalar(side === 'inner' ? -1 : 1)
+      .add(new THREE.Vector3(0, .13, center.z >= carCenter.z ? .15 : -.15));
+    focus.plan.bounds = wheelBounds;
+    focus.wheelDesignPoints = framingPoints;
+    Object.assign(focus.plan, uvFocusView(wheelBounds, direction, this.camera.fov, this.camera.aspect, framingPoints));
+    this.restoreViewState(focus.plan);
+    this.requestRender(); return true;
   }
 
   private emitUvFocus() {
@@ -1383,6 +1454,7 @@ export class CarPreview {
   }
   clearUvFocus(restoreCamera = true) {
     this.requestRender();
+    this.camera.up.set(0, 1, 0);
     const focus = this.uvFocus; if (!focus) return;
     this.uvFocus = null;
     if (this.modelRoot) this.modelRoot.visible = true;
@@ -1394,6 +1466,7 @@ export class CarPreview {
     // The selected mesh shares the editor material: never dispose that material.
     this.controls.minDistance = focus.minDistance; this.camera.near = focus.near; this.camera.updateProjectionMatrix();
     if (restoreCamera) this.restoreViewState(focus.previous);
+    else this.updateGroundVisibility();
     this.emitUvFocus();
   }
 

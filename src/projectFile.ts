@@ -113,11 +113,12 @@ export function validateProjectDocument(value: unknown, assets: Set<string>): as
   }
   const image = (path: unknown) => { asset(path); if (typeof path !== 'string' || !/^assets\/image-\d+\.png$/.test(path)) fail('ressource image invalide.'); };
   let nodes = 0; let objects = 0;
-  const walk = (node: unknown, depth: number) => {
+  const walk = (node: unknown, depth: number, wheelPath = 0) => {
     if (++nodes > 500_000 || depth > 40) fail('configuration trop complexe.');
     if (typeof node === 'number' && (!Number.isFinite(node) || Math.abs(node) > 1e18)) fail('valeur numérique invalide.');
-    if (typeof node === 'string' && node.length > 200_000) fail('texte trop long.');
-    if (Array.isArray(node)) { node.forEach((entry) => walk(entry, depth + 1)); return; }
+    // Only the PNG field inside an already validated wheel composition gets the logo budget.
+    if (typeof node === 'string' && node.length > (wheelPath === 7 ? 400_000 : 200_000)) fail('texte trop long.');
+    if (Array.isArray(node)) { node.forEach((entry) => walk(entry, depth + 1, wheelPath === 4 ? 5 : 0)); return; }
     if (!record(node)) return;
     for (const key of Object.keys(node)) if (['__proto__', 'prototype', 'constructor'].includes(key)) fail('propriété interdite.');
     if (typeof node.type === 'string' && !OBJECT_TYPES.has(node.type.toLowerCase())) fail(`type de calque « ${node.type.slice(0, 40)} » non pris en charge.`);
@@ -154,7 +155,15 @@ export function validateProjectDocument(value: unknown, assets: Set<string>): as
       if ((objects += node.objects.length) > 5000) fail('5000 calques maximum.');
       if (node.objects.some((o) => !record(o) || typeof o.type !== 'string')) fail('calque invalide.');
     }
-    Object.values(node).forEach((entry) => walk(entry, depth + 1));
+    Object.entries(node).forEach(([key, entry]) => {
+      const next = key === 'materialLayer' ? 1
+        : wheelPath === 1 && key === 'definition' ? 2
+        : wheelPath === 2 && key === 'wheelDesign' ? 3
+        : wheelPath === 3 && key === 'elements' ? 4
+        : wheelPath === 5 && key === 'design' ? 6
+        : wheelPath === 6 && key === 'imageData' ? 7 : 0;
+      walk(entry, depth + 1, next);
+    });
   };
   walk(maps, 0);
   if (value.model !== null) {

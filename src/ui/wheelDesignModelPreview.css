@@ -1,0 +1,15 @@
+.wheel-design-model-preview { position: relative; width: 100%; height: 100%; min-height: 240px; overflow: hidden; border-radius: 10px; background: #151a20; }
+.wheel-design-model-canvas { position: absolute; inset: 0; }
+.wheel-design-model-canvas canvas { display: block; width: 100%; height: 100%; outline: none; }
+.wheel-design-model-tools { position: absolute; top: 10px; left: 10px; right: 10px; z-index: 2; display: flex; align-items: center; gap: 3px; width: fit-content; border: 1px solid var(--line); border-radius: 7px; padding: 3px; background: #151d23d9; }
+.wheel-design-model-tools button { display: inline-flex; justify-content: center; align-items: center; border: 0; border-radius: 4px; color: var(--fg-3); background: transparent; font-size: 9px; min-height: 25px; padding: 0 7px; cursor: pointer; }
+.wheel-design-model-tools button.is-active { color: var(--accent); background: var(--accent-soft); }
+.wheel-design-model-tools button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.wheel-design-model-tools button:disabled { opacity: .4; cursor: default; }
+.wheel-design-model-loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--fg-2); background: #151a20de; font-size: 10px; z-index: 3; }
+.wheel-design-model-caption { position: absolute; bottom: 12px; left: 12px; right: 12px; pointer-events: none; color: var(--fg-2); font-size: 9px; text-align: center; }
+.wheel-design-model-caption > span { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); margin-right: 5px; }
+.wheel-design-model-caption > span.is-updating { opacity: .5; }
+.wheel-design-model-caption small { display: block; font-size: 8px; color: var(--fg-3); margin-top: 5px; }
+.wheel-design-model-error { position: absolute; left: 10px; right: 10px; top: 48px; z-index: 3; padding: 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--bg-1); }
+.wheel-design-model-error p { font-size: 10px; line-height: 1.5; color: var(--fg-2); margin: 0 0 8px; }

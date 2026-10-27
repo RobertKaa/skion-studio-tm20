@@ -23,7 +23,7 @@ for (const invalid of [null, [], 7, 'ring', { ...DEFAULT_WHEEL_DESIGN, source: '
   { ...DEFAULT_WHEEL_DESIGN, radius: Infinity }, { ...DEFAULT_WHEEL_DESIGN, color: 'url(https://example.com)' },
   { ...DEFAULT_WHEEL_DESIGN, text: 'a\nB' }, { ...DEFAULT_WHEEL_DESIGN, text: '\u007f' },
   { ...DEFAULT_WHEEL_DESIGN, text: '\u202ereversed' }, { ...DEFAULT_WHEEL_DESIGN, text: ' ' },
-  { ...DEFAULT_WHEEL_DESIGN, text: 'A'.repeat(29) }, { ...DEFAULT_WHEEL_DESIGN, pattern: '__proto__' },
+  { ...DEFAULT_WHEEL_DESIGN, text: 'A'.repeat(65) }, { ...DEFAULT_WHEEL_DESIGN, pattern: '__proto__' },
   Object.assign(Object.create({ executable: true }), DEFAULT_WHEEL_DESIGN),
 ]) assert(!isValidWheelDesign(invalid), 'Unsafe or malformed settings must fail strict project validation');
 

@@ -7,7 +7,7 @@ import { heightPng, resizeHeight } from './heightPng';
 import { decodeHeightPNG } from '../relief/heightSource';
 
 export const MATERIAL_IMPORT_LIMITS = { files: 10, fileBytes: 64 * 1024 * 1024, totalBytes: 128 * 1024 * 1024,
-  pixels: 16 * 1024 * 1024, totalPixels: 64 * 1024 * 1024, dimension: 8192, manifestBytes: 256 * 1024 } as const;
+  pixels: 16 * 1024 * 1024, totalPixels: 64 * 1024 * 1024, dimension: 8192, manifestBytes: 1024 * 1024 } as const;
 export const MATERIAL_ARCHIVE_LIMITS = { entries: 256, archiveBytes: 256 * 1024 * 1024, expandedBytes: 512 * 1024 * 1024 } as const;
 export interface MaterialImportOptions { maxTextureSize?: 1024 | 2048 | 4096; targetChannel?: MaterialChannel }
 export interface MaterialImportResult { definition: MaterialDefinition; notices: string[]; preservedPlacement?: boolean }
@@ -287,16 +287,20 @@ async function readZipEntry(bytes: Uint8Array, entry: ZipEntry) {
 
 function safeManifest(value: unknown) {
   let nodes = 0;
-  const walk = (node: unknown, depth: number) => {
-    if (++nodes > 200 || depth > 5) fail('manifeste trop complexe.');
-    if (Array.isArray(node)) fail('structure de manifeste invalide.');
+  const walk = (node: unknown, depth: number, path: string) => {
+    if (++nodes > 1800 || depth > 10) fail('manifeste trop complexe.');
+    if (Array.isArray(node)) {
+      if (path !== 'material.wheelDesign.elements' || node.length > 24) fail('structure de manifeste invalide.');
+      node.forEach((element, index) => walk(element, depth + 1, `${path}.${index}`));
+      return;
+    }
     if (!record(node)) return;
     for (const [key, child] of Object.entries(node)) {
       if (forbidden.has(key)) fail('propriété interdite dans le manifeste.');
-      walk(child, depth + 1);
+      walk(child, depth + 1, path ? `${path}.${key}` : key);
     }
   };
-  walk(value, 0);
+  walk(value, 0, '');
 }
 
 async function importMaterialPack(file: File, preparedBytes?: Uint8Array): Promise<MaterialDefinition> {

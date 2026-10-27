@@ -109,13 +109,16 @@ class VisibilityIndex {
 const indices=new WeakMap<readonly ProjectionTriangle[],VisibilityIndex>();
 
 /** Perspective framing uses every box corner, including depth and narrow panels. */
-export function uvFocusView(bounds:THREE.Box3,direction:THREE.Vector3,fov:number,aspect:number) {
+export function uvFocusView(bounds:THREE.Box3,direction:THREE.Vector3,fov:number,aspect:number,points?:readonly Vec3[]) {
   const target=bounds.getCenter(new THREE.Vector3()),dir=direction.clone().normalize();
   if(Math.abs(dir.y)>.995)dir.z+=.025;dir.normalize();
   const forward=dir.clone().negate(),right=new THREE.Vector3().crossVectors(forward,new THREE.Vector3(0,1,0)).normalize(),up=new THREE.Vector3().crossVectors(right,forward).normalize();
   const tanV=Math.tan(THREE.MathUtils.degToRad(fov)/2)*.78,tanH=tanV*Math.max(.1,aspect);
   let distance=.04;const corner=new THREE.Vector3();
-  for(let i=0;i<8;i++){corner.set(i&1?bounds.max.x:bounds.min.x,i&2?bounds.max.y:bounds.min.y,i&4?bounds.max.z:bounds.min.z).sub(target);const z=corner.dot(forward);distance=Math.max(distance,Math.abs(corner.dot(right))/tanH-z,Math.abs(corner.dot(up))/tanV-z);}
+  for(let i=0;i<(points?.length??8);i++){
+    if(points)corner.fromArray(points[i]);else corner.set(i&1?bounds.max.x:bounds.min.x,i&2?bounds.max.y:bounds.min.y,i&4?bounds.max.z:bounds.min.z);
+    corner.sub(target);const z=corner.dot(forward);distance=Math.max(distance,Math.abs(corner.dot(right))/tanH-z,Math.abs(corner.dot(up))/tanV-z);
+  }
   return {target:target.toArray() as Vec3,position:target.clone().addScaledVector(dir,distance).toArray() as Vec3};
 }
 

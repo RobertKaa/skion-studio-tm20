@@ -379,7 +379,7 @@ export function MaterialsPanel({ family, islands, selectedRegion: chosenRegion, 
           title={draft.textures.dirt ? '100 % conserve les valeurs de l’image. 0 % supprime sa salissure.' : 'Intensité de la salissure.'} onChange={(dirt) => change({ ...draft, dirt })} onCommit={onCommit} />
         <div className="material-color-row"><span>Lumière</span><Swatch value={draft.emissionColor} title="Couleur de la lumière" showHex onChange={(emissionColor) => change({ ...draft, emissionColor })} /></div>
         <SliderField label="Intensité" value={draft.emissionStrength} min={0} max={1} step={.01} format={percent} onChange={(emissionStrength) => change({ ...draft, emissionStrength })} onCommit={onCommit} />
-        <label className="material-select-row">Activation<select aria-label="Activation de la lumière" value={draft.emissionRole} onChange={(event) => change({ ...draft, emissionRole: event.target.value as MaterialDefinition['emissionRole'] }, true)}><option value="always">Toujours</option><option value="head">Phares</option><option value="brake">Freinage</option></select></label>
+        {draft.textures.wheelEmissionRole ? <p className="hint">L’activation se règle pour chaque élément dans l’atelier de flancs.</p> : <label className="material-select-row">Activation<select aria-label="Activation de la lumière" value={draft.emissionRole} onChange={(event) => change({ ...draft, emissionRole: event.target.value as MaterialDefinition['emissionRole'] }, true)}><option value="always">Toujours</option><option value="head">Phares</option><option value="brake">Freinage</option></select></label>}
       </fieldset>
     </details>
     </div>

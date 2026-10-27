@@ -47,6 +47,7 @@ import { UNDERBODY_PANEL_LAYOUT, PANEL_BOUNDS, panelFrame, panelGuide, panelCanv
 import type { MaterialSurfaceOverlay } from '../materials/surfaceMaps';
 import { materialPngBytes } from '../materials/import';
 import { REAL_UV_ATLAS, realAtlasLayout, sourceAtlasGuides, organizedAtlasGuides, mappedMaterialRegions, placementMatrix, sourceAtlasGeometry, organizedAtlasGeometry, type UvAtlasVersion, type AtlasSourceLayout } from '../realUvAtlas';
+import type { WheelDesignPreviewMap } from '../wheelDesignPreview';
 
 // Full-atlas groups/clips must retain detail even when rendered to a 4096² texture.
 // Fabric's default cache budget would silently downsample these layers.
@@ -721,6 +722,86 @@ export class EditorCore {
   getExportIllumRoleCanvas(id: MapId) {
     this.commitMaterialLayers();
     return this.flatBackgroundOnly(id) ? this.getPreviewIllumRoleCanvas(id) : this.getIllumRoleCanvas(id);
+  }
+
+  /** Detached paint below/above the edited owner lets its live draft retain the actual layer order. */
+  captureWheelDesignPreviewMaps(excludedOwnerId?: string): Map<MapId, WheelDesignPreviewMap> {
+    this.commitMaterialLayers();
+    const result = new Map<MapId, WheelDesignPreviewMap>(), size = 512;
+    try {
+      for (const map of MAPS) {
+        const canvas = this.maps.get(map.id)!.canvas, objects = canvas.getObjects();
+        const excluded = (object: FabricObject) => !!excludedOwnerId
+          && ((object as EditorObject).id === excludedOwnerId || (object as EditorObject).linkedImageId === excludedOwnerId);
+        const cut = excludedOwnerId ? objects.findIndex(excluded) : -1;
+        const below = document.createElement('canvas'), above = document.createElement('canvas');
+        below.width = below.height = above.width = above.height = size;
+        result.set(map.id, { below, above });
+        const scale = size / MAP_BY_ID[map.id].workRes;
+        const canvasView = Object.assign(Object.create(canvas) as Canvas, {
+          skipOffscreen: false, viewportTransform: [scale, 0, 0, scale, 0, 0] as TMat2D,
+          enableRetinaScaling: false, preserveObjectStacking: false,
+        });
+        const render = (context: CanvasRenderingContext2D, object: FabricObject) => {
+          const views = new Map<FabricObject, FabricObject>();
+          const view = (source: FabricObject, group?: Group): FabricObject => {
+            const previous = views.get(source); if (previous) return previous;
+            const copy = Object.assign(Object.create(source) as FabricObject, {
+              canvas: canvasView, objectCaching: false, ownCaching: false, dirty: true,
+              selectionBackgroundColor: '', _cacheCanvas: undefined, _cacheContext: null,
+              ...(group ? { group, parent: group } : {}),
+            });
+            views.set(source, copy);
+            if (source.clipPath) copy.clipPath = view(source.clipPath as FabricObject);
+            if (source instanceof Group) {
+              Object.assign(copy, { _objects: source.getObjects().filter(child => child.visible && !isReference(child))
+                .map(child => view(child, copy as Group)) });
+            }
+            return copy;
+          };
+          try { view(object).render(context); }
+          finally {
+            for (const copy of views.values()) {
+              const cached = (copy as unknown as { _cacheCanvas?: HTMLCanvasElement })._cacheCanvas;
+              if (cached) cached.width = cached.height = 1;
+            }
+          }
+        };
+        for (const [target, start, end] of [[below, 0, cut < 0 ? objects.length : cut], [above, cut < 0 ? 0 : cut + 1, cut < 0 ? 0 : objects.length]] as const) {
+          const context = target.getContext('2d');
+          if (!context) throw new Error('L’aperçu de la peinture est indisponible.');
+          context.save();
+          try {
+            context.imageSmoothingEnabled = canvas.imageSmoothingEnabled;
+            (context as CanvasRenderingContext2D & { patternQuality: string }).patternQuality = canvas.patternQuality;
+            context.scale(scale, scale);
+            if (target === below) {
+              const background = canvas.backgroundColor;
+              if (background) {
+                context.fillStyle = typeof background === 'string' ? background : background.toLive(context)!;
+                context.fillRect(0, 0, canvas.width, canvas.height);
+              }
+              if (canvas.backgroundImage?.visible && !isReference(canvas.backgroundImage)) render(context, canvas.backgroundImage);
+            }
+            for (let index = start; index < end; index++) {
+              const object = objects[index];
+              if (!object.visible || isReference(object) || excluded(object)) continue;
+              render(context, object);
+            }
+          } finally { context.restore(); }
+        }
+        if (map.id === 'Wheels_I') {
+          const roles = document.createElement('canvas'); roles.width = roles.height = size;
+          const context = roles.getContext('2d')!; context.imageSmoothingEnabled = false;
+          context.drawImage(this.getPreviewIllumRoleCanvas(map.id), 0, 0, size, size);
+          result.get(map.id)!.roles = roles;
+        }
+      }
+      return result;
+    } catch (error) {
+      for (const { below, above, roles } of result.values()) { below.width = below.height = above.width = above.height = 1; if (roles) roles.width = roles.height = 1; }
+      throw error;
+    }
   }
 
   /** Marque le buffer texture d'une map comme obsolète (changement de contenu, pas de pan/zoom). */
@@ -2197,7 +2278,13 @@ export class EditorCore {
     this.materialInteractive = false; this.refreshLinkedImages(); this.flushTexture();
   }
 
-  getMaterialSurfaceOverlays(): readonly MaterialSurfaceOverlay[] { return this.materialSurfaces ?? []; }
+  getMaterialSurfaceOverlays(excludedOwnerId?: string): readonly MaterialSurfaceOverlay[] {
+    if (excludedOwnerId === undefined) return this.materialSurfaces ?? [];
+    return this.imageOwners().flatMap(({ image }) => {
+      const surface = image.visible && image.id !== excludedOwnerId ? this.materialBakes?.get(image.id!)?.surfaces : undefined;
+      return surface ? [surface] : [];
+    });
+  }
 
   private renderMaterialOwner(image: FabricImage & EditorObject, wanted: Set<string>) {
     const layer = image.materialLayer!;
@@ -2259,7 +2346,7 @@ export class EditorCore {
     if (layer.family === 'skin') targets.push(['coat', 'Skin_CoatR', 'coat']);
     for (const [channel, id, kind] of targets) {
       const canvas = bake.channels.get(channel);
-      if (canvas) this.upsertLinkedImage(image, id, canvas, kind, wanted, bake.frame);
+      if (canvas) this.upsertLinkedImage(image, id, canvas, kind, wanted, bake.frame, kind === 'light' ? bake.channels.get('wheelEmissionRole') : undefined);
     }
   }
 
@@ -2465,7 +2552,7 @@ export class EditorCore {
     this.projectionBakes.clear(); this.materialBakes.clear(); this.refreshLinkedImages(); this.flushTexture(); this.emit('layers'); this.emit('selection'); this.emit('dirty');
   }
 
-  private upsertLinkedImage(owner: FabricImage & EditorObject, mapId: MapId, bitmap: PixelSource | HTMLCanvasElement, kind: 'color' | 'material' | 'light' | 'coat' | 'dirt', wanted: Set<string>, frame?: { x: number; y: number; size: number }) {
+  private upsertLinkedImage(owner: FabricImage & EditorObject, mapId: MapId, bitmap: PixelSource | HTMLCanvasElement, kind: 'color' | 'material' | 'light' | 'coat' | 'dirt', wanted: Set<string>, frame?: { x: number; y: number; size: number }, roleCanvas?: HTMLCanvasElement) {
     const id = `${owner.id}:${mapId}`; wanted.add(id);
     const state = this.maps.get(mapId)!;
     let child = state.canvas.getObjects().find((object) => (object as EditorObject).id === id) as (FabricImage & EditorObject) | undefined;
@@ -2477,7 +2564,15 @@ export class EditorCore {
       try { state.canvas.add(child); } finally { state.suspendHistory = false; }
     } else child.setElement(canvas);
     child.name = `${kind === 'material' ? 'Matière' : kind === 'light' ? 'Lumière' : kind === 'coat' ? 'Vernis' : kind === 'dirt' ? 'Saleté' : 'Projection'} · ${owner.name || 'Image'}`;
-    if (kind === 'light') child.illumRole = owner.materialLayer?.definition.emissionRole ?? owner.imageLight?.role ?? owner.illumRole ?? 'always';
+    if (kind === 'light') {
+      child.illumRole = owner.materialLayer?.definition.emissionRole ?? owner.imageLight?.role ?? owner.illumRole ?? 'always';
+      if (roleCanvas) {
+        const pixels = roleCanvas.getContext('2d')!.getImageData(0, 0, roleCanvas.width, roleCanvas.height).data;
+        const codes = new Uint8Array(roleCanvas.width * roleCanvas.height);
+        for (let p = 0; p < codes.length; p++) codes[p] = pixels[p * 4 + 3] && pixels[p * 4] < 129 ? roleAlpha('brake') : roleAlpha('always');
+        child.illumCodes = encodeIllumCodes(roleCanvas.width, roleCanvas.height, codes);
+      } else child.illumCodes = undefined;
+    }
     child.set({ left: frame ? frame.x * TEXTURE_RESOLUTION / frame.size : 0, top: frame ? frame.y * TEXTURE_RESOLUTION / frame.size : 0, originX: 'left', originY: 'top', scaleX: TEXTURE_RESOLUTION / (frame?.size ?? bitmap.width), scaleY: TEXTURE_RESOLUTION / (frame?.size ?? bitmap.height), angle: 0, visible: owner.visible,
       opacity: owner.opacity, selectable: owner.selectable, evented: owner.evented, hasControls: false, hasBorders: false,
       lockMovementX: true, lockMovementY: true, lockRotation: true, lockScalingX: true, lockScalingY: true, perPixelTargetFind: true, objectCaching: false });
@@ -4167,7 +4262,9 @@ export class EditorCore {
       }
       this.endImageDrag(); this.endHistoryCoalescing();
       this.textureResolution = globals.textureResolution ?? TEXTURE_RESOLUTION;
-      this.projectionSources = sources; this.projectionBakes.clear();
+      // The loaded project may reuse owner IDs and source URLs from the previous
+      // project while its bake was created for an older model or projection.
+      this.projectionSources = sources; this.projectionBakes.clear(); this.materialBakes.clear();
       this.speedLightColor = globals.speedColor;
       for (const [id, temporary] of staged) {
         const state = this.maps.get(id)!; const canvas = state.canvas;

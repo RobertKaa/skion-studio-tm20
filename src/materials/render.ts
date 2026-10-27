@@ -496,9 +496,10 @@ export function renderMaterialLayer(layer: MaterialLayer, size: number, geometry
   if (!original) release(coverageSource);
   const generated = procedural(definition), output = new Map<MaterialRenderChannel, HTMLCanvasElement>();
   const normals=materialNormals(definition,size),ownsNormals=!!detailSources(definition).height;
-  for (const channel of ['color', 'roughmetal', 'coat', 'dirt', 'emission', 'normal', 'ao', 'height'] as const) {
+  for (const channel of ['color', 'roughmetal', 'coat', 'dirt', 'emission', 'wheelEmissionRole', 'normal', 'ao', 'height'] as const) {
     if(definition.surfaceOnly){if(channel==='color'){output.set('color',canvas(size));continue;}if(!['normal','ao','height'].includes(channel))continue;}
     if (channel === 'emission' && !textures.emission && definition.emissionStrength === 0) continue;
+    if (channel === 'wheelEmissionRole' && !textures.wheelEmissionRole) continue;
     if(channel==='normal'&&surfaceRelief(definition).source==='none')continue;
     if ((channel === 'normal' || channel === 'ao' || channel === 'height') && !textures[channel] && !generated.has(channel)&&!(channel==='normal'&&normals)) continue;
     const target = canvas(size), ctx = context(target);
@@ -523,7 +524,8 @@ export function renderMaterialLayer(layer: MaterialLayer, size: number, geometry
         }
         ctx.globalCompositeOperation = 'source-over';
       }
-    } else if (channel === 'normal') {const image=normals??generated.get(channel);if(!image){release(target);continue;}place(target,image,true);}
+    } else if (channel === 'wheelEmissionRole') place(target, colorImage(textures.wheelEmissionRole!, '#ffffff', 1, size));
+    else if (channel === 'normal') {const image=normals??generated.get(channel);if(!image){release(target);continue;}place(target,image,true);}
     else if (channel === 'ao') place(target, scalar(textures.ao!, 'gray', definition.aoStrength, size));
     else if (channel === 'height') place(target, textures.height ? materialHeight(definition,size) : generated.get(channel)!);
     else if (channel === 'emission') {

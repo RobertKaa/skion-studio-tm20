@@ -62,6 +62,64 @@ try{
   preview.clearUvFocus();assert.equal(status,null);assert(internals.modelRoot.visible);assert(new THREE.Vector3(...preview.getViewState().position).distanceTo(new THREE.Vector3(...original.position))<1e-10,'Tout revoir restores the previous camera');assert.deepEqual(preview.getViewState().target,original.target);
   assert(!scene.getObjectByName('uv-focus-preview'));assert.equal(camera.near,.02);
   const tread=paintIslandsForModel(undefined,'wheels')[0];assert(preview.focusUvRegion(tread));assert.equal(status!.occurrences,4,'Real FBX tyre UV has four spatially independent occurrences');const first=status!.occurrence;preview.nextUvFocusOccurrence();assert.equal(status!.occurrence,(first+1)%4);
+  const vertexSignature=(points:readonly (readonly number[])[],uv:readonly (readonly number[])[])=>points.map((p,i)=>[...p,...uv[i]].map(Math.fround).join(',')).sort().join('|');
+  const nativeTyres=native.filter(triangle=>triangle.family==='wheels');
+  for(let occurrence=0;occurrence<4;occurrence++)for(const side of ['outer','inner'] as const){
+    camera.aspect=[.7,1,2.1,1][occurrence];camera.updateProjectionMatrix();
+    assert(preview.focusUvRegion(tread,occurrence));assert.deepEqual(camera.up.toArray(),[0,1,0],'Generic part focus keeps the camera vertical');
+    assert(preview.focusWheelForDesign(side));
+    assert.deepEqual(camera.up.toArray(),[0,1,0],'Workshop retains a vertical camera rather than rotating the scene to orient the artwork');
+    const focus=internals.uvFocus,mesh=focus.root.children[0] as THREE.Mesh,position=mesh.geometry.getAttribute('position'),uv=mesh.geometry.getAttribute('uv');
+    camera.updateMatrixWorld();
+    const center=focus.plan!.bounds.getCenter(new THREE.Vector3());
+    const expected=nativeTyres.filter(triangle=>triangle.points.every(p=>Math.sign(p[0])===Math.sign(center.x)&&Math.sign(p[2])===Math.sign(center.z)));
+    assert.equal(expected.length,1224,'The real FBX contains a complete 1,224-triangle tyre per occurrence');
+    assert.equal(position.count,expected.length*3,'Workshop keeps every original sidewall triangle, including the bulging lips beyond the tread bounds');
+    const originals=new Set(expected.map(triangle=>vertexSignature(triangle.points,triangle.uv)));
+    let screenExtent=0;
+    for(let i=0;i<position.count;i+=3){
+      const points=[0,1,2].map(j=>new THREE.Vector3().fromBufferAttribute(position,i+j).toArray()),mapped=[0,1,2].map(j=>[uv.getX(i+j),uv.getY(i+j)]);
+      assert(originals.has(vertexSignature(points,mapped)),'Workshop uses original FBX vertices and UVs');
+      for(const point of points){const projected=new THREE.Vector3(...point).project(camera);assert(Math.abs(projected.x)<.82&&Math.abs(projected.y)<.82,'The whole tyre fits the workshop camera');screenExtent=Math.max(screenExtent,Math.abs(projected.x),Math.abs(projected.y));}
+    }
+    assert(screenExtent>.75,'Framing uses the real silhouette to fill the available desktop viewport');
+    assert.equal(studioRoot.visible,camera.position.y>=.02,'Workshop preserves the ordinary studio ground behavior');
+    assert(mesh.children.some(child=>child instanceof THREE.Mesh&&child.userData.paintSlot==='skin'),'Original rim paint is included');
+    assert(mesh.children.some(child=>child instanceof THREE.Mesh&&child.userData.paintSlot==='details'),'Original rim detail material is included');
+    assert(!focus.root.children.some(child=>child instanceof THREE.LineSegments),'Material preview has no selection wire overlay');
+    focus.root.updateMatrixWorld(true);
+    const rimPoint=center.clone().add(new THREE.Vector3(0,focus.plan!.bounds.getSize(new THREE.Vector3()).y*.45,0));
+    const hits=new THREE.Raycaster(camera.position,rimPoint.sub(camera.position).normalize()).intersectObjects(focus.root.children,true);
+    assert.equal(hits[0]?.object.userData.paintSlot,'wheels','The actual flanks face the camera rather than exposing the rim through missing rubber');
+    assert(side==='outer'?hits[0].uv!.x>.8:hits[0].uv!.x<.2,'Exterior/interior controls display the corresponding native tyre UV');
+    const fixed=preview.getViewState();for(let i=0;i<60;i++)controls.update();
+    assert(new THREE.Vector3(...preview.getViewState().position).distanceTo(new THREE.Vector3(...fixed.position))<1e-10,'Orbit damping does not move or zoom the focused wheel without input');
+    assert.equal(preview.getProjectionTriangles(),native,'Workshop never changes project/export geometry');
+  }
+  // Compare the real model and isolated wheel from the same viewpoints. This
+  // catches missing rim faces even when every tyre triangle is still present.
+  for(const side of ['outer','inner'] as const){
+    assert(preview.focusWheelForDesign(side));
+    const focus=internals.uvFocus, wheelBounds=focus.plan!.bounds.clone().expandByScalar(.02);
+    const raycaster=new THREE.Raycaster();let compared=0,missing=0;
+    camera.updateMatrixWorld(true);scene.updateMatrixWorld(true);
+    internals.modelRoot.visible=true;
+    try{
+      for(let y=0;y<32;y++)for(let x=0;x<32;x++){
+        raycaster.setFromCamera(new THREE.Vector2((x+.5)/16-1,1-(y+.5)/16),camera);
+        const source=raycaster.intersectObject(internals.modelRoot,true).find(hit=>wheelBounds.containsPoint(hit.point));
+        if(!source)continue;
+        const isolated=raycaster.intersectObject(focus.root,true).find(hit=>wheelBounds.containsPoint(hit.point));
+        compared++;
+        if(!isolated||Math.abs(source.distance-isolated.distance)>.0003)missing++;
+      }
+    }finally{internals.modelRoot.visible=false;}
+    assert(compared>150,`The ${side} comparison covers the visible wheel`);
+    assert(missing<=Math.ceil(compared*.01),`${side}: the isolated wheel must retain visible tyre and rim faces from the original model (${missing}/${compared} missing)`);
+  }
+  preview.clearUvFocus();assert.deepEqual(camera.up.toArray(),[0,1,0],'Closing wheel focus restores the vertical camera');
+  assert(preview.focusWheelForDesign());assert.deepEqual(camera.up.toArray(),[0,1,0]);
   preview.resetCamera();assert.equal(status,null);assert(internals.modelRoot.visible);
-  console.log(`✓ Actual Stadium FBX: mapped piece focus, four tyre occurrences, live isolation, clean snapshot, geometry intact and camera restore (${Math.round(performance.now()-started)} ms)`);
+  assert.deepEqual(camera.up.toArray(),[0,1,0],'Camera reset preserves the vertical camera');
+  console.log(`✓ Actual Stadium FBX: four complete wheels at desktop ratios, vertical/stable camera, native rims, clean snapshot and original geometry (${Math.round(performance.now()-started)} ms)`);
 }finally{preview.clearUvFocus(false);controls.dispose();(preview as unknown as {vehicleRig?:{dispose():void};playerDisplay?:{dispose():void}}).vehicleRig?.dispose();(preview as unknown as {playerDisplay?:{dispose():void}}).playerDisplay?.dispose();carRoot.traverse(o=>{if(o instanceof THREE.Mesh)o.geometry.dispose();});}
