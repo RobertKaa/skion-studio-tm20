@@ -77,6 +77,7 @@ __pycache__/
 !/scripts/test-relief-dialog.tsx
 !/scripts/test-relief-preview.ts
 !/scripts/test-dds.ts
+!/scripts/test-horn.ts
 !/scripts/test-app-optimisations.ts
 !/scripts/test-preview-surface-textures.ts
 !/scripts/test-details-sides.ts

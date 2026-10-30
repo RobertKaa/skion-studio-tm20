@@ -64,7 +64,9 @@ export function encodeHorn(channels: readonly Float32Array[], sampleRate: number
 }
 
 // A sustained, audible horn level, with separate peak headroom for its transients.
-const HORN_TARGET_RMS = 10 ** (-12 / 20);
+// Raise the sustained level by 6 dB over the previous -12 dBFS target.
+// The existing limiter still reserves 1 dB of peak headroom.
+const HORN_TARGET_RMS = 10 ** (-6 / 20);
 const HORN_PEAK_LIMIT = 10 ** (-1 / 20);
 const HORN_MAX_GAIN = 100;
 

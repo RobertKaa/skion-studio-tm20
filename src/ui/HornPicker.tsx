@@ -23,7 +23,7 @@ export function HornPicker({ horn, disabled, onChoose, onRemove }: {
 
   return <section className="download-horn" aria-labelledby="horn-title" aria-describedby="horn-help">
     <div className="download-horn-heading"><Icon name="volume" size={20} /><h3 id="horn-title">Klaxon du skin</h3><span>Facultatif</span></div>
-    <p id="horn-help">Ajoutez un son MP3, WAV ou OGG de 10 secondes maximum. Son volume sera équilibré automatiquement pour le jeu, avec une protection contre la saturation. Le son d’origine reste conservé dans votre projet.</p>
+    <p id="horn-help">Ajoutez un son MP3, WAV ou OGG de 10 secondes maximum. Son volume sera renforcé automatiquement pour le jeu, avec une protection contre la saturation. La préécoute correspond au son exporté. Le son d’origine reste conservé dans votre projet.</p>
     <input ref={input} type="file" accept=".mp3,.wav,.ogg,audio/mpeg,audio/wav,audio/ogg" aria-label="Fichier audio du klaxon" hidden disabled={disabled} onChange={(event) => {
       const file = event.target.files?.[0]; event.target.value = '';
       if (file) onChoose(file);
